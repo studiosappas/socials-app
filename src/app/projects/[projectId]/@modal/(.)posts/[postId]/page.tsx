@@ -1,0 +1,29 @@
+import { notFound } from "next/navigation";
+import { getPostPageData } from "@/lib/data/posts";
+import { PostEditor } from "../../../posts/[postId]/post-editor";
+import { Modal } from "../../../modal";
+
+export default async function InterceptedPostPage({
+  params,
+}: {
+  params: Promise<{ projectId: string; postId: string }>;
+}) {
+  const { projectId, postId } = await params;
+  const data = await getPostPageData(projectId, postId);
+
+  if (!data) notFound();
+
+  return (
+    <Modal>
+      <PostEditor
+        projectId={projectId}
+        post={data.post}
+        assets={data.assets}
+        links={data.links}
+        mediaLibrary={data.mediaLibrary}
+        canManage={data.canManage}
+        hideBackLink
+      />
+    </Modal>
+  );
+}

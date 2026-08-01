@@ -1,0 +1,220 @@
+import {
+  addMonths,
+  eachDayOfInterval,
+  endOfMonth,
+  endOfWeek,
+  format,
+  startOfMonth,
+  startOfWeek,
+  subMonths,
+} from "date-fns";
+import { createClient } from "@/lib/supabase/server";
+import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-board";
+
+const SIGNED_URL_TTL_SECONDS = 3600;
+
+export default async function CalendarPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ month?: string }>;
+}) {
+  const { projectId } = await params;
+  const { month: monthParam } = await searchParams;
+
+  const anchor = monthParam ? new Date(`${monthParam}-01T00:00:00`) : new Date();
+  const monthStart = startOfMonth(anchor);
+  const monthEnd = endOfMonth(anchor);
+  const gridStart = startOfWeek(monthStart);
+  const gridEnd = endOfWeek(monthEnd);
+
+  const monthStartStr = format(monthStart, "yyyy-MM-dd");
+  const monthEndStr = format(monthEnd, "yyyy-MM-dd");
+  const gridStartStr = format(gridStart, "yyyy-MM-dd");
+  const gridEndStr = format(gridEnd, "yyyy-MM-dd");
+
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  const { data: membership } = await supabase
+    .from("project_members")
+    .select("role")
+    .eq("project_id", projectId)
+    .eq("user_id", user!.id)
+    .single();
+
+  const canManage = membership?.role === "owner" || membership?.role === "admin";
+
+  const [
+    { data: scheduledPosts },
+    { data: scheduledStories },
+    { data: unscheduledPosts },
+    { data: unscheduledStories },
+  ] = await Promise.all([
+    supabase
+      .from("posts")
+      .select("id, post_type, scheduled_date")
+      .eq("project_id", projectId)
+      .gte("scheduled_date", monthStartStr)
+      .lte("scheduled_date", monthEndStr),
+    supabase
+      .from("stories")
+      .select("id, name, scheduled_date")
+      .eq("project_id", projectId)
+      .gte("scheduled_date", monthStartStr)
+      .lte("scheduled_date", monthEndStr),
+    supabase
+      .from("posts")
+      .select("id, post_type, scheduled_date")
+      .eq("project_id", projectId)
+      .is("scheduled_date", null),
+    supabase
+      .from("stories")
+      .select("id, name, scheduled_date")
+      .eq("project_id", projectId)
+      .is("scheduled_date", null),
+  ]);
+
+  const { data: calendarNotes } = await supabase
+    .from("calendar_notes")
+    .select("date, body")
+    .eq("project_id", projectId)
+    .gte("date", gridStartStr)
+    .lte("date", gridEndStr);
+
+  const noteByDate = new Map<string, string>();
+  for (const note of calendarNotes ?? []) {
+    noteByDate.set(note.date, note.body);
+  }
+
+  const allPostIds = [
+    ...(scheduledPosts ?? []).map((p) => p.id),
+    ...(unscheduledPosts ?? []).map((p) => p.id),
+  ];
+  const allStoryIds = [
+    ...(scheduledStories ?? []).map((s) => s.id),
+    ...(unscheduledStories ?? []).map((s) => s.id),
+  ];
+
+  const { data: postAssets } = allPostIds.length
+    ? await supabase
+        .from("post_assets")
+        .select("post_id, position, media_assets(storage_path)")
+        .in("post_id", allPostIds)
+        .order("position")
+    : { data: [] };
+
+  const { data: storyFrames } = allStoryIds.length
+    ? await supabase
+        .from("story_frames")
+        .select("story_id, position, media_assets(storage_path)")
+        .in("story_id", allStoryIds)
+        .order("position")
+    : { data: [] };
+
+  const pathSet = new Set<string>();
+  for (const a of postAssets ?? []) {
+    const p = (a.media_assets as { storage_path: string } | null)?.storage_path;
+    if (p) pathSet.add(p);
+  }
+  for (const f of storyFrames ?? []) {
+    const p = (f.media_assets as { storage_path: string } | null)?.storage_path;
+    if (p) pathSet.add(p);
+  }
+
+  const pathList = Array.from(pathSet);
+  const { data: signedUrls } = pathList.length
+    ? await supabase.storage.from("project-media").createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
+    : { data: [] };
+
+  const urlByPath = new Map<string, string>();
+  for (const entry of signedUrls ?? []) {
+    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
+  }
+
+  const thumbnailByPost = new Map<string, string | null>();
+  for (const a of postAssets ?? []) {
+    if (thumbnailByPost.has(a.post_id)) continue;
+    const path = (a.media_assets as { storage_path: string } | null)?.storage_path;
+    thumbnailByPost.set(a.post_id, path ? urlByPath.get(path) ?? null : null);
+  }
+
+  const thumbnailByStory = new Map<string, string | null>();
+  for (const f of storyFrames ?? []) {
+    if (thumbnailByStory.has(f.story_id)) continue;
+    const path = (f.media_assets as { storage_path: string } | null)?.storage_path;
+    thumbnailByStory.set(f.story_id, path ? urlByPath.get(path) ?? null : null);
+  }
+
+  const itemsByDate = new Map<string, CalendarItem[]>();
+  for (const post of scheduledPosts ?? []) {
+    if (!post.scheduled_date) continue;
+    const list = itemsByDate.get(post.scheduled_date) ?? [];
+    list.push({
+      itemType: "post",
+      itemId: post.id,
+      label: post.post_type,
+      thumbnailUrl: thumbnailByPost.get(post.id) ?? null,
+      href: `/projects/${projectId}/posts/${post.id}`,
+    });
+    itemsByDate.set(post.scheduled_date, list);
+  }
+  for (const story of scheduledStories ?? []) {
+    if (!story.scheduled_date) continue;
+    const list = itemsByDate.get(story.scheduled_date) ?? [];
+    list.push({
+      itemType: "story",
+      itemId: story.id,
+      label: story.name,
+      thumbnailUrl: thumbnailByStory.get(story.id) ?? null,
+      href: `/projects/${projectId}/stories/${story.id}`,
+    });
+    itemsByDate.set(story.scheduled_date, list);
+  }
+
+  const days = eachDayOfInterval({ start: gridStart, end: gridEnd });
+  const cells: CalendarCell[] = days.map((day) => {
+    const dateStr = format(day, "yyyy-MM-dd");
+    return {
+      date: dateStr,
+      dayNumber: day.getDate(),
+      isCurrentMonth: day.getMonth() === anchor.getMonth(),
+      isToday: dateStr === format(new Date(), "yyyy-MM-dd"),
+      items: itemsByDate.get(dateStr) ?? [],
+      note: noteByDate.get(dateStr) ?? null,
+    };
+  });
+
+  const unscheduled: CalendarItem[] = [
+    ...(unscheduledPosts ?? []).map((p) => ({
+      itemType: "post" as const,
+      itemId: p.id,
+      label: p.post_type,
+      thumbnailUrl: thumbnailByPost.get(p.id) ?? null,
+      href: `/projects/${projectId}/posts/${p.id}`,
+    })),
+    ...(unscheduledStories ?? []).map((s) => ({
+      itemType: "story" as const,
+      itemId: s.id,
+      label: s.name,
+      thumbnailUrl: thumbnailByStory.get(s.id) ?? null,
+      href: `/projects/${projectId}/stories/${s.id}`,
+    })),
+  ];
+
+  return (
+    <CalendarBoard
+      projectId={projectId}
+      monthLabel={format(anchor, "MMMM yyyy")}
+      prevMonthParam={format(subMonths(anchor, 1), "yyyy-MM")}
+      nextMonthParam={format(addMonths(anchor, 1), "yyyy-MM")}
+      cells={cells}
+      unscheduled={unscheduled}
+      canManage={canManage}
+    />
+  );
+}
