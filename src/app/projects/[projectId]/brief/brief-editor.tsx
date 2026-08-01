@@ -92,7 +92,7 @@ export function BriefEditor({
           <ToolbarButton
             active={editor.isActive("bulletList")}
             onClick={() => editor.chain().focus().toggleBulletList().run()}
-            label="â€¢ List"
+            label="• List"
           />
           <ToolbarButton
             active={editor.isActive("orderedList")}

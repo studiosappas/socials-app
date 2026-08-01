@@ -137,7 +137,7 @@ export function PostEditor({
         </DndContext>
         {orderedAssets.length === 0 && (
           <p className="text-xs text-muted">
-            No images yet â€” upload one or add from the library below.
+            No images yet — upload one or add from the library below.
           </p>
         )}
       </section>
@@ -266,7 +266,7 @@ function UploadAssetTile({
         title="Add frame"
         className="flex aspect-[3/4] items-center justify-center rounded border border-dashed border-border text-2xl text-muted hover:bg-black/[.03] disabled:opacity-60"
       >
-        {pending ? "â€¦" : "+"}
+        {pending ? "…" : "+"}
       </button>
       {state?.message && (
         <p className="col-span-full text-xs text-error">{state.message}</p>
