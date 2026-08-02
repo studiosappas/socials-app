@@ -137,17 +137,21 @@ export default async function CalendarPage({
   }
 
   const thumbnailByPost = new Map<string, string | null>();
+  const assetsByPost = new Map<string, string[]>();
   for (const a of postAssets ?? []) {
-    if (thumbnailByPost.has(a.post_id)) continue;
     const path = (a.media_assets as { storage_path: string } | null)?.storage_path;
-    thumbnailByPost.set(a.post_id, path ? urlByPath.get(path) ?? null : null);
+    const url = path ? urlByPath.get(path) ?? null : null;
+    if (!thumbnailByPost.has(a.post_id)) thumbnailByPost.set(a.post_id, url);
+    if (url) assetsByPost.set(a.post_id, [...(assetsByPost.get(a.post_id) ?? []), url]);
   }
 
   const thumbnailByStory = new Map<string, string | null>();
+  const assetsByStory = new Map<string, string[]>();
   for (const f of storyFrames ?? []) {
-    if (thumbnailByStory.has(f.story_id)) continue;
     const path = (f.media_assets as { storage_path: string } | null)?.storage_path;
-    thumbnailByStory.set(f.story_id, path ? urlByPath.get(path) ?? null : null);
+    const url = path ? urlByPath.get(path) ?? null : null;
+    if (!thumbnailByStory.has(f.story_id)) thumbnailByStory.set(f.story_id, url);
+    if (url) assetsByStory.set(f.story_id, [...(assetsByStory.get(f.story_id) ?? []), url]);
   }
 
   const itemsByDate = new Map<string, CalendarItem[]>();
@@ -159,6 +163,7 @@ export default async function CalendarPage({
       itemId: post.id,
       label: post.post_type,
       thumbnailUrl: thumbnailByPost.get(post.id) ?? null,
+      assetUrls: assetsByPost.get(post.id) ?? [],
       href: `/projects/${projectId}/posts/${post.id}`,
     });
     itemsByDate.set(post.scheduled_date, list);
@@ -171,6 +176,7 @@ export default async function CalendarPage({
       itemId: story.id,
       label: story.name,
       thumbnailUrl: thumbnailByStory.get(story.id) ?? null,
+      assetUrls: assetsByStory.get(story.id) ?? [],
       href: `/projects/${projectId}/stories/${story.id}`,
     });
     itemsByDate.set(story.scheduled_date, list);
@@ -195,6 +201,7 @@ export default async function CalendarPage({
       itemId: p.id,
       label: p.post_type,
       thumbnailUrl: thumbnailByPost.get(p.id) ?? null,
+      assetUrls: assetsByPost.get(p.id) ?? [],
       href: `/projects/${projectId}/posts/${p.id}`,
     })),
     ...(unscheduledStories ?? []).map((s) => ({
@@ -202,6 +209,7 @@ export default async function CalendarPage({
       itemId: s.id,
       label: s.name,
       thumbnailUrl: thumbnailByStory.get(s.id) ?? null,
+      assetUrls: assetsByStory.get(s.id) ?? [],
       href: `/projects/${projectId}/stories/${s.id}`,
     })),
   ];

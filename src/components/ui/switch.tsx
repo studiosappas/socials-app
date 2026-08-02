@@ -1,10 +1,14 @@
 export function Switch({
   name,
   defaultChecked,
+  checked,
+  onChange,
   disabled,
 }: {
-  name: string;
+  name?: string;
   defaultChecked?: boolean;
+  checked?: boolean;
+  onChange?: (checked: boolean) => void;
   disabled?: boolean;
 }) {
   return (
@@ -13,6 +17,8 @@ export function Switch({
         type="checkbox"
         name={name}
         defaultChecked={defaultChecked}
+        checked={checked}
+        onChange={onChange ? (e) => onChange(e.target.checked) : undefined}
         disabled={disabled}
         className="peer sr-only"
       />

@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   DndContext,
+  DragOverlay,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
+  type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
 import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
@@ -22,6 +24,10 @@ import {
   updatePost,
   uploadPostAsset,
 } from "@/lib/actions/posts";
+import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
+import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
+import { convertToTask } from "@/lib/actions/todo";
+import { Button } from "@/components/ui/button";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { PostStatus, PostType } from "@/types/database";
 
@@ -62,6 +68,7 @@ export function PostEditor({
   const router = useRouter();
   const [prevAssets, setPrevAssets] = useState(assets);
   const [orderedAssets, setOrderedAssets] = useState(assets);
+  const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
   if (assets !== prevAssets) {
@@ -73,7 +80,12 @@ export function PostEditor({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
 
+  function handleDragStart(event: DragStartEvent) {
+    setActiveAssetId(event.active.id as string);
+  }
+
   function handleDragEnd(event: DragEndEvent) {
+    setActiveAssetId(null);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
@@ -89,19 +101,54 @@ export function PostEditor({
     });
   }
 
+  const activeAsset = orderedAssets.find((a) => a.postAssetId === activeAssetId) ?? null;
+
   const usedMediaIds = new Set(orderedAssets.map((a) => a.mediaAssetId));
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
+  const [downloading, setDownloading] = useState(false);
+  async function handleDownloadAll() {
+    setDownloading(true);
+    try {
+      const zipAssets = orderedAssets
+        .filter((a): a is typeof a & { url: string } => Boolean(a.url))
+        .map((a, i) => ({ url: a.url, filename: filenameFromUrl(a.url, `asset-${i + 1}`) }));
+      await downloadAssetsAsZip(zipAssets, `post-${post.id}-assets.zip`);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const [addedToTodo, setAddedToTodo] = useState(false);
+  function handleAddToTodo() {
+    startTransition(async () => {
+      await convertToTask(projectId, "post", post.id, post.post_type, post.scheduled_date);
+      setAddedToTodo(true);
+    });
+  }
+
   return (
     <div className="flex flex-col gap-8">
-      {!hideBackLink && (
-        <Link
-          href={`/projects/${projectId}/grid`}
-          className="text-sm text-muted hover:underline"
+      <div className="flex items-center justify-between">
+        {!hideBackLink ? (
+          <Link
+            href={`/projects/${projectId}/grid`}
+            className="text-sm text-muted hover:underline"
+          >
+            ← Back to grid
+          </Link>
+        ) : (
+          <span />
+        )}
+        <button
+          type="button"
+          onClick={handleAddToTodo}
+          disabled={addedToTodo}
+          className="text-xs tracking-wide text-muted uppercase hover:text-foreground disabled:opacity-60"
         >
-          â† Back to grid
-        </Link>
-      )}
+          {addedToTodo ? "Added to To-Do" : "+ Add to To-Do"}
+        </button>
+      </div>
 
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-semibold">Assets</h2>
@@ -109,7 +156,9 @@ export function PostEditor({
           id={`post-dnd-${post.id}`}
           sensors={sensors}
           collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
+          onDragCancel={() => setActiveAssetId(null)}
         >
           <SortableContext
             items={orderedAssets.map((a) => a.postAssetId)}
@@ -134,7 +183,26 @@ export function PostEditor({
               )}
             </div>
           </SortableContext>
+
+          <DragOverlay dropAnimation={DROP_ANIMATION}>
+            {activeAsset && (
+              <div className="aspect-[3/4] w-20 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+                <AssetPreview asset={activeAsset} />
+              </div>
+            )}
+          </DragOverlay>
         </DndContext>
+        {orderedAssets.length > 0 && (
+          <Button
+            type="button"
+            variant="primary"
+            onClick={handleDownloadAll}
+            disabled={downloading}
+            className="self-start"
+          >
+            {downloading ? "Preparing…" : "Download all"}
+          </Button>
+        )}
         {orderedAssets.length === 0 && (
           <p className="text-xs text-muted">
             No images yet — upload one or add from the library below.
@@ -178,6 +246,20 @@ export function PostEditor({
   );
 }
 
+function AssetPreview({ asset }: { asset: PostAssetItem }) {
+  return (
+    <>
+      {asset.url && asset.mediaType === "image" && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={asset.url} alt="" className="h-full w-full object-cover" draggable={false} />
+      )}
+      {asset.url && asset.mediaType === "video" && (
+        <video src={asset.url} className="h-full w-full object-cover" muted />
+      )}
+    </>
+  );
+}
+
 function SortableAsset({
   asset,
   canManage,
@@ -189,6 +271,7 @@ function SortableAsset({
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: asset.postAssetId,
+    transition: SORTABLE_TRANSITION,
   });
 
   const style = {
@@ -201,17 +284,11 @@ function SortableAsset({
       ref={setNodeRef}
       style={style}
       {...(canManage ? { ...attributes, ...listeners } : {})}
-      className={`relative aspect-[3/4] touch-none overflow-hidden rounded border border-border ${
+      className={`relative aspect-[3/4] touch-none overflow-hidden rounded border border-border transition-opacity duration-150 ${
         canManage ? "cursor-grab" : ""
-      } ${isDragging ? "opacity-50" : ""}`}
+      } ${isDragging ? "opacity-30" : ""}`}
     >
-      {asset.url && asset.mediaType === "image" && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={asset.url} alt="" className="h-full w-full object-cover" draggable={false} />
-      )}
-      {asset.url && asset.mediaType === "video" && (
-        <video src={asset.url} className="h-full w-full object-cover" muted />
-      )}
+      <AssetPreview asset={asset} />
       {canManage && (
         <button
           type="button"
@@ -221,7 +298,7 @@ function SortableAsset({
           }}
           className="absolute right-1 top-1 rounded bg-black/70 px-1.5 text-xs text-white"
         >
-          âœ•
+          ✕
         </button>
       )}
     </div>
@@ -342,7 +419,7 @@ function PostDetailsForm({
       </label>
 
       <label className="flex flex-col gap-1 text-sm">
-        Notes for the designer
+        Notes
         <textarea
           name="notes"
           defaultValue={post.notes}

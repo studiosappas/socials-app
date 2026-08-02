@@ -4,6 +4,7 @@ export type PostType = "post" | "reel" | "carousel";
 export type PostStatus = "draft" | "scheduled" | "published";
 export type DesignTaskStatus = "open" | "in_progress" | "done";
 export type MediaType = "image" | "video";
+export type TaskSourceType = "manual" | "post" | "story";
 
 export interface Database {
   public: {
@@ -263,6 +264,37 @@ export interface Database {
         Row: { project_id: string; body_json: object; updated_at: string };
         Insert: { project_id: string; body_json?: object };
         Update: { body_json?: object };
+        Relationships: [];
+      };
+      tasks: {
+        Row: {
+          id: string;
+          user_id: string;
+          project_id: string | null;
+          title: string;
+          notes: string;
+          due_date: string | null;
+          completed: boolean;
+          source_type: TaskSourceType;
+          source_id: string | null;
+          created_at: string;
+        };
+        Insert: {
+          user_id: string;
+          project_id?: string | null;
+          title: string;
+          notes?: string;
+          due_date?: string | null;
+          completed?: boolean;
+          source_type?: TaskSourceType;
+          source_id?: string | null;
+        };
+        Update: {
+          title?: string;
+          notes?: string;
+          due_date?: string | null;
+          completed?: boolean;
+        };
         Relationships: [];
       };
     };

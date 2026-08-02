@@ -1,15 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-
-const NAV_ITEMS = [
-  { href: "", label: "Overview" },
-  { href: "grid", label: "Grid" },
-  { href: "calendar", label: "Calendar" },
-  { href: "stories", label: "Stories" },
-  { href: "brief", label: "Brief" },
-  { href: "members", label: "Members" },
-];
+import { NavTabs } from "./nav-tabs";
 
 export default async function ProjectLayout({
   children,
@@ -42,17 +34,7 @@ export default async function ProjectLayout({
             <span>/</span>
             <span className="text-foreground">{project.name}</span>
           </div>
-          <nav className="flex gap-6 text-xs tracking-wide uppercase">
-            {NAV_ITEMS.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href ? `/projects/${projectId}/${item.href}` : `/projects/${projectId}`}
-                className="text-muted hover:text-foreground"
-              >
-                {item.label}
-              </Link>
-            ))}
-          </nav>
+          <NavTabs projectId={projectId} />
         </div>
       </header>
       <div className="mx-auto w-full max-w-6xl flex-1 p-6">{children}</div>

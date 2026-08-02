@@ -1,19 +1,24 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   DndContext,
+  DragOverlay,
   PointerSensor,
-  useDroppable,
+  closestCenter,
   useSensor,
   useSensors,
+  type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
-import { addGridRow, removeGridRow, placeMediaInSlot } from "@/lib/actions/grid";
-import { MediaLibrary } from "./media-library";
+import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { addGridRow, removeGridRow, placeMediaInSlot, reorderGridPosts } from "@/lib/actions/grid";
+import { MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
+import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import type { MediaType, Platform } from "@/types/database";
 
 export type MediaLibraryItem = { id: string; url: string | null; mediaType: MediaType };
@@ -66,13 +71,89 @@ export function GridBoard({
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
+  const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
+  const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
 
+  // Optimistic override so a slot reorder renders immediately instead of
+  // waiting for the server round-trip + router.refresh() to land — otherwise
+  // the grid visibly snaps back to the old order for a beat after drop.
+  const [prevRows, setPrevRows] = useState(rows);
+  const [overrideRows, setOverrideRows] = useState<GridBoardRow[] | null>(null);
+  if (rows !== prevRows) {
+    setPrevRows(rows);
+    setOverrideRows(null);
+  }
+  const effectiveRows = overrideRows ?? rows;
+
+  const flatSlots = effectiveRows.flatMap((row) => row.slots);
+  const flatSlotIds = flatSlots.map((slot) => slot.id);
+
+  function handleDragStart(event: DragStartEvent) {
+    const data = event.active.data.current;
+    if (data?.type === "slot") {
+      setActiveSlot((data.slot as GridBoardSlot | undefined) ?? null);
+      return;
+    }
+    setActiveMedia((data?.item as MediaLibraryItem | undefined) ?? null);
+  }
+
   function handleDragEnd(event: DragEndEvent) {
-    const mediaAssetId = event.active.data.current?.mediaAssetId as string | undefined;
-    const slotId = event.over?.data.current?.slotId as string | undefined;
+    setActiveMedia(null);
+    setActiveSlot(null);
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeData = active.data.current;
+
+    if (activeData?.type === "slot") {
+      const oldIndex = flatSlotIds.indexOf(active.id as string);
+      const newIndex = flatSlotIds.indexOf(over.id as string);
+      if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+
+      const oldPostIds = flatSlots.map((slot) => slot.postId);
+      const newPostIds = arrayMove(oldPostIds, oldIndex, newIndex);
+      const updates = flatSlotIds
+        .map((slotId, i) => ({ slotId, postId: newPostIds[i] }))
+        .filter((update, i) => newPostIds[i] !== oldPostIds[i]);
+
+      if (updates.length === 0) return;
+
+      const postIdBySlotId = new Map(flatSlotIds.map((slotId, i) => [slotId, newPostIds[i]]));
+      const postInfoByPostId = new Map<string, { thumbnailUrl: string | null; assetCount: number }>();
+      for (const slot of flatSlots) {
+        if (slot.postId) {
+          postInfoByPostId.set(slot.postId, { thumbnailUrl: slot.thumbnailUrl, assetCount: slot.assetCount });
+        }
+      }
+      setOverrideRows(
+        effectiveRows.map((row) => ({
+          ...row,
+          slots: row.slots.map((slot) => {
+            const newPostId = postIdBySlotId.get(slot.id) ?? slot.postId;
+            if (newPostId === slot.postId) return slot;
+            const info = newPostId ? postInfoByPostId.get(newPostId) : undefined;
+            return {
+              ...slot,
+              postId: newPostId,
+              thumbnailUrl: info?.thumbnailUrl ?? null,
+              assetCount: info?.assetCount ?? 0,
+            };
+          }),
+        })),
+      );
+
+      startTransition(async () => {
+        await reorderGridPosts(projectId, updates);
+        router.refresh();
+      });
+      return;
+    }
+
+    const mediaAssetId = activeData?.mediaAssetId as string | undefined;
+    const slotId = (over.data.current?.slotId as string | undefined) ?? (over.id as string);
     if (!mediaAssetId || !slotId) return;
 
     startTransition(async () => {
@@ -82,7 +163,17 @@ export function GridBoard({
   }
 
   return (
-    <DndContext id={`grid-dnd-${projectId}`} sensors={sensors} onDragEnd={handleDragEnd}>
+    <DndContext
+      id={`grid-dnd-${projectId}`}
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragCancel={() => {
+        setActiveMedia(null);
+        setActiveSlot(null);
+      }}
+    >
       <div className="flex flex-col gap-10 lg:flex-row">
         <div className="w-full lg:w-56 lg:shrink-0">
           <BrandPanel
@@ -106,22 +197,35 @@ export function GridBoard({
         </div>
 
         <div className="flex flex-1 flex-col gap-2">
-          {rows.map((row) => (
-            <GridRow key={row.id} row={row} projectId={projectId} canManage={canManage} />
-          ))}
-          {rows.length === 0 && (
+          <SortableContext items={flatSlotIds} strategy={rectSortingStrategy}>
+            {effectiveRows.map((row) => (
+              <GridRow key={row.id} row={row} projectId={projectId} canManage={canManage} />
+            ))}
+          </SortableContext>
+          {effectiveRows.length === 0 && (
             <p className="text-sm text-muted">No rows yet — add one to start building the feed.</p>
           )}
-          {canManage && (
-            <form action={addGridRow.bind(null, projectId)} className="mt-2">
-              <button
-                type="submit"
+          <div className="mt-2 flex items-center gap-2">
+            {canManage && (
+              <form action={addGridRow.bind(null, projectId)}>
+                <button
+                  type="submit"
+                  className="rounded-md border border-border px-4 py-2 text-xs tracking-wide uppercase hover:border-foreground/30"
+                >
+                  + Add row
+                </button>
+              </form>
+            )}
+            {effectiveRows.length > 0 && (
+              <a
+                href={`/projects/${projectId}/grid/export`}
+                download
                 className="rounded-md border border-border px-4 py-2 text-xs tracking-wide uppercase hover:border-foreground/30"
               >
-                + Add row
-              </button>
-            </form>
-          )}
+                Export grid
+              </a>
+            )}
+          </div>
         </div>
 
         {canManage && (
@@ -130,6 +234,22 @@ export function GridBoard({
           </div>
         )}
       </div>
+
+      <DragOverlay dropAnimation={DROP_ANIMATION}>
+        {activeMedia && (
+          <div className="aspect-square w-24 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+            <MediaThumbPreview item={activeMedia} />
+          </div>
+        )}
+        {activeSlot && (
+          <div className="aspect-[4/5] w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+            {activeSlot.thumbnailUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={activeSlot.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            ) : null}
+          </div>
+        )}
+      </DragOverlay>
     </DndContext>
   );
 }
@@ -144,9 +264,9 @@ function GridRow({
   canManage: boolean;
 }) {
   return (
-    <div className="group relative grid grid-cols-3 gap-1">
+    <div className="group relative grid grid-cols-3 gap-[2px]">
       {row.slots.map((slot) => (
-        <GridSlot key={slot.id} slot={slot} projectId={projectId} />
+        <GridSlot key={slot.id} slot={slot} projectId={projectId} canManage={canManage} />
       ))}
       {canManage && (
         <form
@@ -166,22 +286,56 @@ function GridRow({
   );
 }
 
-function GridSlot({ slot, projectId }: { slot: GridBoardSlot; projectId: string }) {
-  const { isOver, setNodeRef } = useDroppable({
-    id: `slot-${slot.id}`,
-    data: { slotId: slot.id },
-  });
+function GridSlot({
+  slot,
+  projectId,
+  canManage,
+}: {
+  slot: GridBoardSlot;
+  projectId: string;
+  canManage: boolean;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
+    useSortable({
+      id: slot.id,
+      data: { type: "slot", slotId: slot.id, slot },
+      // Boolean `disabled` disables both drag AND drop in dnd-kit — pass the object
+      // form so empty/view-only slots stay valid *drop* targets, just not pick-uppable.
+      disabled: { draggable: !slot.postId || !canManage, droppable: !canManage },
+      transition: SORTABLE_TRANSITION,
+    });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
 
   const content = (
     <div
       ref={setNodeRef}
-      className={`relative flex aspect-[4/5] items-center justify-center overflow-hidden border ${
-        slot.thumbnailUrl ? "border-border" : "border-dashed border-border"
-      } ${isOver ? "outline outline-1 outline-offset-[-1px] outline-foreground" : ""}`}
+      style={style}
+      {...(slot.postId && canManage ? { ...attributes, ...listeners } : {})}
+      className={`relative flex aspect-[4/5] items-center justify-center overflow-hidden border transition-[outline-color,border-color] duration-150 ${
+        slot.postId && canManage ? "cursor-grab touch-none" : ""
+      } ${
+        slot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
+      } ${
+        isDragging ? "opacity-30" : ""
+      } ${
+        isOver
+          ? "outline outline-1 outline-offset-[-1px] outline-foreground"
+          : "outline outline-1 outline-offset-[-1px] outline-transparent"
+      }`}
     >
       {slot.thumbnailUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={slot.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+        <img
+          key={slot.thumbnailUrl}
+          src={slot.thumbnailUrl}
+          alt=""
+          className="h-full w-full animate-settle-in object-cover"
+          draggable={false}
+        />
       ) : (
         <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
       )}

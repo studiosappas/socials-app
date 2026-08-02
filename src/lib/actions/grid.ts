@@ -141,3 +141,25 @@ export async function placeMediaInSlot(
 
   revalidatePath(`/projects/${projectId}/grid`);
 }
+
+export async function reorderGridPosts(
+  projectId: string,
+  updates: { slotId: string; postId: string | null }[],
+) {
+  if (updates.length === 0) return;
+
+  const supabase = await createClient();
+
+  const results = await Promise.all(
+    updates.map(({ slotId, postId }) =>
+      supabase.from("grid_slots").update({ post_id: postId }).eq("id", slotId),
+    ),
+  );
+
+  const failed = results.find((r) => r.error);
+  if (failed?.error) {
+    throw new Error(failed.error.message);
+  }
+
+  revalidatePath(`/projects/${projectId}/grid`);
+}

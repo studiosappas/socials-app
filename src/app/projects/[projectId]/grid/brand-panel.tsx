@@ -9,7 +9,7 @@ import { Dialog } from "@/components/ui/dialog";
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
 const inputClass =
-  "border-0 border-b border-border bg-transparent py-1 text-sm focus:border-foreground focus:outline-none";
+  "w-full border-0 border-b border-border bg-transparent py-1 text-sm focus:border-foreground focus:outline-none";
 
 export function BrandPanel({
   projectId,
@@ -51,63 +51,88 @@ export function BrandPanel({
     undefined,
   );
   const [profileOpen, setProfileOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const editable = canManage && editMode;
 
   return (
     <div className="flex flex-col gap-8 text-sm">
-      <form action={action} className="flex flex-col gap-6">
-        <label className="flex flex-col gap-1.5">
+      {canManage && (
+        <div className="flex items-center justify-between">
+          <span className={labelClass}>Edit Mode</span>
+          <Switch checked={editMode} onChange={setEditMode} />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <Button type="button" variant="secondary" onClick={() => setProfileOpen(true)} className="w-full">
+          Edit Profile
+        </Button>
+        <Button type="button" variant="secondary" onClick={() => setNotesOpen(true)} className="w-full">
+          Add Notes
+        </Button>
+      </div>
+
+      <form action={action} className="flex flex-col gap-8">
+        <div className="flex flex-col gap-1.5">
           <span className={labelClass}>Platform</span>
-          <select name="platform" defaultValue={platform} disabled={!canManage} className={inputClass}>
-            <option value="instagram">Instagram</option>
-            <option value="tiktok">TikTok</option>
-          </select>
-        </label>
+          {editable ? (
+            <select name="platform" defaultValue={platform} className={inputClass}>
+              <option value="instagram">Instagram</option>
+              <option value="tiktok">TikTok</option>
+            </select>
+          ) : (
+            <p className="text-sm capitalize">{platform}</p>
+          )}
+        </div>
 
-        <p className={labelClass}>
-          {postsCount} posts / 0 highlights
-        </p>
+        <p className={labelClass}>{postsCount} posts</p>
 
-        <div className="flex flex-col gap-2 border-t border-border pt-6">
-          <div className="flex items-center justify-between">
-            <span className={labelClass}>Profile preview</span>
-            <button
-              type="button"
-              onClick={() => setProfileOpen(true)}
-              className="text-xs tracking-wide underline underline-offset-2 hover:text-muted"
-            >
-              Edit profile preview
-            </button>
-          </div>
+        <div className="flex flex-col gap-1.5">
+          <span className={labelClass}>Profile preview</span>
           <p className="text-xs text-muted">
             Username, bio, followers &amp; photo shown on the profile preview.
           </p>
         </div>
 
-        <div className="flex flex-col gap-1.5 border-t border-border pt-6">
+        <div className="flex flex-col gap-1.5">
           <span className={labelClass}>Account (Instagram handle)</span>
-          <input name="ig_handle" defaultValue={igHandle} placeholder="@handle" disabled={!canManage} className={inputClass} />
-          <p className="text-[11px] text-muted">Manual reference only — not a live connection.</p>
+          {editable ? (
+            <>
+              <input name="ig_handle" defaultValue={igHandle} placeholder="@handle" className={inputClass} />
+              <p className="text-[11px] text-muted">Manual reference only — not a live connection.</p>
+            </>
+          ) : (
+            <p className="text-sm">{igHandle || "—"}</p>
+          )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-border pt-6">
+        <div className="flex items-center justify-between">
           <span className={labelClass}>Scheduled dates</span>
-          <Switch name="show_scheduled_dates" defaultChecked={showScheduledDates} disabled={!canManage} />
+          {editable ? (
+            <Switch name="show_scheduled_dates" defaultChecked={showScheduledDates} />
+          ) : (
+            <span className="text-sm text-muted">{showScheduledDates ? "On" : "Off"}</span>
+          )}
         </div>
 
-        <div className="flex flex-col gap-1.5 border-t border-border pt-6">
+        <div className="flex flex-col gap-1.5">
           <span className={labelClass}>Notes &amp; settings</span>
           <p className="text-sm">{projectName}</p>
-          <textarea
-            name="brand_notes"
-            defaultValue={brandNotes}
-            disabled={!canManage}
-            rows={6}
-            placeholder="Brand voice, content pillars, posting cadence..."
-            className="rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus:border-foreground focus:outline-none"
-          />
+          {editable ? (
+            <textarea
+              name="brand_notes"
+              defaultValue={brandNotes}
+              rows={6}
+              placeholder="Brand voice, content pillars, posting cadence..."
+              className="rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus:border-foreground focus:outline-none"
+            />
+          ) : (
+            <p className="whitespace-pre-wrap text-sm text-muted">{brandNotes || "No notes yet."}</p>
+          )}
         </div>
 
-        {canManage && (
+        {editable && (
           <Button type="submit" variant="primary" disabled={pending} className="self-start">
             {pending ? "Saving..." : "Save"}
           </Button>
@@ -129,7 +154,81 @@ export function BrandPanel({
         igWebsiteLink={igWebsiteLink}
         profilePhotoUrl={profilePhotoUrl}
       />
+
+      <NotesDialog
+        open={notesOpen}
+        onClose={() => setNotesOpen(false)}
+        projectId={projectId}
+        brandNotes={brandNotes}
+        platform={platform}
+        igHandle={igHandle}
+        showScheduledDates={showScheduledDates}
+      />
     </div>
+  );
+}
+
+function NotesDialog({
+  open,
+  onClose,
+  projectId,
+  brandNotes,
+  platform,
+  igHandle,
+  showScheduledDates,
+}: {
+  open: boolean;
+  onClose: () => void;
+  projectId: string;
+  brandNotes: string;
+  platform: Platform;
+  igHandle: string;
+  showScheduledDates: boolean;
+}) {
+  const [state, action, pending] = useActionState(
+    updateGridSettings.bind(null, projectId),
+    undefined,
+  );
+
+  useEffect(() => {
+    if (state?.success) onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
+  return (
+    <Dialog open={open} onClose={onClose} title="Add notes">
+      <form action={action} className="flex flex-col gap-6">
+        <input type="hidden" name="platform" value={platform} />
+        <input type="hidden" name="ig_handle" value={igHandle} />
+        {showScheduledDates && <input type="hidden" name="show_scheduled_dates" value="on" />}
+
+        <label className="flex flex-col gap-1.5">
+          <span className={labelClass}>Notes &amp; settings</span>
+          <textarea
+            name="brand_notes"
+            defaultValue={brandNotes}
+            rows={6}
+            placeholder="Brand voice, content pillars, posting cadence..."
+            className="rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus:border-foreground focus:outline-none"
+          />
+        </label>
+
+        {state?.message && <p className="text-xs text-error">{state.message}</p>}
+
+        <div className="flex items-center justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs tracking-wide text-muted uppercase hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <Button type="submit" variant="primary" disabled={pending}>
+            {pending ? "Saving..." : "Save"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
   );
 }
 

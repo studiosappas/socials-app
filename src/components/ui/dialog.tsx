@@ -5,11 +5,13 @@ export function Dialog({
   onClose,
   title,
   children,
+  widthClassName = "max-w-lg",
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  widthClassName?: string;
 }) {
   if (!open) return null;
 
@@ -21,7 +23,7 @@ export function Dialog({
         onClick={onClose}
         className="fixed inset-0 -z-10 cursor-default"
       />
-      <div className="relative w-full max-w-lg rounded-lg border border-border bg-card">
+      <div className={`relative w-full rounded-lg border border-border bg-card ${widthClassName}`}>
         <div className="flex items-center justify-between border-b border-border px-6 py-4">
           <p className="text-xs tracking-wide text-muted uppercase">{title}</p>
           <button

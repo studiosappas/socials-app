@@ -392,6 +392,26 @@ create policy "Admins manage brief" on public.project_briefs for all to authenti
   using (public.project_role(project_id) in ('owner', 'admin'))
   with check (public.project_role(project_id) in ('owner', 'admin'));
 
+-- ---------- Personal to-do list (global, user-scoped, spans every project) ----------
+create table public.tasks (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  project_id uuid references public.projects (id) on delete cascade,
+  title text not null,
+  notes text not null default '',
+  due_date date,
+  completed boolean not null default false,
+  source_type text not null default 'manual' check (source_type in ('manual', 'post', 'story')),
+  source_id uuid,
+  created_at timestamptz not null default now()
+);
+
+alter table public.tasks enable row level security;
+
+create policy "Users manage their own tasks" on public.tasks for all to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
+
 -- ---------- Storage ----------
 insert into storage.buckets (id, name, public)
 values ('project-media', 'project-media', false)

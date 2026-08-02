@@ -6,6 +6,26 @@ import { uploadMedia } from "@/lib/actions/grid";
 import { Button } from "@/components/ui/button";
 import type { MediaLibraryItem } from "./grid-board";
 
+export function MediaThumbPreview({
+  item,
+  className = "",
+}: {
+  item: MediaLibraryItem;
+  className?: string;
+}) {
+  return (
+    <div className={`h-full w-full overflow-hidden ${className}`}>
+      {item.url && item.mediaType === "image" && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={item.url} alt="" className="h-full w-full object-cover" draggable={false} />
+      )}
+      {item.url && item.mediaType === "video" && (
+        <video src={item.url} className="h-full w-full object-cover" muted />
+      )}
+    </div>
+  );
+}
+
 export function MediaLibrary({
   projectId,
   items,
@@ -58,36 +78,21 @@ export function MediaLibrary({
 }
 
 function MediaThumb({ item }: { item: MediaLibraryItem }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `media-${item.id}`,
-    data: { mediaAssetId: item.id },
+    data: { mediaAssetId: item.id, item },
   });
-
-  const style = transform
-    ? {
-        transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
-        zIndex: 10,
-        position: "relative" as const,
-      }
-    : undefined;
 
   return (
     <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
-      style={style}
-      className={`aspect-square touch-none overflow-hidden rounded border border-border ${
-        isDragging ? "cursor-grabbing opacity-50" : "cursor-grab"
+      className={`aspect-square touch-none overflow-hidden rounded border border-border transition-[opacity,border-color] duration-150 ${
+        isDragging ? "cursor-grabbing opacity-30" : "cursor-grab hover:border-foreground/30"
       }`}
     >
-      {item.url && item.mediaType === "image" && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={item.url} alt="" className="h-full w-full object-cover" draggable={false} />
-      )}
-      {item.url && item.mediaType === "video" && (
-        <video src={item.url} className="h-full w-full object-cover" muted />
-      )}
+      <MediaThumbPreview item={item} />
     </div>
   );
 }

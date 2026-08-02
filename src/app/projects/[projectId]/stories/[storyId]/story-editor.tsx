@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   DndContext,
+  DragOverlay,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
+  type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
 import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
@@ -22,6 +24,9 @@ import {
   updateStoryFrameLink,
   uploadStoryFrame,
 } from "@/lib/actions/stories";
+import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
+import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
+import { convertToTask } from "@/lib/actions/todo";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem } from "@/lib/data/stories";
 
@@ -43,6 +48,7 @@ export function StoryEditor({
   const router = useRouter();
   const [prevFrames, setPrevFrames] = useState(frames);
   const [orderedFrames, setOrderedFrames] = useState(frames);
+  const [activeFrameId, setActiveFrameId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
   if (frames !== prevFrames) {
@@ -59,7 +65,12 @@ export function StoryEditor({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
 
+  function handleDragStart(event: DragStartEvent) {
+    setActiveFrameId(event.active.id as string);
+  }
+
   function handleDragEnd(event: DragEndEvent) {
+    setActiveFrameId(null);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
@@ -75,19 +86,54 @@ export function StoryEditor({
     });
   }
 
+  const activeFrame = orderedFrames.find((f) => f.frameId === activeFrameId) ?? null;
+
   const usedMediaIds = new Set(orderedFrames.map((f) => f.mediaAssetId));
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
+  const [downloading, setDownloading] = useState(false);
+  async function handleDownloadAll() {
+    setDownloading(true);
+    try {
+      const zipAssets = orderedFrames
+        .filter((f): f is typeof f & { url: string } => Boolean(f.url))
+        .map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `frame-${i + 1}`) }));
+      await downloadAssetsAsZip(zipAssets, `story-${story.id}-frames.zip`);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const [addedToTodo, setAddedToTodo] = useState(false);
+  function handleAddToTodo() {
+    startTransition(async () => {
+      await convertToTask(projectId, "story", story.id, story.name, story.scheduled_date);
+      setAddedToTodo(true);
+    });
+  }
+
   return (
     <div className="flex flex-col gap-8">
-      {!hideBackLink && (
-        <Link
-          href={`/projects/${projectId}/stories`}
-          className="text-sm text-muted hover:underline"
+      <div className="flex items-center justify-between">
+        {!hideBackLink ? (
+          <Link
+            href={`/projects/${projectId}/stories`}
+            className="text-sm text-muted hover:underline"
+          >
+            ← Back to stories
+          </Link>
+        ) : (
+          <span />
+        )}
+        <button
+          type="button"
+          onClick={handleAddToTodo}
+          disabled={addedToTodo}
+          className="text-xs tracking-wide text-muted uppercase hover:text-foreground disabled:opacity-60"
         >
-          ← Back to stories
-        </Link>
-      )}
+          {addedToTodo ? "Added to To-Do" : "+ Add to To-Do"}
+        </button>
+      </div>
 
       <form action={action} className="flex flex-wrap items-end gap-2">
         <label className="flex flex-col gap-1 text-sm">
@@ -138,8 +184,27 @@ export function StoryEditor({
       </form>
 
       <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold">Frames</h2>
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">Frames</h2>
+          {orderedFrames.length > 0 && (
+            <button
+              type="button"
+              onClick={handleDownloadAll}
+              disabled={downloading}
+              className="text-xs text-muted hover:underline disabled:opacity-60"
+            >
+              {downloading ? "Preparing…" : "Download all"}
+            </button>
+          )}
+        </div>
+        <DndContext
+          id={`story-dnd-${story.id}`}
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onDragCancel={() => setActiveFrameId(null)}
+        >
           <SortableContext
             items={orderedFrames.map((f) => f.frameId)}
             strategy={rectSortingStrategy}
@@ -169,6 +234,14 @@ export function StoryEditor({
               )}
             </div>
           </SortableContext>
+
+          <DragOverlay dropAnimation={DROP_ANIMATION}>
+            {activeFrame && (
+              <div className="aspect-[9/16] w-24 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+                <FramePreview frame={activeFrame} />
+              </div>
+            )}
+          </DragOverlay>
         </DndContext>
         {orderedFrames.length === 0 && (
           <p className="text-xs text-muted">
@@ -209,6 +282,20 @@ export function StoryEditor({
   );
 }
 
+function FramePreview({ frame }: { frame: StoryFrameItem }) {
+  return (
+    <>
+      {frame.url && frame.mediaType === "image" && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={frame.url} alt="" className="h-full w-full object-cover" draggable={false} />
+      )}
+      {frame.url && frame.mediaType === "video" && (
+        <video src={frame.url} className="h-full w-full object-cover" muted />
+      )}
+    </>
+  );
+}
+
 function SortableFrame({
   projectId,
   storyId,
@@ -224,6 +311,7 @@ function SortableFrame({
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: frame.frameId,
+    transition: SORTABLE_TRANSITION,
   });
 
   const style = {
@@ -237,17 +325,11 @@ function SortableFrame({
         ref={setNodeRef}
         style={style}
         {...(canManage ? { ...attributes, ...listeners } : {})}
-        className={`relative aspect-[9/16] touch-none overflow-hidden rounded border border-border ${
+        className={`relative aspect-[9/16] touch-none overflow-hidden rounded border border-border transition-opacity duration-150 ${
           canManage ? "cursor-grab" : ""
-        } ${isDragging ? "opacity-50" : ""}`}
+        } ${isDragging ? "opacity-30" : ""}`}
       >
-        {frame.url && frame.mediaType === "image" && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={frame.url} alt="" className="h-full w-full object-cover" draggable={false} />
-        )}
-        {frame.url && frame.mediaType === "video" && (
-          <video src={frame.url} className="h-full w-full object-cover" muted />
-        )}
+        <FramePreview frame={frame} />
         {canManage && (
           <button
             type="button"
@@ -257,7 +339,7 @@ function SortableFrame({
             }}
             className="absolute right-1 top-1 rounded bg-black/70 px-1.5 text-xs text-white"
           >
-            âœ•
+            ✕
           </button>
         )}
       </div>

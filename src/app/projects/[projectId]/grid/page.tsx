@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { GridBoard, type GridBoardRow, type MediaLibraryItem } from "./grid-board";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
@@ -46,33 +47,7 @@ export default async function GridPage({
       ).data?.signedUrl ?? null
     : null;
 
-  const { data: rows } = await supabase
-    .from("grid_rows")
-    .select("id, position")
-    .eq("project_id", projectId)
-    .order("position");
-
-  const rowIds = (rows ?? []).map((r) => r.id);
-
-  const { data: slots } = rowIds.length
-    ? await supabase
-        .from("grid_slots")
-        .select("id, row_id, position, post_id")
-        .in("row_id", rowIds)
-        .order("position")
-    : { data: [] };
-
-  const postIds = (slots ?? [])
-    .map((s) => s.post_id)
-    .filter((id): id is string => Boolean(id));
-
-  const { data: postAssets } = postIds.length
-    ? await supabase
-        .from("post_assets")
-        .select("id, post_id, position, media_assets(storage_path)")
-        .in("post_id", postIds)
-        .order("position")
-    : { data: [] };
+  const gridRowsWithPaths = await getGridRowsWithCoverPaths(supabase, projectId);
 
   const { data: mediaAssets } = await supabase
     .from("media_assets")
@@ -82,9 +57,10 @@ export default async function GridPage({
 
   const allPaths = new Set<string>();
   for (const asset of mediaAssets ?? []) allPaths.add(asset.storage_path);
-  for (const pa of postAssets ?? []) {
-    const path = (pa.media_assets as { storage_path: string } | null)?.storage_path;
-    if (path) allPaths.add(path);
+  for (const row of gridRowsWithPaths) {
+    for (const slot of row.slots) {
+      if (slot.coverStoragePath) allPaths.add(slot.coverStoragePath);
+    }
   }
 
   const pathList = Array.from(allPaths);
@@ -99,38 +75,14 @@ export default async function GridPage({
     if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
   }
 
-  const assetsByPost = new Map<string, { thumbnailUrl: string | null; count: number }>();
-  for (const pa of postAssets ?? []) {
-    const path = (pa.media_assets as { storage_path: string } | null)?.storage_path;
-    const existing = assetsByPost.get(pa.post_id);
-    if (!existing) {
-      assetsByPost.set(pa.post_id, {
-        thumbnailUrl: path ? urlByPath.get(path) ?? null : null,
-        count: 1,
-      });
-    } else {
-      existing.count += 1;
-    }
-  }
-
-  const slotsByRow = new Map<string, typeof slots>();
-  for (const slot of slots ?? []) {
-    const list = slotsByRow.get(slot.row_id) ?? [];
-    list.push(slot);
-    slotsByRow.set(slot.row_id, list);
-  }
-
-  const gridRows: GridBoardRow[] = (rows ?? []).map((row) => ({
-    id: row.id,
-    slots: (slotsByRow.get(row.id) ?? []).map((slot) => {
-      const postInfo = slot.post_id ? assetsByPost.get(slot.post_id) : undefined;
-      return {
-        id: slot.id,
-        postId: slot.post_id,
-        thumbnailUrl: postInfo?.thumbnailUrl ?? null,
-        assetCount: postInfo?.count ?? 0,
-      };
-    }),
+  const gridRows: GridBoardRow[] = gridRowsWithPaths.map((row) => ({
+    id: row.rowId,
+    slots: row.slots.map((slot) => ({
+      id: slot.slotId,
+      postId: slot.postId,
+      thumbnailUrl: slot.coverStoragePath ? urlByPath.get(slot.coverStoragePath) ?? null : null,
+      assetCount: slot.assetCount,
+    })),
   }));
 
   const mediaLibrary: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => ({

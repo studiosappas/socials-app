@@ -13,6 +13,9 @@ export default function ProjectsShellLayout({ children }: { children: React.Reac
             <Link href="/projects" className="hover:text-foreground">
               Clients
             </Link>
+            <Link href="/projects/todo" className="hover:text-foreground">
+              To-Do
+            </Link>
             <form action={logout}>
               <button type="submit" className="hover:text-foreground">
                 Logout
