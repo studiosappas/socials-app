@@ -17,6 +17,7 @@ export default async function StoryPage({
       projectId={projectId}
       story={data.story}
       frames={data.frames}
+      links={data.links}
       mediaLibrary={data.mediaLibrary}
       canManage={data.canManage}
     />

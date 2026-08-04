@@ -110,7 +110,7 @@ before any real launch.
 
 The user sent a very detailed design "bible" (editorial/Swiss/Apple-software
 aesthetic: warm white background, near-black text, thin 1px borders, no
-shadows, no gradients, Inter font, uppercase labels, minimal radius, 150–200ms
+shadows, no gradients, Poppins font, uppercase labels, minimal radius, 150–200ms
 motion max) plus screenshots of entiresocials.com's actual UI, and asked for
 the whole app to match it. **Full text of the bible and reference screenshots
 are only in the conversation history, not saved as a file yet** — if you
@@ -122,7 +122,9 @@ Done so far:
   foreground, muted/border/accent/success/warning/error tokens. **Dark mode
   was deliberately removed** — the bible describes one calm light aesthetic,
   no dark variant.
-- Switched font from Geist to Inter (`layout.tsx`).
+- Switched font from Geist to Inter (`layout.tsx`), then later from Inter to
+  Poppins per an explicit pixel-fidelity request against Figma screenshots
+  (same file, `--font-poppins` CSS variable).
 - Shared primitives: `src/components/ui/button.tsx` (primary/secondary/ghost
   variants), `switch.tsx` (CSS-only toggle switch, native checkbox
   underneath for form compatibility), `dialog.tsx` (local-state modal, for
@@ -255,7 +257,9 @@ them if you need to check exact layouts again.
 >
 > ### Typography
 >
-> Typography drives hierarchy. Use Inter. Weights: 300, 400, 500, 600.
+> Typography drives hierarchy. Use Poppins. Weights: 300, 400, 500, 600, 700.
+> (Switched from Inter to Poppins per explicit request during the Grid page
+> pixel-fidelity pass -- see changelog below.)
 > Avoid heavy bold text. Use uppercase only for: Labels, Categories,
 > Navigation, Section titles. Main titles remain sentence case. Spacing
 > between letters should feel editorial.

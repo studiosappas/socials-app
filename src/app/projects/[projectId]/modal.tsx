@@ -22,13 +22,13 @@ export function Modal({ children }: { children: React.ReactNode }) {
         onClick={() => router.back()}
         className="fixed inset-0 -z-10 cursor-default"
       />
-      <div className="relative w-full max-w-3xl rounded-lg border border-border bg-card p-6">
+      <div className="relative w-full max-w-3xl rounded-none border border-border bg-card p-6">
         <button
           type="button"
           onClick={() => router.back()}
-          className="absolute right-4 top-4 text-xs tracking-wide text-muted uppercase hover:text-foreground"
+          className="absolute right-4 top-4 text-xs tracking-wide text-muted uppercase transition-colors duration-150 hover:text-foreground"
         >
-          ✕ Close
+          Close X
         </button>
         <div className="mt-6">{children}</div>
       </div>

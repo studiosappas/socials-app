@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { NavTabs } from "./nav-tabs";
+import { CurrentPageLabel, NavTabs } from "./nav-tabs";
 
 export default async function ProjectLayout({
   children,
@@ -25,14 +25,16 @@ export default async function ProjectLayout({
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="border-b border-border px-6 py-4">
+      <header className="px-6 py-4">
         <div className="mx-auto flex max-w-6xl items-center justify-between">
           <div className="flex items-center gap-2 text-xs tracking-wide text-muted uppercase">
-            <Link href="/projects" className="hover:text-foreground">
-              ← Clients
+            <Link href="/projects" className="transition-colors duration-150 hover:text-foreground">
+              Projects
             </Link>
             <span>/</span>
-            <span className="text-foreground">{project.name}</span>
+            <span>{project.name}</span>
+            <span>/</span>
+            <CurrentPageLabel projectId={projectId} />
           </div>
           <NavTabs projectId={projectId} />
         </div>

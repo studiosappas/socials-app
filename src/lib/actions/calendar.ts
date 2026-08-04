@@ -74,29 +74,41 @@ export async function createStoryForDate(projectId: string, date: string): Promi
   return story.id;
 }
 
-export async function upsertCalendarNote(projectId: string, date: string, body: string) {
+export async function upsertCalendarNote(
+  projectId: string,
+  date: string,
+  body: string,
+): Promise<{ success: boolean; message?: string }> {
   const supabase = await createClient();
 
-  const { data: existing } = await supabase
+  const { data: existing, error: readError } = await supabase
     .from("calendar_notes")
     .select("id")
     .eq("project_id", projectId)
     .eq("date", date)
     .maybeSingle();
 
+  if (readError) {
+    return { success: false, message: readError.message };
+  }
+
   if (!body.trim()) {
     if (existing) {
-      await supabase.from("calendar_notes").delete().eq("id", existing.id);
+      const { error } = await supabase.from("calendar_notes").delete().eq("id", existing.id);
+      if (error) return { success: false, message: error.message };
     }
     revalidatePath(`/projects/${projectId}/calendar`);
-    return;
+    return { success: true };
   }
 
   if (existing) {
-    await supabase.from("calendar_notes").update({ body }).eq("id", existing.id);
+    const { error } = await supabase.from("calendar_notes").update({ body }).eq("id", existing.id);
+    if (error) return { success: false, message: error.message };
   } else {
-    await supabase.from("calendar_notes").insert({ project_id: projectId, date, body });
+    const { error } = await supabase.from("calendar_notes").insert({ project_id: projectId, date, body });
+    if (error) return { success: false, message: error.message };
   }
 
   revalidatePath(`/projects/${projectId}/calendar`);
+  return { success: true };
 }

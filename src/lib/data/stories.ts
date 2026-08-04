@@ -11,9 +11,18 @@ export type StoryFrameItem = {
   linkUrl: string | null;
 };
 
+export type StoryLinkItem = { id: string; url: string; label: string };
+
 export type StoryPageData = {
-  story: { id: string; name: string; scheduled_date: string | null };
+  story: {
+    id: string;
+    name: string;
+    scheduled_date: string | null;
+    status: "draft" | "scheduled" | "published";
+    notes: string;
+  };
   frames: StoryFrameItem[];
+  links: StoryLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
 };
@@ -39,7 +48,7 @@ export async function getStoryPageData(
 
   const { data: story } = await supabase
     .from("stories")
-    .select("id, name, scheduled_date")
+    .select("id, name, scheduled_date, status, notes")
     .eq("id", storyId)
     .single();
 
@@ -50,6 +59,14 @@ export async function getStoryPageData(
     .select("id, position, link_url, media_assets(id, storage_path, media_type)")
     .eq("story_id", storyId)
     .order("position");
+
+  // Queried independently of the critical `story` fetch above -- story_links
+  // is a separate table, so if it isn't live yet this just yields an empty
+  // Links section instead of 404-ing the whole page.
+  const { data: storyLinks } = await supabase
+    .from("story_links")
+    .select("id, url, label")
+    .eq("story_id", storyId);
 
   const { data: mediaAssets } = await supabase
     .from("media_assets")
@@ -91,5 +108,7 @@ export async function getStoryPageData(
     mediaType: asset.media_type,
   }));
 
-  return { story, frames: frameItems, mediaLibrary, canManage };
+  const links: StoryLinkItem[] = (storyLinks ?? []).map((l) => ({ id: l.id, url: l.url, label: l.label }));
+
+  return { story, frames: frameItems, links, mediaLibrary, canManage };
 }

@@ -1,6 +1,5 @@
-﻿import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
-import { createStory } from "@/lib/actions/stories";
+﻿import { createClient } from "@/lib/supabase/server";
+import { StoriesBoard } from "./stories-board";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -27,7 +26,7 @@ export default async function StoriesPage({
 
   const { data: stories } = await supabase
     .from("stories")
-    .select("id, name, scheduled_date, position")
+    .select("id, name, scheduled_date, notes, position")
     .eq("project_id", projectId)
     .order("position");
 
@@ -72,54 +71,13 @@ export default async function StoriesPage({
     }
   }
 
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Stories</h2>
-        {canManage && (
-          <form action={createStory.bind(null, projectId)}>
-            <button
-              type="submit"
-              className="rounded-md bg-foreground px-3 py-1.5 text-xs text-background"
-            >
-              + New story
-            </button>
-          </form>
-        )}
-      </div>
+  const storyItems = (stories ?? []).map((story) => ({
+    id: story.id,
+    name: story.name,
+    scheduledDate: story.scheduled_date,
+    notes: story.notes,
+    thumbnailUrl: framesByStory.get(story.id)?.thumbnailUrl ?? null,
+  }));
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-        {(stories ?? []).map((story) => {
-          const info = framesByStory.get(story.id);
-          return (
-            <Link
-              key={story.id}
-              href={`/projects/${projectId}/stories/${story.id}`}
-              className="flex flex-col gap-1"
-            >
-              <div className="relative aspect-[9/16] overflow-hidden rounded-md border border-border bg-black/[.02]">
-                {info?.thumbnailUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={info.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <span className="absolute inset-0 flex items-center justify-center text-xs text-muted">
-                    No frames
-                  </span>
-                )}
-              </div>
-              <p className="truncate text-xs">{story.name}</p>
-              <p className="text-[11px] text-muted">
-                {info?.count ?? 0} frame{(info?.count ?? 0) === 1 ? "" : "s"}
-              </p>
-            </Link>
-          );
-        })}
-        {(stories ?? []).length === 0 && (
-          <p className="col-span-full text-sm text-muted">
-            No stories yet — create one above.
-          </p>
-        )}
-      </div>
-    </div>
-  );
+  return <StoriesBoard projectId={projectId} stories={storyItems} canManage={canManage} />;
 }

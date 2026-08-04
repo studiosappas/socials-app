@@ -42,13 +42,13 @@ export function MediaLibrary({
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-xs tracking-wide text-muted uppercase">Assets</p>
       <form ref={formRef} action={action} className="flex flex-col gap-2" key={items.length}>
         <input
           ref={fileInputRef}
           type="file"
           name="file"
           accept="image/*,video/*"
+          multiple
           required
           className="hidden"
           onChange={() => formRef.current?.requestSubmit()}
@@ -56,11 +56,12 @@ export function MediaLibrary({
         <Button
           type="button"
           variant="primary"
+          radius="none"
           onClick={() => fileInputRef.current?.click()}
           disabled={pending}
-          className="w-full"
+          className="w-full py-3 text-xs tracking-wide uppercase"
         >
-          {pending ? "Uploading..." : "↑ Upload assets"}
+          {pending ? "Uploading..." : "Upload Assets"}
         </Button>
         {state?.message && <p className="text-xs text-error">{state.message}</p>}
       </form>
@@ -69,10 +70,15 @@ export function MediaLibrary({
         {items.map((item) => (
           <MediaThumb key={item.id} item={item} />
         ))}
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          title="Add assets"
+          className="flex aspect-square items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
+        >
+          +
+        </button>
       </div>
-      {items.length === 0 && (
-        <p className="text-xs text-muted">No unplaced assets here.</p>
-      )}
     </div>
   );
 }
@@ -88,7 +94,7 @@ function MediaThumb({ item }: { item: MediaLibraryItem }) {
       ref={setNodeRef}
       {...listeners}
       {...attributes}
-      className={`aspect-square touch-none overflow-hidden rounded border border-border transition-[opacity,border-color] duration-150 ${
+      className={`aspect-square touch-none overflow-hidden rounded-none border border-border transition-[opacity,border-color] duration-150 ${
         isDragging ? "cursor-grabbing opacity-30" : "cursor-grab hover:border-foreground/30"
       }`}
     >

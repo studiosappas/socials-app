@@ -6,11 +6,21 @@ import { usePathname } from "next/navigation";
 const NAV_ITEMS = [
   { href: "", label: "Overview" },
   { href: "grid", label: "Grid" },
-  { href: "calendar", label: "Calendar" },
   { href: "stories", label: "Stories" },
+  { href: "calendar", label: "Calendar" },
   { href: "brief", label: "Brief" },
-  { href: "members", label: "Members" },
+  { href: "settings", label: "Settings" },
 ];
+
+export function CurrentPageLabel({ projectId }: { projectId: string }) {
+  const pathname = usePathname();
+  const base = `/projects/${projectId}`;
+  const active = NAV_ITEMS.find((item) => {
+    const href = item.href ? `${base}/${item.href}` : base;
+    return item.href ? pathname.startsWith(href) : pathname === base;
+  });
+  return <span className="text-foreground">{active?.label ?? ""}</span>;
+}
 
 export function NavTabs({ projectId }: { projectId: string }) {
   const pathname = usePathname();

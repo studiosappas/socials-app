@@ -50,6 +50,8 @@ export async function updateStory(
     .update({
       name: String(formData.get("name") ?? "Untitled story"),
       scheduled_date: scheduledDate ? scheduledDate : null,
+      status: String(formData.get("status") ?? "draft") as "draft" | "scheduled" | "published",
+      notes: String(formData.get("notes") ?? ""),
     })
     .eq("id", storyId);
 
@@ -91,8 +93,8 @@ export async function uploadStoryFrame(
   _state: UploadStoryFrameState,
   formData: FormData,
 ): Promise<UploadStoryFrameState> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  const files = formData.getAll("file").filter((f): f is File => f instanceof File && f.size > 0);
+  if (files.length === 0) {
     return { message: "Choose a file to upload." };
   }
 
@@ -102,44 +104,50 @@ export async function uploadStoryFrame(
   } = await supabase.auth.getUser();
   if (!user) return { message: "You must be logged in." };
 
-  const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(storagePath, file, { contentType: file.type });
-
-  if (uploadError) {
-    return { message: uploadError.message };
-  }
-
-  const { data: mediaAsset, error: insertError } = await supabase
-    .from("media_assets")
-    .insert({
-      project_id: projectId,
-      storage_path: storagePath,
-      media_type: mediaType,
-      uploaded_by: user.id,
-    })
-    .select("id")
-    .single();
-
-  if (insertError || !mediaAsset) {
-    return { message: insertError?.message ?? "Failed to save media." };
-  }
-
-  const { count } = await supabase
+  const { count: startingCount } = await supabase
     .from("story_frames")
     .select("*", { count: "exact", head: true })
     .eq("story_id", storyId);
 
-  const { error: frameError } = await supabase
-    .from("story_frames")
-    .insert({ story_id: storyId, media_asset_id: mediaAsset.id, position: count ?? 0 });
+  let position = startingCount ?? 0;
 
-  if (frameError) {
-    return { message: frameError.message };
+  for (const file of files) {
+    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
+    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
+    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("project-media")
+      .upload(storagePath, file, { contentType: file.type });
+
+    if (uploadError) {
+      return { message: uploadError.message };
+    }
+
+    const { data: mediaAsset, error: insertError } = await supabase
+      .from("media_assets")
+      .insert({
+        project_id: projectId,
+        storage_path: storagePath,
+        media_type: mediaType,
+        uploaded_by: user.id,
+      })
+      .select("id")
+      .single();
+
+    if (insertError || !mediaAsset) {
+      return { message: insertError?.message ?? "Failed to save media." };
+    }
+
+    const { error: frameError } = await supabase
+      .from("story_frames")
+      .insert({ story_id: storyId, media_asset_id: mediaAsset.id, position });
+
+    if (frameError) {
+      return { message: frameError.message };
+    }
+
+    position += 1;
   }
 
   revalidatePath(`/projects/${projectId}/stories`);
@@ -182,5 +190,34 @@ export async function updateStoryFrameLink(
     .update({ link_url: linkUrl.trim() ? linkUrl.trim() : null })
     .eq("id", frameId);
 
+  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+}
+
+export type UpdateStoryLinkState = { message?: string } | undefined;
+
+export async function addStoryLink(
+  projectId: string,
+  storyId: string,
+  _state: UpdateStoryLinkState,
+  formData: FormData,
+): Promise<UpdateStoryLinkState> {
+  const url = String(formData.get("url") ?? "").trim();
+  const label = String(formData.get("label") ?? "").trim();
+  if (!url) return { message: "URL is required." };
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("story_links").insert({ story_id: storyId, url, label });
+
+  if (error) {
+    return { message: error.message };
+  }
+
+  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  return undefined;
+}
+
+export async function removeStoryLink(projectId: string, storyId: string, linkId: string) {
+  const supabase = await createClient();
+  await supabase.from("story_links").delete().eq("id", linkId);
   revalidatePath(`/projects/${projectId}/stories/${storyId}`);
 }

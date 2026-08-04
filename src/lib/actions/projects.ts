@@ -3,7 +3,6 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import type { Platform } from "@/types/database";
 
 export async function createProject(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
@@ -28,59 +27,69 @@ export async function createProject(formData: FormData) {
   redirect(`/projects/${data.id}/grid`);
 }
 
-export type UpdateGridSettingsState = { message?: string; success?: boolean } | undefined;
-
-export async function updateGridSettings(
-  projectId: string,
-  _state: UpdateGridSettingsState,
-  formData: FormData,
-): Promise<UpdateGridSettingsState> {
+export async function updateBrandNotes(projectId: string, value: string) {
   const supabase = await createClient();
-
-  const update = {
-    brand_notes: String(formData.get("brand_notes") ?? ""),
-    platform: String(formData.get("platform") ?? "instagram") as Platform,
-    ig_handle: String(formData.get("ig_handle") ?? ""),
-    show_scheduled_dates: formData.get("show_scheduled_dates") === "on",
-  };
-
-  const { error } = await supabase.from("projects").update(update).eq("id", projectId);
-
-  if (error) {
-    return { message: error.message };
-  }
-
+  const { error } = await supabase.from("projects").update({ brand_notes: value }).eq("id", projectId);
+  if (error) throw new Error(error.message);
   revalidatePath(`/projects/${projectId}/grid`);
-  return { success: true };
 }
 
-export async function updateProfilePreview(
+export async function updateContentPillars(projectId: string, value: string) {
+  const supabase = await createClient();
+  const { error } = await supabase.from("projects").update({ content_pillars: value }).eq("id", projectId);
+  if (error) throw new Error(error.message);
+  revalidatePath(`/projects/${projectId}/grid`);
+}
+
+export type UpdateGridSettingsState = { message?: string; success?: boolean } | undefined;
+
+// Single combined save for the Grid sidebar's "Edit Profile" modal -- name,
+// avatar, username, bio, notes, and content pillars all persist together.
+export async function updateProjectProfile(
   projectId: string,
   _state: UpdateGridSettingsState,
   formData: FormData,
 ): Promise<UpdateGridSettingsState> {
   const supabase = await createClient();
 
+  function weeklyAmount(key: string): number {
+    const raw = Number(formData.get(key));
+    return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0;
+  }
+
+  const platformRaw = String(formData.get("platform") ?? "instagram");
+  const platform = platformRaw === "tiktok" ? "tiktok" : "instagram";
+
   const update: {
-    ig_username: string;
     ig_display_name: string;
+    ig_username: string;
     ig_bio: string;
-    ig_posts_count: number;
-    ig_followers_count: number;
-    ig_following_count: number;
+    brand_notes: string;
+    content_pillars: string;
     ig_website_link: string;
+    industry: string;
+    platform: "instagram" | "tiktok";
+    posts_per_week: number;
+    stories_per_week: number;
+    reels_per_week: number;
+    newsletter_per_week: number;
     profile_photo_path?: string;
   } = {
-    ig_username: String(formData.get("ig_username") ?? ""),
-    ig_display_name: String(formData.get("ig_display_name") ?? ""),
-    ig_bio: String(formData.get("ig_bio") ?? ""),
-    ig_posts_count: Number(formData.get("ig_posts_count") ?? 0) || 0,
-    ig_followers_count: Number(formData.get("ig_followers_count") ?? 0) || 0,
-    ig_following_count: Number(formData.get("ig_following_count") ?? 0) || 0,
-    ig_website_link: String(formData.get("ig_website_link") ?? ""),
+    ig_display_name: String(formData.get("name") ?? "").trim(),
+    ig_username: String(formData.get("username") ?? "").trim(),
+    ig_bio: String(formData.get("bio") ?? ""),
+    brand_notes: String(formData.get("notes") ?? ""),
+    content_pillars: String(formData.get("content_pillars") ?? ""),
+    ig_website_link: String(formData.get("website") ?? "").trim(),
+    industry: String(formData.get("industry") ?? "").trim(),
+    platform,
+    posts_per_week: weeklyAmount("posts_per_week"),
+    stories_per_week: weeklyAmount("stories_per_week"),
+    reels_per_week: weeklyAmount("reels_per_week"),
+    newsletter_per_week: weeklyAmount("newsletter_per_week"),
   };
 
-  const photo = formData.get("profile_photo");
+  const photo = formData.get("avatar");
   if (photo instanceof File && photo.size > 0) {
     const ext = photo.name.includes(".") ? photo.name.split(".").pop() : undefined;
     const storagePath = `${projectId}/profile-photo${ext ? `.${ext}` : ""}`;
@@ -97,9 +106,35 @@ export async function updateProfilePreview(
   }
 
   const { error } = await supabase.from("projects").update(update).eq("id", projectId);
-
   if (error) {
     return { message: error.message };
+  }
+
+  // Custom sections ("Add Section +") are saved as a full replace -- simplest
+  // correct approach for a small, single-editor list with no concurrent
+  // multi-user editing to reconcile.
+  const sectionsRaw = String(formData.get("sections_json") ?? "[]");
+  let sections: { title: string; body: string }[] = [];
+  try {
+    sections = JSON.parse(sectionsRaw);
+  } catch {
+    sections = [];
+  }
+  sections = sections.filter((s) => s.title.trim() || s.body.trim());
+
+  await supabase.from("project_sections").delete().eq("project_id", projectId);
+  if (sections.length > 0) {
+    const { error: sectionsError } = await supabase.from("project_sections").insert(
+      sections.map((s, i) => ({
+        project_id: projectId,
+        title: s.title.trim(),
+        body: s.body,
+        position: i,
+      })),
+    );
+    if (sectionsError) {
+      return { message: sectionsError.message };
+    }
   }
 
   revalidatePath(`/projects/${projectId}/grid`);

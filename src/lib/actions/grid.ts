@@ -46,8 +46,8 @@ export async function uploadMedia(
   _state: UploadMediaState,
   formData: FormData,
 ): Promise<UploadMediaState> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  const files = formData.getAll("file").filter((f): f is File => f instanceof File && f.size > 0);
+  if (files.length === 0) {
     return { message: "Choose a file to upload." };
   }
 
@@ -57,27 +57,29 @@ export async function uploadMedia(
   } = await supabase.auth.getUser();
   if (!user) return { message: "You must be logged in." };
 
-  const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+  for (const file of files) {
+    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
+    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
+    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
 
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(storagePath, file, { contentType: file.type });
+    const { error: uploadError } = await supabase.storage
+      .from("project-media")
+      .upload(storagePath, file, { contentType: file.type });
 
-  if (uploadError) {
-    return { message: uploadError.message };
-  }
+    if (uploadError) {
+      return { message: uploadError.message };
+    }
 
-  const { error: insertError } = await supabase.from("media_assets").insert({
-    project_id: projectId,
-    storage_path: storagePath,
-    media_type: mediaType,
-    uploaded_by: user.id,
-  });
+    const { error: insertError } = await supabase.from("media_assets").insert({
+      project_id: projectId,
+      storage_path: storagePath,
+      media_type: mediaType,
+      uploaded_by: user.id,
+    });
 
-  if (insertError) {
-    return { message: insertError.message };
+    if (insertError) {
+      return { message: insertError.message };
+    }
   }
 
   revalidatePath(`/projects/${projectId}/grid`);
@@ -124,41 +126,62 @@ export async function placeMediaInSlot(
     if (updateSlotError) {
       throw new Error(updateSlotError.message);
     }
-  }
+  } else {
+    // Dropping media onto a slot that already has a post replaces its
+    // cover outright -- carousels are only ever built intentionally from
+    // inside the post editor, never as a side effect of a grid drop.
+    const { error: clearError } = await supabase
+      .from("post_assets")
+      .delete()
+      .eq("post_id", postId);
 
-  const { count } = await supabase
-    .from("post_assets")
-    .select("*", { count: "exact", head: true })
-    .eq("post_id", postId);
+    if (clearError) {
+      throw new Error(clearError.message);
+    }
+  }
 
   const { error: assetError } = await supabase
     .from("post_assets")
-    .insert({ post_id: postId, media_asset_id: mediaAssetId, position: count ?? 0 });
+    .insert({ post_id: postId, media_asset_id: mediaAssetId, position: 0 });
 
   if (assetError) {
     throw new Error(assetError.message);
   }
 
-  revalidatePath(`/projects/${projectId}/grid`);
+  return { postId };
 }
 
 export async function reorderGridPosts(
-  projectId: string,
   updates: { slotId: string; postId: string | null }[],
 ) {
   if (updates.length === 0) return;
 
   const supabase = await createClient();
 
-  const results = await Promise.all(
-    updates.map(({ slotId, postId }) =>
-      supabase.from("grid_slots").update({ post_id: postId }).eq("id", slotId),
-    ),
-  );
+  // Runs as one atomic transaction server-side (see reorder_grid_slots in
+  // schema.sql) -- reassigning every changed slot's post_id individually
+  // via parallel requests let a concurrent read catch the grid mid-update
+  // and see the same post duplicated across two slots.
+  const { error } = await supabase.rpc("reorder_grid_slots", { updates });
+  if (error) {
+    throw new Error(error.message);
+  }
+}
 
-  const failed = results.find((r) => r.error);
-  if (failed?.error) {
-    throw new Error(failed.error.message);
+export async function updateSlotCoverTransform(
+  projectId: string,
+  slotId: string,
+  transform: { scale: number; x: number; y: number } | null,
+) {
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("grid_slots")
+    .update({ cover_transform: transform })
+    .eq("id", slotId);
+
+  if (error) {
+    throw new Error(error.message);
   }
 
   revalidatePath(`/projects/${projectId}/grid`);

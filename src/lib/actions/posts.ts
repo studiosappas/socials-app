@@ -6,6 +6,13 @@ import type { MediaType, PostStatus, PostType } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
 
+export async function deletePost(projectId: string, postId: string) {
+  const supabase = await createClient();
+  await supabase.from("posts").delete().eq("id", postId);
+  revalidatePath(`/projects/${projectId}/grid`);
+  revalidatePath(`/projects/${projectId}/calendar`);
+}
+
 export async function updatePost(
   projectId: string,
   postId: string,
@@ -68,8 +75,8 @@ export async function uploadPostAsset(
   _state: UploadPostAssetState,
   formData: FormData,
 ): Promise<UploadPostAssetState> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  const files = formData.getAll("file").filter((f): f is File => f instanceof File && f.size > 0);
+  if (files.length === 0) {
     return { message: "Choose a file to upload." };
   }
 
@@ -79,44 +86,50 @@ export async function uploadPostAsset(
   } = await supabase.auth.getUser();
   if (!user) return { message: "You must be logged in." };
 
-  const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(storagePath, file, { contentType: file.type });
-
-  if (uploadError) {
-    return { message: uploadError.message };
-  }
-
-  const { data: mediaAsset, error: insertError } = await supabase
-    .from("media_assets")
-    .insert({
-      project_id: projectId,
-      storage_path: storagePath,
-      media_type: mediaType,
-      uploaded_by: user.id,
-    })
-    .select("id")
-    .single();
-
-  if (insertError || !mediaAsset) {
-    return { message: insertError?.message ?? "Failed to save media." };
-  }
-
-  const { count } = await supabase
+  const { count: startingCount } = await supabase
     .from("post_assets")
     .select("*", { count: "exact", head: true })
     .eq("post_id", postId);
 
-  const { error: assetError } = await supabase
-    .from("post_assets")
-    .insert({ post_id: postId, media_asset_id: mediaAsset.id, position: count ?? 0 });
+  let position = startingCount ?? 0;
 
-  if (assetError) {
-    return { message: assetError.message };
+  for (const file of files) {
+    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
+    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
+    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("project-media")
+      .upload(storagePath, file, { contentType: file.type });
+
+    if (uploadError) {
+      return { message: uploadError.message };
+    }
+
+    const { data: mediaAsset, error: insertError } = await supabase
+      .from("media_assets")
+      .insert({
+        project_id: projectId,
+        storage_path: storagePath,
+        media_type: mediaType,
+        uploaded_by: user.id,
+      })
+      .select("id")
+      .single();
+
+    if (insertError || !mediaAsset) {
+      return { message: insertError?.message ?? "Failed to save media." };
+    }
+
+    const { error: assetError } = await supabase
+      .from("post_assets")
+      .insert({ post_id: postId, media_asset_id: mediaAsset.id, position });
+
+    if (assetError) {
+      return { message: assetError.message };
+    }
+
+    position += 1;
   }
 
   revalidatePath(`/projects/${projectId}/posts/${postId}`);

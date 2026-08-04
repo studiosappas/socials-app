@@ -22,13 +22,13 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-error: var(--error);
-  --font-sans: var(--font-inter);
+  --font-sans: var(--font-poppins);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-inter), Inter, Helvetica, Arial, sans-serif;
+  font-family: var(--font-poppins), Poppins, Helvetica, Arial, sans-serif;
   font-weight: 400;
 }
 
@@ -47,4 +47,45 @@ body {
 
 .animate-settle-in {
   animation: settle-in 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* A single animated custom property is the one source of truth for the
+   ring's current angle. Tiles read it back with calc(... * -1) to stay
+   upright while they orbit -- instead of running their own separate
+   "counter-spin" animation that only stayed in sync with the ring by
+   coincidence of timing. Two independent animations drift apart after
+   enough pause/resume cycles (each hover in/out), which is what made tiles
+   sit at a visible angle with upside-down-looking text; deriving the tile
+   angle directly from the ring's angle makes that drift impossible. */
+@property --wheel-angle {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+
+@keyframes wheel-angle-spin {
+  from {
+    --wheel-angle: 0deg;
+  }
+  to {
+    --wheel-angle: 360deg;
+  }
+}
+
+/* Runs once briefly on mount, then pauses; toggled back to running on
+   hover via the .is-spinning class (driven by React). Pausing holds
+   --wheel-angle at its exact current value instead of resetting it, so the
+   ring (and every tile, which derives its angle from this same variable)
+   freezes and resumes exactly where it was. */
+.knowledge-wheel-ring {
+  animation: wheel-angle-spin 24s linear infinite;
+  animation-play-state: paused;
+  transform: rotate(var(--wheel-angle));
+}
+.knowledge-wheel-ring.is-spinning {
+  animation-play-state: running;
+}
+
+.knowledge-tile {
+  transform: translate(-50%, -50%) rotate(calc(var(--wheel-angle, 0deg) * -1));
 }

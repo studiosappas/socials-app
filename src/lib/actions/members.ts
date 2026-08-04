@@ -33,7 +33,7 @@ export async function inviteMember(
     return { message: error.message };
   }
 
-  revalidatePath(`/projects/${projectId}/members`);
+  revalidatePath(`/projects/${projectId}/settings`);
   return { message: undefined };
 }
 
@@ -45,5 +45,5 @@ export async function removeMember(projectId: string, userId: string) {
     .eq("project_id", projectId)
     .eq("user_id", userId);
 
-  revalidatePath(`/projects/${projectId}/members`);
+  revalidatePath(`/projects/${projectId}/settings`);
 }

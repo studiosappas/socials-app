@@ -28,16 +28,10 @@ export default async function GridPage({
   const { data: project } = await supabase
     .from("projects")
     .select(
-      "name, brand_notes, platform, ig_username, ig_display_name, ig_bio, ig_posts_count, ig_followers_count, ig_following_count, ig_website_link, ig_handle, profile_photo_path, show_scheduled_dates",
+      "name, brand_notes, content_pillars, ig_username, ig_display_name, ig_bio, ig_website_link, industry, platform, posts_per_week, stories_per_week, reels_per_week, newsletter_per_week, profile_photo_path",
     )
     .eq("id", projectId)
     .single();
-
-  const { count: postsCount } = await supabase
-    .from("grid_slots")
-    .select("id, grid_rows!inner(project_id)", { count: "exact", head: true })
-    .eq("grid_rows.project_id", projectId)
-    .not("post_id", "is", null);
 
   const profilePhotoUrl = project?.profile_photo_path
     ? (
@@ -82,6 +76,7 @@ export default async function GridPage({
       postId: slot.postId,
       thumbnailUrl: slot.coverStoragePath ? urlByPath.get(slot.coverStoragePath) ?? null : null,
       assetCount: slot.assetCount,
+      coverTransform: slot.coverTransform,
     })),
   }));
 
@@ -96,18 +91,18 @@ export default async function GridPage({
       projectId={projectId}
       projectName={project?.name ?? ""}
       brandNotes={project?.brand_notes ?? ""}
-      platform={project?.platform ?? "instagram"}
+      contentPillars={project?.content_pillars ?? ""}
       igUsername={project?.ig_username ?? ""}
       igDisplayName={project?.ig_display_name ?? ""}
       igBio={project?.ig_bio ?? ""}
-      igPostsCount={project?.ig_posts_count ?? 0}
-      igFollowersCount={project?.ig_followers_count ?? 0}
-      igFollowingCount={project?.ig_following_count ?? 0}
-      igWebsiteLink={project?.ig_website_link ?? ""}
-      igHandle={project?.ig_handle ?? ""}
+      websiteUrl={project?.ig_website_link ?? ""}
+      industry={project?.industry ?? ""}
+      platform={project?.platform ?? "instagram"}
       profilePhotoUrl={profilePhotoUrl}
-      showScheduledDates={project?.show_scheduled_dates ?? true}
-      postsCount={postsCount ?? 0}
+      postsPerWeek={project?.posts_per_week ?? 0}
+      storiesPerWeek={project?.stories_per_week ?? 0}
+      reelsPerWeek={project?.reels_per_week ?? 0}
+      newsletterPerWeek={project?.newsletter_per_week ?? 0}
       rows={gridRows}
       mediaLibrary={mediaLibrary}
       canManage={canManage}

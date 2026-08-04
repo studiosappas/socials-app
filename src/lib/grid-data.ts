@@ -2,12 +2,15 @@ import type { createClient } from "@/lib/supabase/server";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
+export type CoverTransform = { scale: number; x: number; y: number };
+
 export type GridSlotWithPath = {
   slotId: string;
   postId: string | null;
   coverStoragePath: string | null;
   coverMediaType: "image" | "video" | null;
   assetCount: number;
+  coverTransform: CoverTransform | null;
 };
 
 export type GridRowWithSlots = { rowId: string; slots: GridSlotWithPath[] };
@@ -34,6 +37,20 @@ export async function getGridRowsWithCoverPaths(
         .in("row_id", rowIds)
         .order("position")
     : { data: [] };
+
+  // Fetched independently from the core slot list above: cover_transform is a
+  // newer column that may not exist yet on a not-yet-migrated database, and
+  // PostgREST fails an entire select if any requested column is missing --
+  // isolating it here means a pending migration only loses crop data, not the
+  // whole grid.
+  const slotIds = (slots ?? []).map((s) => s.id);
+  const { data: transformRows } = slotIds.length
+    ? await supabase.from("grid_slots").select("id, cover_transform").in("id", slotIds)
+    : { data: [] };
+  const transformBySlotId = new Map<string, CoverTransform | null>();
+  for (const t of transformRows ?? []) {
+    transformBySlotId.set(t.id, (t.cover_transform as CoverTransform | null) ?? null);
+  }
 
   const postIds = (slots ?? [])
     .map((s) => s.post_id)
@@ -74,6 +91,7 @@ export async function getGridRowsWithCoverPaths(
       coverStoragePath: slot.post_id ? coverPathByPost.get(slot.post_id) ?? null : null,
       coverMediaType: slot.post_id ? coverTypeByPost.get(slot.post_id) ?? null : null,
       assetCount: slot.post_id ? countByPost.get(slot.post_id) ?? 0 : 0,
+      coverTransform: transformBySlotId.get(slot.id) ?? null,
     })),
   }));
 }

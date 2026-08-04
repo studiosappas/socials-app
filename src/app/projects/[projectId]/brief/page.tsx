@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import { BriefEditor } from "./brief-editor";
+import { BriefBoard, type BriefTaskData } from "./brief-board";
 
 export default async function BriefPage({
   params,
@@ -22,17 +22,75 @@ export default async function BriefPage({
 
   const canManage = membership?.role === "owner" || membership?.role === "admin";
 
-  const { data: brief } = await supabase
-    .from("project_briefs")
-    .select("body_json")
+  const { data: tasks } = await supabase
+    .from("brief_tasks")
+    .select("id, name, content_types, position")
     .eq("project_id", projectId)
-    .maybeSingle();
+    .order("position");
 
-  return (
-    <BriefEditor
-      projectId={projectId}
-      initialContent={brief?.body_json ?? null}
-      canManage={canManage}
-    />
-  );
+  const taskIds = (tasks ?? []).map((t) => t.id);
+
+  // Fetched as flat, independent queries (rather than a nested embed) so a
+  // pending migration on one table degrades that section gracefully instead
+  // of failing the whole page's select.
+  const [{ data: items }, { data: frames }, { data: attachments }] =
+    taskIds.length === 0
+      ? [{ data: [] }, { data: [] }, { data: [] }]
+      : await Promise.all([
+          supabase
+            .from("brief_task_items")
+            .select("id, task_id, section, kind, url, label, notes, attachment_id, position")
+            .in("task_id", taskIds)
+            .order("position"),
+          supabase
+            .from("brief_task_frames")
+            .select("id, task_id, section, label, body, position")
+            .in("task_id", taskIds)
+            .order("position"),
+          supabase
+            .from("brief_attachments")
+            .select("id, original_storage_path, preview_storage_path, annotation_json")
+            .eq("project_id", projectId),
+        ]);
+
+  const attachmentById = new Map((attachments ?? []).map((a) => [a.id, a]));
+
+  function publicUrl(path: string) {
+    return supabase.storage.from("brief-media").getPublicUrl(path).data.publicUrl;
+  }
+
+  const taskData: BriefTaskData[] = (tasks ?? []).map((task) => ({
+    id: task.id,
+    name: task.name,
+    contentTypes: task.content_types,
+    items: (items ?? [])
+      .filter((item) => item.task_id === task.id)
+      .map((item) => {
+        const attachment = item.attachment_id ? attachmentById.get(item.attachment_id) : undefined;
+        return {
+          id: item.id,
+          section: item.section,
+          kind: item.kind,
+          url: item.url,
+          label: item.label,
+          notes: item.notes,
+          attachmentId: attachment?.id ?? null,
+          thumbnailUrl: attachment
+            ? publicUrl(attachment.preview_storage_path || attachment.original_storage_path)
+            : null,
+          originalUrl: attachment ? publicUrl(attachment.original_storage_path) : null,
+          annotationJson: attachment?.annotation_json ?? null,
+        };
+      }),
+    frames: (frames ?? [])
+      .filter((frame) => frame.task_id === task.id)
+      .map((frame) => ({
+        id: frame.id,
+        section: frame.section,
+        label: frame.label,
+        body: frame.body,
+      })),
+  }));
+
+  return <BriefBoard projectId={projectId} tasks={taskData} canManage={canManage} />;
 }

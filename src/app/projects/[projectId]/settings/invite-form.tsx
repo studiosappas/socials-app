@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useActionState } from "react";
 import { inviteMember } from "@/lib/actions/members";
@@ -29,7 +29,7 @@ export function InviteForm({ projectId }: { projectId: string }) {
       <button
         type="submit"
         disabled={pending}
-        className="rounded-md bg-foreground px-4 py-2 text-sm text-background disabled:opacity-60"
+        className="rounded-md bg-foreground px-4 py-2 text-sm text-background transition-colors duration-150 hover:bg-black/85 disabled:opacity-60"
       >
         {pending ? "Inviting..." : "Invite"}
       </button>

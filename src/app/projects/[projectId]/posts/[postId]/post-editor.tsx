@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useActionState, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -48,6 +48,10 @@ type PostRecord = {
   status: PostStatus;
 };
 
+const labelClass = "text-xs tracking-wide text-muted uppercase";
+const fieldClass =
+  "w-full rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+
 export function PostEditor({
   projectId,
   post,
@@ -70,6 +74,7 @@ export function PostEditor({
   const [orderedAssets, setOrderedAssets] = useState(assets);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   if (assets !== prevAssets) {
     setPrevAssets(assets);
@@ -119,39 +124,22 @@ export function PostEditor({
     }
   }
 
-  const [addedToTodo, setAddedToTodo] = useState(false);
-  function handleAddToTodo() {
-    startTransition(async () => {
-      await convertToTask(projectId, "post", post.id, post.post_type, post.scheduled_date);
-      setAddedToTodo(true);
-    });
+  function scrollMediaRight() {
+    scrollRef.current?.scrollBy({ left: 240, behavior: "smooth" });
   }
 
   return (
-    <div className="flex flex-col gap-8">
-      <div className="flex items-center justify-between">
-        {!hideBackLink ? (
-          <Link
-            href={`/projects/${projectId}/grid`}
-            className="text-sm text-muted hover:underline"
-          >
-            ← Back to grid
-          </Link>
-        ) : (
-          <span />
-        )}
-        <button
-          type="button"
-          onClick={handleAddToTodo}
-          disabled={addedToTodo}
-          className="text-xs tracking-wide text-muted uppercase hover:text-foreground disabled:opacity-60"
+    <div className="flex flex-col gap-6">
+      {!hideBackLink && (
+        <Link
+          href={`/projects/${projectId}/grid`}
+          className="text-sm text-muted transition-colors duration-150 hover:text-foreground"
         >
-          {addedToTodo ? "Added to To-Do" : "+ Add to To-Do"}
-        </button>
-      </div>
+          ← Back to grid
+        </Link>
+      )}
 
-      <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold">Assets</h2>
+      <div className="relative">
         <DndContext
           id={`post-dnd-${post.id}`}
           sensors={sensors}
@@ -164,7 +152,7 @@ export function PostEditor({
             items={orderedAssets.map((a) => a.postAssetId)}
             strategy={rectSortingStrategy}
           >
-            <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+            <div ref={scrollRef} className="flex gap-2 overflow-x-auto scroll-smooth pb-1">
               {orderedAssets.map((asset) => (
                 <SortableAsset
                   key={asset.postAssetId}
@@ -192,27 +180,36 @@ export function PostEditor({
             )}
           </DragOverlay>
         </DndContext>
-        {orderedAssets.length > 0 && (
-          <Button
+        {orderedAssets.length > 3 && (
+          <button
             type="button"
-            variant="primary"
-            onClick={handleDownloadAll}
-            disabled={downloading}
-            className="self-start"
+            onClick={scrollMediaRight}
+            title="Scroll for more"
+            className="absolute right-0 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center text-muted transition-colors duration-150 hover:text-foreground"
           >
-            {downloading ? "Preparing…" : "Download all"}
-          </Button>
+            ›
+          </button>
         )}
-        {orderedAssets.length === 0 && (
-          <p className="text-xs text-muted">
-            No images yet — upload one or add from the library below.
-          </p>
-        )}
-      </section>
+      </div>
+
+      {orderedAssets.length > 0 ? (
+        <Button
+          type="button"
+          variant="primary"
+          radius="none"
+          onClick={handleDownloadAll}
+          disabled={downloading}
+          className="w-fit self-start px-6 py-3 text-xs tracking-wide uppercase"
+        >
+          {downloading ? "Preparing…" : "Download Media"}
+        </Button>
+      ) : (
+        <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
+      )}
 
       {canManage && availableMedia.length > 0 && (
         <section className="flex flex-col gap-2">
-          <h2 className="text-sm font-semibold">Add from library</h2>
+          <span className={labelClass}>Add from library</span>
           <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
             {availableMedia.map((item) => (
               <button
@@ -224,7 +221,7 @@ export function PostEditor({
                     router.refresh();
                   })
                 }
-                className="aspect-[3/4] overflow-hidden rounded border border-border"
+                className="aspect-[3/4] overflow-hidden rounded-none border border-border"
               >
                 {item.url && item.mediaType === "image" && (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -239,9 +236,12 @@ export function PostEditor({
         </section>
       )}
 
-      <PostDetailsForm projectId={projectId} post={post} canManage={canManage} />
-
-      <PostLinks projectId={projectId} postId={post.id} links={links} canManage={canManage} />
+      <PostMainForm
+        projectId={projectId}
+        post={post}
+        links={links}
+        canManage={canManage}
+      />
     </div>
   );
 }
@@ -284,7 +284,7 @@ function SortableAsset({
       ref={setNodeRef}
       style={style}
       {...(canManage ? { ...attributes, ...listeners } : {})}
-      className={`relative aspect-[3/4] touch-none overflow-hidden rounded border border-border transition-opacity duration-150 ${
+      className={`relative aspect-[3/4] w-24 shrink-0 touch-none overflow-hidden rounded-none border border-border transition-opacity duration-150 ${
         canManage ? "cursor-grab" : ""
       } ${isDragging ? "opacity-30" : ""}`}
     >
@@ -298,7 +298,7 @@ function SortableAsset({
           }}
           className="absolute right-1 top-1 rounded bg-black/70 px-1.5 text-xs text-white"
         >
-          ✕
+          X
         </button>
       )}
     </div>
@@ -333,6 +333,7 @@ function UploadAssetTile({
         type="file"
         name="file"
         accept="image/*,video/*"
+        multiple
         className="hidden"
         onChange={() => formRef.current?.requestSubmit()}
       />
@@ -340,105 +341,160 @@ function UploadAssetTile({
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={pending}
-        title="Add frame"
-        className="flex aspect-[3/4] items-center justify-center rounded border border-dashed border-border text-2xl text-muted hover:bg-black/[.03] disabled:opacity-60"
+        title="Add media"
+        className="flex aspect-[3/4] w-24 shrink-0 items-center justify-center rounded-none border border-dashed border-border text-2xl text-muted transition-colors duration-150 hover:bg-black/[.03] disabled:opacity-60"
       >
         {pending ? "…" : "+"}
       </button>
-      {state?.message && (
-        <p className="col-span-full text-xs text-error">{state.message}</p>
-      )}
+      {state?.message && <p className="text-xs text-error">{state.message}</p>}
     </form>
   );
 }
 
-function PostDetailsForm({
+const POST_TYPES: PostType[] = ["post", "reel", "carousel"];
+
+function PostMainForm({
   projectId,
   post,
+  links,
   canManage,
 }: {
   projectId: string;
   post: PostRecord;
+  links: PostLinkItem[];
   canManage: boolean;
 }) {
   const [state, action, pending] = useActionState(
     updatePost.bind(null, projectId, post.id),
     undefined,
   );
+  const [postType, setPostType] = useState<PostType>(post.post_type);
+  const [addedToTodo, setAddedToTodo] = useState(false);
+  const [todoError, setTodoError] = useState<string | undefined>();
+  const [, startTransition] = useTransition();
+
+  function handleAddToTodo() {
+    setTodoError(undefined);
+    startTransition(async () => {
+      const result = await convertToTask(projectId, "post", post.id, postType, post.scheduled_date);
+      if (result.success) {
+        setAddedToTodo(true);
+      } else {
+        setTodoError(result.message ?? "Couldn't add to To-Do list.");
+      }
+    });
+  }
 
   return (
-    <form action={action} className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <label className="flex flex-col gap-1 text-sm">
-          Type
-          <select
-            name="post_type"
-            defaultValue={post.post_type}
+    <form action={action} className="flex flex-col gap-6">
+      <input type="hidden" name="post_type" value={postType} />
+
+      <div className="flex gap-2">
+        {POST_TYPES.map((type) => (
+          <button
+            key={type}
+            type="button"
             disabled={!canManage}
-            className="rounded-md border border-border px-2 py-1.5"
+            onClick={() => setPostType(type)}
+            className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 ${
+              postType === type
+                ? "border-foreground bg-foreground text-background"
+                : "border-border text-foreground hover:border-foreground/40"
+            }`}
           >
-            <option value="post">Post</option>
-            <option value="reel">Reel</option>
-            <option value="carousel">Carousel</option>
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-sm">
-          Status
-          <select
-            name="status"
-            defaultValue={post.status}
-            disabled={!canManage}
-            className="rounded-md border border-border px-2 py-1.5"
-          >
-            <option value="draft">Draft</option>
-            <option value="scheduled">Scheduled</option>
-            <option value="published">Published</option>
-          </select>
-        </label>
-        <label className="col-span-2 flex flex-col gap-1 text-sm">
-          Scheduled date
-          <input
-            type="date"
-            name="scheduled_date"
-            defaultValue={post.scheduled_date ?? ""}
-            disabled={!canManage}
-            className="rounded-md border border-border px-2 py-1.5"
-          />
-        </label>
+            {type}
+          </button>
+        ))}
       </div>
 
-      <label className="flex flex-col gap-1 text-sm">
-        Caption
+      <label className="flex flex-col gap-1.5">
+        <span className={labelClass}>Caption</span>
         <textarea
           name="caption"
           defaultValue={post.caption}
           disabled={!canManage}
           rows={3}
-          className="rounded-md border border-border px-3 py-2"
+          placeholder="Live text for caption"
+          className={fieldClass}
         />
       </label>
 
-      <label className="flex flex-col gap-1 text-sm">
-        Notes
+      <PostLinks projectId={projectId} postId={post.id} links={links} canManage={canManage} />
+
+      <label className="flex flex-col gap-1.5">
+        <span className={labelClass}>Notes</span>
         <textarea
           name="notes"
           defaultValue={post.notes}
           disabled={!canManage}
           rows={3}
-          className="rounded-md border border-border px-3 py-2"
+          placeholder="Live text for notes"
+          className={fieldClass}
         />
       </label>
 
-      {canManage && (
-        <button
-          type="submit"
-          disabled={pending}
-          className="self-start rounded-md bg-foreground px-4 py-2 text-sm text-background disabled:opacity-60"
-        >
-          {pending ? "Saving..." : "Save"}
-        </button>
-      )}
+      <div className="flex flex-col gap-3">
+        <span className={labelClass}>Schedule post</span>
+        <div className="grid grid-cols-3 gap-3">
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Type</span>
+            <select
+              value={postType}
+              onChange={(e) => setPostType(e.target.value as PostType)}
+              disabled={!canManage}
+              className={fieldClass}
+            >
+              <option value="post">Post</option>
+              <option value="reel">Reel</option>
+              <option value="carousel">Carousel</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Status</span>
+            <select name="status" defaultValue={post.status} disabled={!canManage} className={fieldClass}>
+              <option value="draft">Draft</option>
+              <option value="scheduled">Scheduled</option>
+              <option value="published">Published</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Schedule date</span>
+            <input
+              type="date"
+              name="scheduled_date"
+              defaultValue={post.scheduled_date ?? ""}
+              disabled={!canManage}
+              className={fieldClass}
+            />
+          </label>
+        </div>
+      </div>
+
+      <Button
+        type="button"
+        variant="primary"
+        radius="none"
+        onClick={handleAddToTodo}
+        disabled={addedToTodo}
+        className="w-full py-3 text-xs tracking-wide uppercase"
+      >
+        {addedToTodo ? "Added to To-Do" : "Add to → To Do List"}
+      </Button>
+      {todoError && <p className="text-sm text-error">{todoError}</p>}
+
       {state?.message && <p className="text-sm text-error">{state.message}</p>}
+
+      {canManage && (
+        <Button
+          type="submit"
+          variant="primary"
+          radius="none"
+          disabled={pending}
+          className="w-full py-3 text-xs tracking-wide uppercase"
+        >
+          {pending ? "Saving..." : "Save Changes"}
+        </Button>
+      )}
     </form>
   );
 }
@@ -454,66 +510,89 @@ function PostLinks({
   links: PostLinkItem[];
   canManage: boolean;
 }) {
-  const [state, action, pending] = useActionState(
-    addPostLink.bind(null, projectId, postId),
-    undefined,
-  );
   const router = useRouter();
   const [, startTransition] = useTransition();
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState<string | undefined>();
+  const labelRef = useRef<HTMLInputElement>(null);
+  const urlRef = useRef<HTMLInputElement>(null);
+
+  function handleAdd() {
+    const label = labelRef.current?.value.trim() ?? "";
+    const url = urlRef.current?.value.trim() ?? "";
+    if (!url) return;
+    setPending(true);
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set("label", label);
+      formData.set("url", url);
+      const result = await addPostLink(projectId, postId, undefined, formData);
+      setPending(false);
+      if (result?.message) {
+        setMessage(result.message);
+        return;
+      }
+      setMessage(undefined);
+      if (labelRef.current) labelRef.current.value = "";
+      if (urlRef.current) urlRef.current.value = "";
+      router.refresh();
+    });
+  }
 
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-sm font-semibold">Links</h2>
-      <ul className="flex flex-col gap-1">
-        {links.map((link) => (
-          <li key={link.id} className="flex items-center justify-between gap-2 text-sm">
-            <a href={link.url} target="_blank" rel="noreferrer" className="truncate underline">
-              {link.label || link.url}
-            </a>
-            {canManage && (
-              <button
-                type="button"
-                onClick={() =>
-                  startTransition(async () => {
-                    await removePostLink(projectId, postId, link.id);
-                    router.refresh();
-                  })
-                }
-                className="text-xs text-error hover:underline"
-              >
-                Remove
-              </button>
-            )}
-          </li>
-        ))}
-        {links.length === 0 && (
-          <p className="text-xs text-muted">No links yet.</p>
-        )}
-      </ul>
+    <div className="flex flex-col gap-2">
+      <span className={labelClass}>Links</span>
+      {links.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {links.map((link) => (
+            <li key={link.id} className="flex items-center justify-between gap-2 text-sm">
+              <a href={link.url} target="_blank" rel="noreferrer" className="truncate underline">
+                {link.label || link.url}
+              </a>
+              {canManage && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    startTransition(async () => {
+                      await removePostLink(projectId, postId, link.id);
+                      router.refresh();
+                    })
+                  }
+                  className="shrink-0 text-xs text-error transition-colors duration-150 hover:underline"
+                >
+                  Remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
 
       {canManage && (
-        <form action={action} className="flex gap-2">
+        <div className="flex gap-2">
           <input
-            name="label"
+            ref={labelRef}
             placeholder="Label"
-            className="w-32 rounded-md border border-border px-2 py-1.5 text-sm"
+            className="w-28 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
           />
           <input
-            name="url"
-            placeholder="https://..."
-            required
-            className="flex-1 rounded-md border border-border px-2 py-1.5 text-sm"
+            ref={urlRef}
+            placeholder="URL"
+            className="flex-1 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
           />
-          <button
-            type="submit"
+          <Button
+            type="button"
+            variant="primary"
+            radius="full"
+            onClick={handleAdd}
             disabled={pending}
-            className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background disabled:opacity-60"
+            className="shrink-0"
           >
             {pending ? "Adding..." : "Add"}
-          </button>
-        </form>
+          </Button>
+        </div>
       )}
-      {state?.message && <p className="text-xs text-error">{state.message}</p>}
-    </section>
+      {message && <p className="text-xs text-error">{message}</p>}
+    </div>
   );
 }

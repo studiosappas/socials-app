@@ -76,12 +76,12 @@ export async function convertToTask(
   sourceId: string,
   title: string,
   dueDate: string | null,
-) {
+): Promise<{ success: boolean; message?: string }> {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return;
+  if (!user) return { success: false, message: "Not signed in." };
 
   const { data: existing } = await supabase
     .from("tasks")
@@ -90,9 +90,9 @@ export async function convertToTask(
     .eq("source_type", sourceType)
     .eq("source_id", sourceId)
     .maybeSingle();
-  if (existing) return;
+  if (existing) return { success: true };
 
-  await supabase.from("tasks").insert({
+  const { error } = await supabase.from("tasks").insert({
     user_id: user.id,
     project_id: projectId,
     title,
@@ -100,7 +100,12 @@ export async function convertToTask(
     source_type: sourceType,
     source_id: sourceId,
   });
+  if (error) {
+    console.error("convertToTask insert failed:", error.message);
+    return { success: false, message: error.message };
+  }
 
   revalidatePath("/projects/todo");
   revalidatePath(`/projects/${projectId}/calendar`);
+  return { success: true };
 }

@@ -59,7 +59,15 @@ create table public.projects (
   ig_following_count integer not null default 0,
   ig_website_link text not null default '',
   ig_handle text not null default '',
+  content_pillars text not null default '',
+  industry text not null default '',
+  posts_per_week smallint not null default 0,
+  stories_per_week smallint not null default 0,
+  reels_per_week smallint not null default 0,
+  newsletter_per_week smallint not null default 0,
   profile_photo_path text,
+  logo_storage_path text,
+  brand_image_storage_path text,
   show_scheduled_dates boolean not null default true,
   created_by uuid not null references public.profiles (id),
   created_at timestamptz not null default now()
@@ -163,6 +171,24 @@ $$;
 revoke all on function public.get_user_id_by_email(text) from public;
 grant execute on function public.get_user_id_by_email(text) to authenticated;
 
+-- ---------- Grid sidebar: flexible custom sections (beyond Notes/Content Pillars) ----------
+create table public.project_sections (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  title text not null default '',
+  body text not null default '',
+  position integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+alter table public.project_sections enable row level security;
+
+create policy "Members can view project sections" on public.project_sections for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage project sections" on public.project_sections for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
 -- ---------- Media library ----------
 create table public.media_assets (
   id uuid primary key default gen_random_uuid(),
@@ -205,7 +231,7 @@ create table public.posts (
   caption text not null default '',
   notes text not null default '',
   scheduled_date date,
-  status text not null default 'draft' check (status in ('draft', 'scheduled', 'published')),
+  status text not null default 'draft' check (status in ('draft', 'scheduled', 'published', 'in_review')),
   created_at timestamptz not null default now()
 );
 
@@ -214,8 +240,15 @@ create table public.grid_slots (
   row_id uuid not null references public.grid_rows (id) on delete cascade,
   position integer not null check (position between 0 and 2),
   post_id uuid references public.posts (id) on delete set null,
+  cover_transform jsonb,
   unique (row_id, position)
 );
+
+-- A post can only ever occupy one grid slot at a time. Deferred so a swap
+-- between two slots (each briefly holding the other's post_id mid-batch)
+-- doesn't trip the constraint until the whole transaction commits.
+alter table public.grid_slots
+  add constraint grid_slots_post_id_unique unique (post_id) deferrable initially deferred;
 
 create table public.post_assets (
   id uuid primary key default gen_random_uuid(),
@@ -253,6 +286,24 @@ create policy "Admins manage grid slots" on public.grid_slots for all to authent
   using (exists (select 1 from public.grid_rows r where r.id = row_id and public.project_role(r.project_id) in ('owner', 'admin')))
   with check (exists (select 1 from public.grid_rows r where r.id = row_id and public.project_role(r.project_id) in ('owner', 'admin')));
 
+-- Reassigns every changed grid slot's post_id in a single transaction so a
+-- concurrent read can never observe a post assigned to two slots at once.
+create or replace function public.reorder_grid_slots(updates jsonb)
+returns void
+language plpgsql
+security invoker
+as $$
+declare
+  u jsonb;
+begin
+  for u in select * from jsonb_array_elements(updates) loop
+    update public.grid_slots
+    set post_id = (u->>'postId')::uuid
+    where id = (u->>'slotId')::uuid;
+  end loop;
+end;
+$$;
+
 create policy "Members can view post assets" on public.post_assets for select to authenticated
   using (exists (select 1 from public.posts p where p.id = post_id and public.is_project_member(p.project_id)));
 create policy "Admins manage post assets" on public.post_assets for all to authenticated
@@ -288,8 +339,17 @@ create table public.stories (
   project_id uuid not null references public.projects (id) on delete cascade,
   name text not null default '',
   scheduled_date date,
+  status text not null default 'draft' check (status in ('draft', 'scheduled', 'published')),
+  notes text not null default '',
   position integer not null default 0,
   created_at timestamptz not null default now()
+);
+
+create table public.story_links (
+  id uuid primary key default gen_random_uuid(),
+  story_id uuid not null references public.stories (id) on delete cascade,
+  url text not null,
+  label text not null default ''
 );
 
 create table public.story_frames (
@@ -302,6 +362,7 @@ create table public.story_frames (
 
 alter table public.stories enable row level security;
 alter table public.story_frames enable row level security;
+alter table public.story_links enable row level security;
 
 create policy "Members can view stories" on public.stories for select to authenticated using (public.is_project_member(project_id));
 create policy "Admins manage stories" on public.stories for all to authenticated
@@ -311,6 +372,12 @@ create policy "Admins manage stories" on public.stories for all to authenticated
 create policy "Members can view story frames" on public.story_frames for select to authenticated
   using (exists (select 1 from public.stories s where s.id = story_id and public.is_project_member(s.project_id)));
 create policy "Admins manage story frames" on public.story_frames for all to authenticated
+  using (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin')))
+  with check (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin')));
+
+create policy "Members can view story links" on public.story_links for select to authenticated
+  using (exists (select 1 from public.stories s where s.id = story_id and public.is_project_member(s.project_id)));
+create policy "Admins manage story links" on public.story_links for all to authenticated
   using (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin')))
   with check (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin')));
 
@@ -377,7 +444,8 @@ create policy "Admins manage design task assets" on public.design_task_assets fo
   using (exists (select 1 from public.design_tasks t where t.id = design_task_id and public.project_role(t.project_id) in ('owner', 'admin')))
   with check (exists (select 1 from public.design_tasks t where t.id = design_task_id and public.project_role(t.project_id) in ('owner', 'admin')));
 
--- ---------- Brief (Notion-style live doc per project) ----------
+-- ---------- Brief (deprecated free-text doc; superseded by the structured
+-- brief_tasks/brief_task_items/brief_task_frames model below) ----------
 create table public.project_briefs (
   project_id uuid primary key references public.projects (id) on delete cascade,
   body_json jsonb not null default '{}'::jsonb,
@@ -391,6 +459,143 @@ create policy "Members can view brief" on public.project_briefs for select to au
 create policy "Admins manage brief" on public.project_briefs for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin'))
   with check (public.project_role(project_id) in ('owner', 'admin'));
+
+-- ---------- Brief v2: structured per-task content briefs ----------
+create table public.brief_tasks (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  name text not null default 'Task',
+  content_types text[] not null default array['story'],
+  position int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table public.brief_task_items (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.brief_tasks (id) on delete cascade,
+  section text not null check (section in ('references', 'images', 'products')),
+  kind text not null check (kind in ('link', 'image')),
+  url text,
+  label text not null default '',
+  notes text not null default '',
+  attachment_id uuid references public.brief_attachments (id) on delete set null,
+  position int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table public.brief_task_frames (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.brief_tasks (id) on delete cascade,
+  section text not null check (section in ('frames', 'text')),
+  label text not null,
+  body text not null default '',
+  position int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+alter table public.brief_tasks enable row level security;
+alter table public.brief_task_items enable row level security;
+alter table public.brief_task_frames enable row level security;
+
+create policy "Members can view brief tasks" on public.brief_tasks for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage brief tasks" on public.brief_tasks for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+create policy "Members can view brief task items" on public.brief_task_items for select to authenticated
+  using (exists (select 1 from public.brief_tasks t where t.id = task_id and public.is_project_member(t.project_id)));
+create policy "Admins manage brief task items" on public.brief_task_items for all to authenticated
+  using (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin')))
+  with check (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin')));
+
+create policy "Members can view brief task frames" on public.brief_task_frames for select to authenticated
+  using (exists (select 1 from public.brief_tasks t where t.id = task_id and public.is_project_member(t.project_id)));
+create policy "Admins manage brief task frames" on public.brief_task_frames for all to authenticated
+  using (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin')))
+  with check (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin')));
+
+-- ---------- Brand strategy & knowledge base ----------
+create table public.brand_strategy (
+  project_id uuid primary key references public.projects (id) on delete cascade,
+  brand_values text not null default '',
+  vision text not null default '',
+  voice text not null default '',
+  positioning text not null default '',
+  audience_notes text not null default '',
+  ai_summary text not null default '',
+  ai_brand_dna text not null default '',
+  ai_tone_of_voice text not null default '',
+  ai_communication_style text not null default '',
+  ai_content_pillars text not null default '',
+  ai_audience_snapshot text not null default '',
+  ai_visual_language text not null default '',
+  ai_avoid text not null default '',
+  ai_insights jsonb,
+  ai_insights_updated_at timestamptz,
+  spectrum_serious_playful smallint not null default 50,
+  spectrum_classic_futuristic smallint not null default 50,
+  spectrum_premium_accessible smallint not null default 50,
+  spectrum_editorial_commercial smallint not null default 50,
+  spectrum_minimal_expressive smallint not null default 50,
+  spectrum_luxury_casual smallint not null default 50,
+  updated_at timestamptz not null default now()
+);
+
+create table public.brand_documents (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  source_type text not null default 'file' check (source_type in ('file', 'link')),
+  storage_path text,
+  url text,
+  filename text not null,
+  uploaded_by uuid not null references public.profiles (id),
+  ai_analysis text not null default '',
+  created_at timestamptz not null default now()
+);
+
+alter table public.brand_strategy enable row level security;
+alter table public.brand_documents enable row level security;
+
+create policy "Members can view brand strategy" on public.brand_strategy for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage brand strategy" on public.brand_strategy for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+create policy "Members can view brand documents" on public.brand_documents for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage brand documents" on public.brand_documents for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+insert into storage.buckets (id, name, public)
+values ('brand-documents', 'brand-documents', false)
+on conflict (id) do nothing;
+
+create policy "Members can read brand documents storage"
+  on storage.objects for select
+  to authenticated
+  using (
+    bucket_id = 'brand-documents'
+    and public.is_project_member((storage.foldername(name))[1]::uuid)
+  );
+
+create policy "Admins can upload brand documents storage"
+  on storage.objects for insert
+  to authenticated
+  with check (
+    bucket_id = 'brand-documents'
+    and public.project_role((storage.foldername(name))[1]::uuid) in ('owner', 'admin')
+  );
+
+create policy "Admins can delete brand documents storage"
+  on storage.objects for delete
+  to authenticated
+  using (
+    bucket_id = 'brand-documents'
+    and public.project_role((storage.foldername(name))[1]::uuid) in ('owner', 'admin')
+  );
 
 -- ---------- Personal to-do list (global, user-scoped, spans every project) ----------
 create table public.tasks (
@@ -412,10 +617,48 @@ create policy "Users manage their own tasks" on public.tasks for all to authenti
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
 
+-- ---------- Brief image attachments (original preserved separately from annotations) ----------
+create table public.brief_attachments (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  original_storage_path text not null,
+  preview_storage_path text,
+  annotation_json jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table public.brief_attachments enable row level security;
+
+create policy "Members can view brief attachments" on public.brief_attachments for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage brief attachments" on public.brief_attachments for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
 -- ---------- Storage ----------
 insert into storage.buckets (id, name, public)
 values ('project-media', 'project-media', false)
 on conflict (id) do nothing;
+
+-- Public bucket for user profile photos, keyed by the owning user's id folder.
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', true)
+on conflict (id) do nothing;
+
+create policy "Anyone can read avatars"
+  on storage.objects for select
+  to authenticated
+  using (bucket_id = 'avatars');
+
+create policy "Users can upload their own avatar"
+  on storage.objects for insert
+  to authenticated
+  with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+
+create policy "Users can update their own avatar"
+  on storage.objects for update
+  to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- Public bucket for Brief doc images: unlike project-media, brief content is a
 -- long-lived document, so images need URLs that never expire (no signed-URL refresh).
