@@ -33,6 +33,15 @@ export default async function GridPage({
     .eq("id", projectId)
     .single();
 
+  // Isolated from the select above -- instagram_url/tiktok_url are new
+  // columns that may not exist yet on a not-yet-migrated database, and
+  // PostgREST fails the whole select if any referenced column is missing.
+  const { data: socialLinks } = await supabase
+    .from("projects")
+    .select("instagram_url, tiktok_url")
+    .eq("id", projectId)
+    .maybeSingle();
+
   const profilePhotoUrl = project?.profile_photo_path
     ? (
         await supabase.storage
@@ -45,7 +54,7 @@ export default async function GridPage({
 
   const { data: mediaAssets } = await supabase
     .from("media_assets")
-    .select("id, storage_path, media_type, created_at")
+    .select("id, storage_path, media_type, poster_storage_path, created_at")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
 
@@ -54,6 +63,7 @@ export default async function GridPage({
   for (const row of gridRowsWithPaths) {
     for (const slot of row.slots) {
       if (slot.coverStoragePath) allPaths.add(slot.coverStoragePath);
+      if (slot.coverOriginalPath) allPaths.add(slot.coverOriginalPath);
     }
   }
 
@@ -75,6 +85,9 @@ export default async function GridPage({
       id: slot.slotId,
       postId: slot.postId,
       thumbnailUrl: slot.coverStoragePath ? urlByPath.get(slot.coverStoragePath) ?? null : null,
+      coverMediaType: slot.coverMediaType,
+      coverMediaAssetId: slot.coverMediaAssetId,
+      coverOriginalUrl: slot.coverOriginalPath ? urlByPath.get(slot.coverOriginalPath) ?? null : null,
       assetCount: slot.assetCount,
       coverTransform: slot.coverTransform,
     })),
@@ -84,6 +97,11 @@ export default async function GridPage({
     id: asset.id,
     url: urlByPath.get(asset.storage_path) ?? null,
     mediaType: asset.media_type,
+    // Kept alongside the signed url (not just the url) so an undone delete
+    // can restore this exact asset without re-uploading -- see
+    // restoreMediaAsset in lib/actions/grid.ts.
+    storagePath: asset.storage_path,
+    posterStoragePath: asset.poster_storage_path ?? null,
   }));
 
   return (
@@ -98,6 +116,8 @@ export default async function GridPage({
       websiteUrl={project?.ig_website_link ?? ""}
       industry={project?.industry ?? ""}
       platform={project?.platform ?? "instagram"}
+      instagramUrl={socialLinks?.instagram_url ?? ""}
+      tiktokUrl={socialLinks?.tiktok_url ?? ""}
       profilePhotoUrl={profilePhotoUrl}
       postsPerWeek={project?.posts_per_week ?? 0}
       storiesPerWeek={project?.stories_per_week ?? 0}

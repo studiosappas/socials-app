@@ -14,9 +14,28 @@ export default async function ProjectsPage() {
     .select("role, projects(id, name, created_at)")
     .eq("user_id", user!.id);
 
+  const projectIds = (memberships ?? [])
+    .map((m) => m.projects?.id)
+    .filter((id): id is string => Boolean(id));
+
+  // Isolated from the join above -- `archived` is a newer projects column
+  // that may not exist yet on a not-yet-migrated database, and PostgREST
+  // fails the WHOLE embedded select (every project, not just the archived
+  // flag) if any requested column -- even on the joined table -- is
+  // missing. That's what made a pending migration look like "all my
+  // projects are gone": the entire list query was failing silently and
+  // returning nothing. Isolating it here means a pending migration only
+  // means archived projects aren't filtered out yet, never that the whole
+  // list disappears.
+  const { data: archivedRows } = projectIds.length
+    ? await supabase.from("projects").select("id, archived").in("id", projectIds)
+    : { data: [] };
+  const archivedById = new Map((archivedRows ?? []).map((r) => [r.id, r.archived]));
+
   const projects = (memberships ?? [])
     .map((m) => ({ ...m.projects, role: m.role }))
-    .filter((p): p is NonNullable<typeof p> => Boolean(p?.id));
+    .filter((p): p is NonNullable<typeof p> => Boolean(p?.id))
+    .filter((p) => !archivedById.get(p.id));
 
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-10 px-8 py-16">

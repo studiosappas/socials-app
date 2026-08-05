@@ -38,6 +38,17 @@ export async function downloadAssetsAsZip(assets: ZipAsset[], zipName: string) {
   saveAs(zipBlob, zipName);
 }
 
+// Same fetch-then-saveAs approach as the zip path above, for a single file --
+// a plain <a download> often just navigates instead of downloading for
+// cross-origin storage URLs without the right Content-Disposition header, so
+// this fetches the real bytes and hands them to file-saver directly.
+export async function downloadAsset(url: string, filename: string) {
+  const response = await fetch(url);
+  if (!response.ok) return;
+  const blob = await response.blob();
+  saveAs(blob, filename);
+}
+
 // Derives a filename from a signed/public asset URL's path (media_assets doesn't
 // store the original upload's filename, so this falls back to the storage path's
 // own basename — still stable and collision-safe, just not the original name).

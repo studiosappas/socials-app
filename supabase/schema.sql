@@ -8,6 +8,10 @@ create table public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
   name text not null,
   avatar_url text,
+  -- Synced from auth.users at signup (see handle_new_user below) since
+  -- auth.users itself isn't queryable through PostgREST -- this is what lets
+  -- Settings > Project Information show "Owner Email" without a service-role RPC.
+  email text,
   created_at timestamptz not null default now()
 );
 
@@ -35,8 +39,8 @@ language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into public.profiles (id, name)
-  values (new.id, coalesce(new.raw_user_meta_data ->> 'name', split_part(new.email, '@', 1)));
+  insert into public.profiles (id, name, email)
+  values (new.id, coalesce(new.raw_user_meta_data ->> 'name', split_part(new.email, '@', 1)), new.email);
   return new;
 end;
 $$;
@@ -50,7 +54,7 @@ create table public.projects (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   brand_notes text not null default '',
-  platform text not null default 'instagram' check (platform in ('instagram', 'tiktok')),
+  platform text not null default 'instagram' check (platform in ('instagram', 'tiktok', 'pinterest', 'youtube')),
   ig_username text not null default '',
   ig_display_name text not null default '',
   ig_bio text not null default '',
@@ -59,6 +63,8 @@ create table public.projects (
   ig_following_count integer not null default 0,
   ig_website_link text not null default '',
   ig_handle text not null default '',
+  instagram_url text not null default '',
+  tiktok_url text not null default '',
   content_pillars text not null default '',
   industry text not null default '',
   posts_per_week smallint not null default 0,
@@ -69,16 +75,26 @@ create table public.projects (
   logo_storage_path text,
   brand_image_storage_path text,
   show_scheduled_dates boolean not null default true,
+  -- Hidden from the main projects list but never deleted -- distinct from
+  -- Danger Zone's "Delete Project", which is destructive/permanent.
+  archived boolean not null default false,
   created_by uuid not null references public.profiles (id),
   created_at timestamptz not null default now()
 );
 
-create type public.project_role as enum ('owner', 'admin', 'designer');
+-- 'designer' is a legacy value kept for existing rows/RLS compatibility --
+-- new invites use 'editor' instead (Settings > Team & Permissions' 5-role set).
+create type public.project_role as enum ('owner', 'admin', 'designer', 'editor', 'viewer', 'client');
 
 create table public.project_members (
   project_id uuid not null references public.projects (id) on delete cascade,
   user_id uuid not null references public.profiles (id) on delete cascade,
-  role public.project_role not null default 'designer',
+  role public.project_role not null default 'editor',
+  -- null = use the role's default access; a non-null array of page keys
+  -- (overview/grid/stories/calendar/brief/settings) is a per-member override,
+  -- set from Settings > Team & Permissions' "Custom Permissions" checklist.
+  custom_permissions text[],
+  notification_prefs jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   primary key (project_id, user_id)
 );
@@ -196,6 +212,18 @@ create table public.media_assets (
   storage_path text not null,
   media_type text not null default 'image' check (media_type in ('image', 'video')),
   uploaded_by uuid not null references public.profiles (id),
+  -- Same original/preview/annotation_json pattern as brief_attachments:
+  -- storage_path is the untouched original; preview_storage_path is the
+  -- flattened annotated version shown wherever this asset is displayed
+  -- (falls back to storage_path when null); annotation_json restores the
+  -- editable Fabric object state across sessions.
+  preview_storage_path text,
+  annotation_json jsonb,
+  -- Static first-frame capture for video assets (generated client-side at
+  -- upload time), so Grid can show a poster image instead of ever mounting
+  -- a <video> element for its cover -- null for images, and null for videos
+  -- uploaded before this column existed.
+  poster_storage_path text,
   created_at timestamptz not null default now()
 );
 
@@ -210,6 +238,12 @@ create policy "Members can upload media"
   on public.media_assets for insert
   to authenticated
   with check (public.is_project_member(project_id) and uploaded_by = auth.uid());
+
+create policy "Admins update media"
+  on public.media_assets for update
+  to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
 
 create policy "Owners/admins can delete media"
   on public.media_assets for delete
@@ -231,7 +265,14 @@ create table public.posts (
   caption text not null default '',
   notes text not null default '',
   scheduled_date date,
+  scheduled_time time,
   status text not null default 'draft' check (status in ('draft', 'scheduled', 'published', 'in_review')),
+  -- Crop/pan/zoom for the post's cover (its first carousel asset), keyed by
+  -- the post itself rather than whatever grid_slots cell it happens to be
+  -- sitting in right now -- so moving a post to a different cell keeps its
+  -- crop. (grid_slots.cover_transform below is the old, cell-keyed location
+  -- this replaced; left in place, unused, rather than dropped.)
+  cover_transform jsonb,
   created_at timestamptz not null default now()
 );
 
@@ -240,6 +281,9 @@ create table public.grid_slots (
   row_id uuid not null references public.grid_rows (id) on delete cascade,
   position integer not null check (position between 0 and 2),
   post_id uuid references public.posts (id) on delete set null,
+  -- Deprecated: crop now lives on posts.cover_transform (see above) so it
+  -- follows the post when moved between cells. Column kept, unused, rather
+  -- than dropped, to avoid a migration that could strand data.
   cover_transform jsonb,
   unique (row_id, position)
 );
@@ -717,3 +761,63 @@ create policy "Admins can delete project media"
     bucket_id = 'project-media'
     and public.project_role((storage.foldername(name))[1]::uuid) in ('owner', 'admin')
   );
+
+-- ---------- Settings > Activity Log: a lightweight, append-only feed of
+-- notable events (media uploads, status changes, member joins) -- actor
+-- name is denormalized at write time so the log stays readable even after a
+-- member leaves the project. Not an exhaustive audit trail of every action. ----------
+create table public.activity_log (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  actor_name text not null,
+  action text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.activity_log enable row level security;
+
+create policy "Members can view activity log"
+  on public.activity_log for select
+  to authenticated
+  using (public.is_project_member(project_id));
+
+create policy "Members can insert activity log"
+  on public.activity_log for insert
+  to authenticated
+  with check (public.is_project_member(project_id));
+
+-- ---------- Notification bell (top nav) -- real per-user notification
+-- instances, distinct from project_members.notification_prefs (which just
+-- stores which event types a member wants). A write checks the recipient's
+-- prefs before inserting; this table is only ever the resulting feed. ----------
+create table public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  project_id uuid references public.projects (id) on delete cascade,
+  event_key text not null,
+  title text not null,
+  description text not null default '',
+  icon text not null default '🔔',
+  link text,
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+alter table public.notifications enable row level security;
+
+create policy "Users can view their own notifications"
+  on public.notifications for select
+  to authenticated
+  using (user_id = auth.uid());
+
+create policy "Users can update their own notifications"
+  on public.notifications for update
+  to authenticated
+  using (user_id = auth.uid());
+
+-- Any project member can create a notification FOR another member (e.g. the
+-- inviter writing "you were invited" to the invitee) -- not just for themself.
+create policy "Project members can create notifications for other members"
+  on public.notifications for insert
+  to authenticated
+  with check (project_id is null or public.is_project_member(project_id));

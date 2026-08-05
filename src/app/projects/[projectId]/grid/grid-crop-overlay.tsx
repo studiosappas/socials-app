@@ -210,22 +210,28 @@ function CornerHandle({
   const isTop = corner.startsWith("t");
   const isLeft = corner.endsWith("l");
   return (
+    // The visible dot stays the same small size as before (matches the
+    // established Canva-style look); the actual pointer-hit area is a
+    // larger invisible box around it, so it's comfortable to grab with a
+    // finger without looking bigger on screen.
     <div
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      className={`absolute z-10 h-5 w-5 touch-none rounded-full border-2 border-foreground bg-background shadow-[0_1px_5px_rgba(0,0,0,0.35)] ${
+      className={`absolute z-10 flex h-9 w-9 touch-none items-center justify-center ${
         isTop && isLeft ? "cursor-nwse-resize" : ""
       } ${isTop && !isLeft ? "cursor-nesw-resize" : ""} ${!isTop && isLeft ? "cursor-nesw-resize" : ""} ${
         !isTop && !isLeft ? "cursor-nwse-resize" : ""
       }`}
       style={{
-        top: isTop ? -10 : undefined,
-        bottom: !isTop ? -10 : undefined,
-        left: isLeft ? -10 : undefined,
-        right: !isLeft ? -10 : undefined,
+        top: isTop ? -18 : undefined,
+        bottom: !isTop ? -18 : undefined,
+        left: isLeft ? -18 : undefined,
+        right: !isLeft ? -18 : undefined,
       }}
-    />
+    >
+      <div className="h-5 w-5 rounded-full border-2 border-foreground bg-background shadow-[0_1px_5px_rgba(0,0,0,0.35)]" />
+    </div>
   );
 }
 

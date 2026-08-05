@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { logActivity } from "@/lib/activity-log";
 
 export type CalendarItemType = "post" | "story";
 
@@ -30,6 +31,9 @@ export async function scheduleItem(
 
 export async function createPostForDate(projectId: string, date: string): Promise<string> {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
   const { data: post, error } = await supabase
     .from("posts")
@@ -41,6 +45,8 @@ export async function createPostForDate(projectId: string, date: string): Promis
     throw new Error(error?.message ?? "Failed to create post.");
   }
 
+  if (user) await logActivity(supabase, projectId, user.id, "created a post");
+
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/grid`);
   return post.id;
@@ -48,6 +54,9 @@ export async function createPostForDate(projectId: string, date: string): Promis
 
 export async function createStoryForDate(projectId: string, date: string): Promise<string> {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
   const { count } = await supabase
     .from("stories")
@@ -68,6 +77,8 @@ export async function createStoryForDate(projectId: string, date: string): Promi
   if (error || !story) {
     throw new Error(error?.message ?? "Failed to create story.");
   }
+
+  if (user) await logActivity(supabase, projectId, user.id, "created a story");
 
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/stories`);

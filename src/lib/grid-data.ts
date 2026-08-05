@@ -9,6 +9,12 @@ export type GridSlotWithPath = {
   postId: string | null;
   coverStoragePath: string | null;
   coverMediaType: "image" | "video" | null;
+  // The cover's own media_assets row + its raw (never-a-poster) storage
+  // path -- only needed so a video with no poster yet can offer a
+  // "Regenerate Poster" action (video-poster.ts's generatePosterFromVideoUrl
+  // needs the actual video file to capture a frame from).
+  coverMediaAssetId: string | null;
+  coverOriginalPath: string | null;
   assetCount: number;
   coverTransform: CoverTransform | null;
 };
@@ -38,40 +44,87 @@ export async function getGridRowsWithCoverPaths(
         .order("position")
     : { data: [] };
 
-  // Fetched independently from the core slot list above: cover_transform is a
-  // newer column that may not exist yet on a not-yet-migrated database, and
-  // PostgREST fails an entire select if any requested column is missing --
-  // isolating it here means a pending migration only loses crop data, not the
-  // whole grid.
-  const slotIds = (slots ?? []).map((s) => s.id);
-  const { data: transformRows } = slotIds.length
-    ? await supabase.from("grid_slots").select("id, cover_transform").in("id", slotIds)
-    : { data: [] };
-  const transformBySlotId = new Map<string, CoverTransform | null>();
-  for (const t of transformRows ?? []) {
-    transformBySlotId.set(t.id, (t.cover_transform as CoverTransform | null) ?? null);
-  }
-
   const postIds = (slots ?? [])
     .map((s) => s.post_id)
     .filter((id): id is string => Boolean(id));
 
+  // Fetched independently from the core slot list above: cover_transform is a
+  // newer column that may not exist yet on a not-yet-migrated database, and
+  // PostgREST fails an entire select if any requested column is missing --
+  // isolating it here means a pending migration only loses crop data, not the
+  // whole grid. Keyed by post_id (not slot_id) so a post's crop stays
+  // attached to it when moved to a different grid cell -- see posts.cover_transform.
+  const { data: transformRows } = postIds.length
+    ? await supabase.from("posts").select("id, cover_transform").in("id", postIds)
+    : { data: [] };
+  const transformByPostId = new Map<string, CoverTransform | null>();
+  for (const t of transformRows ?? []) {
+    transformByPostId.set(t.id, (t.cover_transform as CoverTransform | null) ?? null);
+  }
+
   const { data: postAssets } = postIds.length
     ? await supabase
         .from("post_assets")
-        .select("post_id, position, media_assets(storage_path, media_type)")
+        .select("post_id, position, media_assets(id, storage_path, media_type)")
         .in("post_id", postIds)
         .order("position")
     : { data: [] };
 
+  // Fetched independently, same reasoning as cover_transform above:
+  // preview_storage_path/poster_storage_path are newer columns that may not
+  // exist yet on a not-yet-migrated database, and isolating them here means
+  // a pending migration only means edited covers/video posters aren't
+  // reflected yet, not that the whole grid fails to load. preview_storage_path
+  // is what makes an edited cover image (via the post editor's frame ⋮ menu
+  // -> Edit Image) show up here; poster_storage_path is a video's static
+  // first-frame capture, generated at upload time -- Grid never renders a
+  // <video>, so a video cover always resolves to this (or nothing) instead
+  // of the raw video file's own storage_path.
+  //
+  // These are TWO SEPARATE queries, not one bundled select -- preview_storage_path
+  // has been live for a while and poster_storage_path is newer/still-pending
+  // on some databases; bundling them meant a still-missing poster_storage_path
+  // column failed the WHOLE select (PostgREST fails entirely on any missing
+  // column), silently wiping out already-working annotation previews too.
+  // Isolating each means a pending poster_storage_path migration only means
+  // videos don't have posters yet, never that existing image edits disappear.
+  const mediaAssetIds = (postAssets ?? [])
+    .map((pa) => (pa.media_assets as { id: string } | null)?.id)
+    .filter((id): id is string => Boolean(id));
+  const { data: previewRows } = mediaAssetIds.length
+    ? await supabase.from("media_assets").select("id, preview_storage_path").in("id", mediaAssetIds)
+    : { data: [] };
+  const previewByMediaId = new Map<string, string | null>();
+  for (const r of previewRows ?? []) {
+    const row = r as { id: string; preview_storage_path: string | null };
+    previewByMediaId.set(row.id, row.preview_storage_path ?? null);
+  }
+
+  const { data: posterRows } = mediaAssetIds.length
+    ? await supabase.from("media_assets").select("id, poster_storage_path").in("id", mediaAssetIds)
+    : { data: [] };
+  const posterByMediaId = new Map<string, string | null>();
+  for (const r of posterRows ?? []) {
+    const row = r as { id: string; poster_storage_path: string | null };
+    posterByMediaId.set(row.id, row.poster_storage_path ?? null);
+  }
+
   const coverPathByPost = new Map<string, string | null>();
   const coverTypeByPost = new Map<string, "image" | "video" | null>();
+  const coverMediaIdByPost = new Map<string, string | null>();
+  const coverOriginalPathByPost = new Map<string, string | null>();
   const countByPost = new Map<string, number>();
   for (const pa of postAssets ?? []) {
-    const media = pa.media_assets as { storage_path: string; media_type: "image" | "video" } | null;
+    const media = pa.media_assets as { id: string; storage_path: string; media_type: "image" | "video" } | null;
     if (!coverPathByPost.has(pa.post_id)) {
-      coverPathByPost.set(pa.post_id, media?.storage_path ?? null);
+      const resolvedPath =
+        media?.media_type === "video"
+          ? (posterByMediaId.get(media.id) ?? null)
+          : ((media ? previewByMediaId.get(media.id) : null) || media?.storage_path) ?? null;
+      coverPathByPost.set(pa.post_id, resolvedPath);
       coverTypeByPost.set(pa.post_id, media?.media_type ?? null);
+      coverMediaIdByPost.set(pa.post_id, media?.id ?? null);
+      coverOriginalPathByPost.set(pa.post_id, media?.storage_path ?? null);
     }
     countByPost.set(pa.post_id, (countByPost.get(pa.post_id) ?? 0) + 1);
   }
@@ -90,8 +143,10 @@ export async function getGridRowsWithCoverPaths(
       postId: slot.post_id,
       coverStoragePath: slot.post_id ? coverPathByPost.get(slot.post_id) ?? null : null,
       coverMediaType: slot.post_id ? coverTypeByPost.get(slot.post_id) ?? null : null,
+      coverMediaAssetId: slot.post_id ? coverMediaIdByPost.get(slot.post_id) ?? null : null,
+      coverOriginalPath: slot.post_id ? coverOriginalPathByPost.get(slot.post_id) ?? null : null,
       assetCount: slot.post_id ? countByPost.get(slot.post_id) ?? 0 : 0,
-      coverTransform: transformBySlotId.get(slot.id) ?? null,
+      coverTransform: slot.post_id ? transformByPostId.get(slot.post_id) ?? null : null,
     })),
   }));
 }

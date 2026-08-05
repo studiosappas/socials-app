@@ -26,6 +26,7 @@ import {
   uploadStoryFrame,
 } from "@/lib/actions/stories";
 import { SORTABLE_TRANSITION } from "@/lib/dnd-motion";
+import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
 import { convertToTask } from "@/lib/actions/todo";
 import { Button } from "@/components/ui/button";
@@ -209,7 +210,16 @@ export function StoryEditor({
       {canManage && availableMedia.length > 0 && (
         <section className="flex flex-col gap-2">
           <span className={labelClass}>Add from library</span>
-          <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+          {/* Capped to roughly 9 rows on the full page, bounded by viewport
+              height too so it doesn't grow unboundedly with a project's full
+              media library. Inside the Grid/Stories popup (hideBackLink) the
+              modal itself is already space-constrained, so cap to a single
+              visible row there instead -- scrolls internally either way. */}
+          <div
+            className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
+              hideBackLink ? "max-h-36" : "max-h-[min(1000px,65vh)]"
+            }`}
+          >
             {availableMedia.map((item) => (
               <button
                 key={item.id}
@@ -295,7 +305,7 @@ function SortableFrame({
               e.stopPropagation();
               onRemove();
             }}
-            className="absolute right-1 top-1 rounded bg-black/70 px-1.5 text-xs text-white"
+            className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded bg-black/70 text-xs text-white"
           >
             X
           </button>
@@ -342,7 +352,11 @@ function UploadFrameTile({
         accept="image/*,video/*"
         multiple
         className="hidden"
-        onChange={() => formRef.current?.requestSubmit()}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length > 0) uploadFilesWithPosters(action, files);
+        }}
       />
       <button
         type="button"
@@ -539,16 +553,16 @@ function StoryLinks({
       )}
 
       {canManage && (
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
             ref={labelRef}
             placeholder="Label"
-            className="w-28 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
+            className="w-full min-w-0 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-28"
           />
           <input
             ref={urlRef}
             placeholder="URL"
-            className="flex-1 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
+            className="w-full min-w-0 flex-1 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
           />
           <Button
             type="button"
@@ -556,7 +570,7 @@ function StoryLinks({
             radius="full"
             onClick={handleAdd}
             disabled={pending}
-            className="shrink-0"
+            className="w-full shrink-0 sm:w-auto"
           >
             {pending ? "Adding..." : "Add"}
           </Button>

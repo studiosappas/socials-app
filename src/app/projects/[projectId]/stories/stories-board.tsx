@@ -46,14 +46,14 @@ export function StoriesBoard({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-6">
         <span className="shrink-0 text-xs tracking-wide text-muted uppercase">Recent Stories</span>
-        <div className="flex flex-1 items-center justify-center gap-10 text-border">
+        <div className="hidden flex-1 items-center justify-center gap-10 text-border sm:flex">
           {Array.from({ length: 4 }).map((_, i) => (
             <span key={i} className="h-1 w-1 shrink-0 rounded-full bg-current" />
           ))}
         </div>
-        <label className="flex w-64 shrink-0 items-center gap-2 rounded-full border border-border px-3 py-1.5 transition-colors duration-150 focus-within:border-foreground">
+        <label className="flex w-full items-center gap-2 rounded-full border border-border px-3 py-1.5 transition-colors duration-150 focus-within:border-foreground sm:w-64 sm:shrink-0">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}

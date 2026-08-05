@@ -58,14 +58,14 @@ export function StoryCard({
               setMenuOpen((v) => !v);
             }}
             title="Story options"
-            className="rounded px-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+            className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
           >
             ⋮
           </button>
           {menuOpen && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-6 w-36 rounded-none border border-border bg-background p-1 shadow-lg"
+              className="absolute right-0 top-7 w-36 rounded-none border border-border bg-background p-1 shadow-lg"
             >
               <Link
                 href={href}

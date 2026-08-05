@@ -4,6 +4,7 @@ import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import {
   addBriefTaskFrame,
   addBriefTaskImage,
@@ -14,10 +15,11 @@ import {
   removeBriefTaskItem,
   renameBriefTask,
   renameBriefTaskFrame,
+  saveBriefAnnotation,
   setBriefTaskTypes,
   updateBriefTaskFrameBody,
 } from "@/lib/actions/brief";
-import { AnnotationEditor } from "./annotation-editor";
+import { AnnotationEditor } from "@/components/annotation-editor";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskType } from "@/types/database";
 
 export type BriefTaskItem = {
@@ -50,9 +52,9 @@ const labelClass = "text-xs font-semibold tracking-wide uppercase";
 const pillLabelClass =
   "shrink-0 rounded-full border border-border px-3 py-1.5 text-[11px] tracking-wide uppercase text-muted";
 const pillInputClass =
-  "flex-1 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none";
+  "w-full min-w-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:flex-1";
 const notesInputClass =
-  "w-40 shrink-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none";
+  "w-full min-w-0 shrink-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-40";
 
 type EditingImage = { itemId: string; attachmentId: string; imageUrl: string; annotationJson: object | null };
 
@@ -126,6 +128,7 @@ export function BriefBoard({
         initialAnnotationJson={editingImage?.annotationJson ?? null}
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
+        saveAction={saveBriefAnnotation}
       />
     </div>
   );
@@ -223,12 +226,12 @@ function TaskCard({
                 type="button"
                 onClick={() => setMenuOpen((v) => !v)}
                 title="Task options"
-                className="rounded px-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+                className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
               >
                 ⋮
               </button>
               {menuOpen && (
-                <div className="absolute right-0 top-6 z-20 w-40 rounded-none border border-border bg-background p-1 shadow-lg">
+                <div className="absolute right-0 top-7 z-20 w-40 rounded-none border border-border bg-background p-1 shadow-lg">
                   <button
                     type="button"
                     onClick={handleDelete}
@@ -244,7 +247,7 @@ function TaskCard({
             type="button"
             onClick={() => setExpanded((v) => !v)}
             title={expanded ? "Minimize" : "Expand"}
-            className="rounded p-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+            className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
           >
             <ChevronIcon className={`h-4 w-4 transition-transform duration-150 ${expanded ? "rotate-180" : ""}`} />
           </button>
@@ -430,8 +433,8 @@ function ItemSection({
       )}
 
       {canManage && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
             <span className={pillLabelClass}>Link</span>
             <input
               ref={urlRef}
@@ -440,11 +443,18 @@ function ItemSection({
               className={pillInputClass}
             />
             <input ref={linkNotesRef} placeholder="Notes" className={notesInputClass} />
-            <Button type="button" variant="primary" radius="full" onClick={handleAddLink} disabled={linkPending}>
+            <Button
+              type="button"
+              variant="primary"
+              radius="full"
+              onClick={handleAddLink}
+              disabled={linkPending}
+              className="w-full sm:w-auto"
+            >
               {linkPending ? "Adding..." : "Add"}
             </Button>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
             <span className={pillLabelClass}>Image</span>
             <button
               type="button"
@@ -461,7 +471,14 @@ function ItemSection({
               onChange={(e) => setPendingFile(e.target.files?.[0] ?? null)}
             />
             <input ref={imageNotesRef} placeholder="Notes" className={notesInputClass} />
-            <Button type="button" variant="primary" radius="full" onClick={handleAddImage} disabled={imagePending}>
+            <Button
+              type="button"
+              variant="primary"
+              radius="full"
+              onClick={handleAddImage}
+              disabled={imagePending}
+              className="w-full sm:w-auto"
+            >
               {imagePending ? "Adding..." : "Add"}
             </Button>
           </div>
@@ -481,7 +498,7 @@ function LinkItemChip({
   onDelete: () => void;
 }) {
   return (
-    <div className="group relative flex items-center gap-1 rounded-full border border-border bg-background px-3 py-1.5 text-xs">
+    <div className="flex items-center gap-1 rounded-full border border-border bg-background px-3 py-1.5 text-xs">
       <a href={item.url ?? "#"} target="_blank" rel="noreferrer" className="max-w-[160px] truncate underline">
         {item.label}
       </a>
@@ -489,7 +506,7 @@ function LinkItemChip({
         <button
           type="button"
           onClick={onDelete}
-          className="hidden shrink-0 text-muted group-hover:inline hover:text-error"
+          className="shrink-0 px-1 text-muted transition-colors duration-150 hover:text-error"
         >
           ×
         </button>
@@ -510,31 +527,56 @@ function ImageItemChip({
   onDelete: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+
+  function handleDownload() {
+    setMenuOpen(false);
+    if (!item.originalUrl) return;
+    setDownloading(true);
+    downloadAsset(item.originalUrl, filenameFromUrl(item.originalUrl, item.label || "image")).finally(() =>
+      setDownloading(false),
+    );
+  }
 
   return (
     <div ref={menuRef} className="relative">
-      <div
-        title={item.label}
-        onContextMenu={(e) => {
-          if (!canManage) return;
-          e.preventDefault();
-          setMenuOpen(true);
-        }}
-        className="flex w-fit max-w-full items-center gap-2 rounded-full border border-foreground bg-background px-2.5 py-1 text-[11px]"
-      >
-        <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
-          {item.thumbnailUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-          ) : (
-            <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
-          )}
-        </span>
-        <span className="max-w-[100px] truncate">{item.label}</span>
+      <div className="flex w-fit max-w-full items-center gap-1 rounded-full border border-foreground bg-background py-1 pr-1 pl-2.5 text-[11px]">
+        <a
+          href={item.originalUrl ?? undefined}
+          target="_blank"
+          rel="noreferrer"
+          title={item.label}
+          onContextMenu={(e) => {
+            if (!canManage) return;
+            e.preventDefault();
+            setMenuOpen(true);
+          }}
+          className="flex min-w-0 items-center gap-1"
+        >
+          <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
+            {item.thumbnailUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
+            )}
+          </span>
+          <span className="max-w-[100px] truncate">{item.label}</span>
+        </a>
+        {canManage && (
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            title="Image options"
+            className="shrink-0 rounded-full px-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+          >
+            ⋮
+          </button>
+        )}
       </div>
       {menuOpen && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-32 rounded-none border border-border bg-background p-1 shadow-lg">
+        <div className="absolute left-0 top-full z-20 mt-1 w-36 rounded-none border border-border bg-background p-1 shadow-lg">
           <button
             type="button"
             onClick={() => {
@@ -544,6 +586,14 @@ function ImageItemChip({
             className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
           >
             Edit Image
+          </button>
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
+          >
+            {downloading ? "Downloading..." : "Download Image"}
           </button>
           <button
             type="button"
@@ -617,13 +667,13 @@ function FrameSection({
       <span className={labelClass}>{title}</span>
       <div className="flex flex-col gap-2">
         {frames.map((frame) => (
-          <div key={frame.id} className="group flex items-center gap-2">
+          <div key={frame.id} className="flex items-center gap-2">
             <input
               key={`${frame.id}-label`}
               defaultValue={frame.label}
               disabled={!canManage}
               onBlur={(e) => handleLabelBlur(frame.id, e.target.value, frame.label)}
-              className="w-20 shrink-0 truncate border border-border bg-transparent px-2 py-2 text-center text-[10px] tracking-wide uppercase text-muted focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100"
+              className="w-24 shrink-0 truncate border border-border bg-transparent px-1.5 py-2 text-center text-[9px] tracking-normal uppercase text-muted focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:w-28 sm:px-2 sm:text-[10px]"
             />
             <input
               key={`${frame.id}-body`}
@@ -631,13 +681,13 @@ function FrameSection({
               disabled={!canManage}
               placeholder="Live text"
               onBlur={(e) => handleBodyBlur(frame.id, e.target.value, frame.body)}
-              className="flex-1 rounded-none border border-border bg-transparent px-3 py-2 text-sm focus:border-foreground focus:outline-none disabled:opacity-60"
+              className="min-w-0 flex-1 rounded-none border border-border bg-transparent px-3 py-2 text-sm focus:border-foreground focus:outline-none disabled:opacity-60"
             />
             {canManage && (
               <button
                 type="button"
                 onClick={() => handleRemoveFrame(frame.id)}
-                className="hidden shrink-0 text-muted group-hover:inline hover:text-error"
+                className="shrink-0 px-1 text-muted transition-colors duration-150 hover:text-error"
               >
                 ×
               </button>

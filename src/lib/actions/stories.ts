@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import type { MediaType } from "@/types/database";
 
 export async function createStory(projectId: string) {
@@ -124,6 +125,8 @@ export async function uploadStoryFrame(
       return { message: uploadError.message };
     }
 
+    const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
+
     const { data: mediaAsset, error: insertError } = await supabase
       .from("media_assets")
       .insert({
@@ -138,6 +141,8 @@ export async function uploadStoryFrame(
     if (insertError || !mediaAsset) {
       return { message: insertError?.message ?? "Failed to save media." };
     }
+
+    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
     const { error: frameError } = await supabase
       .from("story_frames")

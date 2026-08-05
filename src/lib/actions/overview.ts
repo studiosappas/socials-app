@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { analyzeDocument, generateText } from "@/lib/ai/client";
+import { notifyProjectMembers } from "@/lib/notifications";
 import type { AiInsights } from "@/types/database";
 
 export type OverviewActionState = { message?: string; success?: boolean } | undefined;
@@ -474,6 +475,13 @@ export async function refreshBrandIntelligence(
 
   const message = summary?.message || sections?.message || spectrum?.message;
   if (message) return { message };
+
+  const supabase = await createClient();
+  await notifyProjectMembers(supabase, projectId, "ai_analysis_complete", {
+    title: "AI finished analyzing your brand knowledge",
+    icon: "✨",
+    link: `/projects/${projectId}`,
+  });
 
   revalidatePath(`/projects/${projectId}`);
   return { success: true };

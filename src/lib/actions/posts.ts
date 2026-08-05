@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
+import { notifyProjectMembers } from "@/lib/notifications";
 import type { MediaType, PostStatus, PostType } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
@@ -20,14 +22,21 @@ export async function updatePost(
   formData: FormData,
 ): Promise<UpdatePostState> {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
+  const scheduledTime = String(formData.get("scheduled_time") ?? "").trim();
+  const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
+
+  const { data: before } = await supabase.from("posts").select("status").eq("id", postId).single();
 
   const { error } = await supabase
     .from("posts")
     .update({
       post_type: String(formData.get("post_type") ?? "post") as PostType,
-      status: String(formData.get("status") ?? "draft") as PostStatus,
+      status: nextStatus,
       caption: String(formData.get("caption") ?? ""),
       notes: String(formData.get("notes") ?? ""),
       scheduled_date: scheduledDate ? scheduledDate : null,
@@ -36,6 +45,27 @@ export async function updatePost(
 
   if (error) {
     return { message: error.message };
+  }
+
+  // Isolated from the update above -- scheduled_time is a new column that
+  // may not exist yet on a not-yet-migrated database, and PostgREST fails
+  // the WHOLE statement if any referenced column is missing.
+  await supabase
+    .from("posts")
+    .update({ scheduled_time: scheduledTime ? scheduledTime : null })
+    .eq("id", postId);
+
+  // Only the transition INTO "in_review", not every save made while a post
+  // already sits in that status -- otherwise this would fire on every
+  // unrelated edit (caption tweak, date change) to a post already pending review.
+  if (nextStatus === "in_review" && before?.status !== "in_review") {
+    await notifyProjectMembers(
+      supabase,
+      projectId,
+      "approval_requested",
+      { title: "A post is ready for approval", icon: "✅", link: `/projects/${projectId}/posts/${postId}` },
+      { excludeUserId: user?.id },
+    );
   }
 
   revalidatePath(`/projects/${projectId}/posts/${postId}`);
@@ -106,6 +136,8 @@ export async function uploadPostAsset(
       return { message: uploadError.message };
     }
 
+    const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
+
     const { data: mediaAsset, error: insertError } = await supabase
       .from("media_assets")
       .insert({
@@ -120,6 +152,8 @@ export async function uploadPostAsset(
     if (insertError || !mediaAsset) {
       return { message: insertError?.message ?? "Failed to save media." };
     }
+
+    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
     const { error: assetError } = await supabase
       .from("post_assets")

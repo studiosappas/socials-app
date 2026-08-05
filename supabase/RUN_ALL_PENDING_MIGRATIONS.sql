@@ -430,6 +430,127 @@ alter table public.projects
   add column if not exists reels_per_week smallint not null default 0,
   add column if not exists newsletter_per_week smallint not null default 0;
 
+-- ---------- Post/Grid asset annotation editing: same original/preview/
+-- annotation_json pattern as brief_attachments, but on media_assets itself
+-- since an uploaded asset (not a separate attachment row) is already the
+-- shared source both post_assets and Grid's cover-image lookup point at ----------
+alter table public.media_assets
+  add column if not exists preview_storage_path text,
+  add column if not exists annotation_json jsonb;
+
+drop policy if exists "Admins update media" on public.media_assets;
+create policy "Admins update media" on public.media_assets for update to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+-- ---------- Grid video support + crop-follows-the-post fix ----------
+-- Static first-frame capture for video assets, generated client-side at
+-- upload time -- lets Grid show a poster image for a video cover instead of
+-- ever mounting a <video> element there.
+alter table public.media_assets
+  add column if not exists poster_storage_path text;
+
+-- Crop/pan/zoom now lives on the post itself (its cover is always the first
+-- carousel asset) instead of on grid_slots, so it follows the post when
+-- moved to a different cell instead of staying behind attached to the old
+-- cell. grid_slots.cover_transform is left in place, unused, rather than
+-- dropped, to avoid a migration that could strand data.
+alter table public.posts
+  add column if not exists cover_transform jsonb;
+
+-- ---------- Settings redesign: expanded roles, custom permissions, more
+-- platforms, per-member notification prefs, activity log, archive flag ----------
+alter type public.project_role add value if not exists 'editor';
+alter type public.project_role add value if not exists 'viewer';
+alter type public.project_role add value if not exists 'client';
+
+alter table public.project_members
+  add column if not exists custom_permissions text[],
+  add column if not exists notification_prefs jsonb not null default '{}'::jsonb;
+
+alter table public.projects
+  add column if not exists archived boolean not null default false;
+
+alter table public.projects drop constraint if exists projects_platform_check;
+alter table public.projects add constraint projects_platform_check
+  check (platform in ('instagram', 'tiktok', 'pinterest', 'youtube'));
+
+create table if not exists public.activity_log (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  actor_name text not null,
+  action text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.activity_log enable row level security;
+
+drop policy if exists "Members can view activity log" on public.activity_log;
+create policy "Members can view activity log" on public.activity_log for select to authenticated
+  using (public.is_project_member(project_id));
+drop policy if exists "Members can insert activity log" on public.activity_log;
+create policy "Members can insert activity log" on public.activity_log for insert to authenticated
+  with check (public.is_project_member(project_id));
+
+-- profiles.email: synced from auth.users at signup from now on (handle_new_user
+-- below), plus a one-time backfill for accounts that already existed.
+alter table public.profiles
+  add column if not exists email text;
+
+update public.profiles p
+set email = u.email
+from auth.users u
+where u.id = p.id and p.email is null;
+
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, name, email)
+  values (new.id, coalesce(new.raw_user_meta_data ->> 'name', split_part(new.email, '@', 1)), new.email);
+  return new;
+end;
+$$;
+
+-- ---------- Notification bell (top nav) ----------
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  project_id uuid references public.projects (id) on delete cascade,
+  event_key text not null,
+  title text not null,
+  description text not null default '',
+  icon text not null default '🔔',
+  link text,
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+alter table public.notifications enable row level security;
+
+drop policy if exists "Users can view their own notifications" on public.notifications;
+create policy "Users can view their own notifications" on public.notifications for select to authenticated
+  using (user_id = auth.uid());
+
+drop policy if exists "Users can update their own notifications" on public.notifications;
+create policy "Users can update their own notifications" on public.notifications for update to authenticated
+  using (user_id = auth.uid());
+
+drop policy if exists "Project members can create notifications for other members" on public.notifications;
+create policy "Project members can create notifications for other members" on public.notifications for insert to authenticated
+  with check (project_id is null or public.is_project_member(project_id));
+
+-- ---------- Instagram/TikTok profile links (Overview edit mode) ----------
+alter table public.projects
+  add column if not exists instagram_url text not null default '',
+  add column if not exists tiktok_url text not null default '';
+
+-- ---------- Post scheduled time (Client PDF export) ----------
+alter table public.posts
+  add column if not exists scheduled_time time;
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

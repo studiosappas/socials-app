@@ -1,5 +1,10 @@
-export type ProjectRole = "owner" | "admin" | "designer";
-export type Platform = "instagram" | "tiktok";
+// "designer" is a legacy value kept for existing rows -- new invites use
+// "editor" instead (Settings > Team & Permissions' 5-role set).
+export type ProjectRole = "owner" | "admin" | "designer" | "editor" | "viewer" | "client";
+export type Platform = "instagram" | "tiktok" | "pinterest" | "youtube";
+// Matches the page-level nav (nav-tabs.tsx) -- what Team & Permissions'
+// "Custom Permissions" checklist grants access to, per member.
+export type ProjectPermission = "overview" | "grid" | "stories" | "calendar" | "brief" | "settings";
 export type PostType = "post" | "reel" | "carousel";
 export type PostStatus = "draft" | "scheduled" | "published" | "in_review";
 export type StoryStatus = "draft" | "scheduled" | "published";
@@ -26,9 +31,9 @@ export interface Database {
   public: {
     Tables: {
       profiles: {
-        Row: { id: string; name: string; avatar_url: string | null; created_at: string };
-        Insert: { id: string; name: string; avatar_url?: string | null };
-        Update: { name?: string; avatar_url?: string | null };
+        Row: { id: string; name: string; avatar_url: string | null; email: string | null; created_at: string };
+        Insert: { id: string; name: string; avatar_url?: string | null; email?: string | null };
+        Update: { name?: string; avatar_url?: string | null; email?: string | null };
         Relationships: [];
       };
       projects: {
@@ -45,6 +50,8 @@ export interface Database {
           ig_following_count: number;
           ig_website_link: string;
           ig_handle: string;
+          instagram_url: string;
+          tiktok_url: string;
           content_pillars: string;
           industry: string;
           posts_per_week: number;
@@ -55,6 +62,7 @@ export interface Database {
           logo_storage_path: string | null;
           brand_image_storage_path: string | null;
           show_scheduled_dates: boolean;
+          archived: boolean;
           created_by: string;
           created_at: string;
         };
@@ -70,6 +78,8 @@ export interface Database {
           ig_following_count?: number;
           ig_website_link?: string;
           ig_handle?: string;
+          instagram_url?: string;
+          tiktok_url?: string;
           content_pillars?: string;
           industry?: string;
           posts_per_week?: number;
@@ -80,6 +90,7 @@ export interface Database {
           logo_storage_path?: string | null;
           brand_image_storage_path?: string | null;
           show_scheduled_dates?: boolean;
+          archived?: boolean;
           created_by: string;
         };
         Update: {
@@ -94,6 +105,8 @@ export interface Database {
           ig_following_count?: number;
           ig_website_link?: string;
           ig_handle?: string;
+          instagram_url?: string;
+          tiktok_url?: string;
           content_pillars?: string;
           industry?: string;
           posts_per_week?: number;
@@ -104,6 +117,7 @@ export interface Database {
           logo_storage_path?: string | null;
           brand_image_storage_path?: string | null;
           show_scheduled_dates?: boolean;
+          archived?: boolean;
         };
         Relationships: [];
       };
@@ -126,9 +140,26 @@ export interface Database {
         Relationships: [];
       };
       project_members: {
-        Row: { project_id: string; user_id: string; role: ProjectRole; created_at: string };
-        Insert: { project_id: string; user_id: string; role?: ProjectRole };
-        Update: { role?: ProjectRole };
+        Row: {
+          project_id: string;
+          user_id: string;
+          role: ProjectRole;
+          custom_permissions: string[] | null;
+          notification_prefs: Record<string, boolean>;
+          created_at: string;
+        };
+        Insert: {
+          project_id: string;
+          user_id: string;
+          role?: ProjectRole;
+          custom_permissions?: string[] | null;
+          notification_prefs?: Record<string, boolean>;
+        };
+        Update: {
+          role?: ProjectRole;
+          custom_permissions?: string[] | null;
+          notification_prefs?: Record<string, boolean>;
+        };
         Relationships: [
           {
             foreignKeyName: "project_members_project_id_fkey";
@@ -153,6 +184,9 @@ export interface Database {
           storage_path: string;
           media_type: MediaType;
           uploaded_by: string;
+          preview_storage_path: string | null;
+          annotation_json: object | null;
+          poster_storage_path: string | null;
           created_at: string;
         };
         Insert: {
@@ -160,8 +194,15 @@ export interface Database {
           storage_path: string;
           media_type?: MediaType;
           uploaded_by: string;
+          poster_storage_path?: string | null;
         };
-        Update: { storage_path?: string; media_type?: MediaType };
+        Update: {
+          storage_path?: string;
+          media_type?: MediaType;
+          preview_storage_path?: string | null;
+          annotation_json?: object | null;
+          poster_storage_path?: string | null;
+        };
         Relationships: [];
       };
       grid_rows: {
@@ -178,7 +219,9 @@ export interface Database {
           caption: string;
           notes: string;
           scheduled_date: string | null;
+          scheduled_time: string | null;
           status: PostStatus;
+          cover_transform: object | null;
           created_at: string;
         };
         Insert: {
@@ -187,14 +230,18 @@ export interface Database {
           caption?: string;
           notes?: string;
           scheduled_date?: string | null;
+          scheduled_time?: string | null;
           status?: PostStatus;
+          cover_transform?: object | null;
         };
         Update: {
           post_type?: PostType;
           caption?: string;
           notes?: string;
           scheduled_date?: string | null;
+          scheduled_time?: string | null;
           status?: PostStatus;
+          cover_transform?: object | null;
         };
         Relationships: [];
       };
@@ -578,6 +625,38 @@ export interface Database {
           due_date?: string | null;
           completed?: boolean;
         };
+        Relationships: [];
+      };
+      activity_log: {
+        Row: { id: string; project_id: string; actor_name: string; action: string; created_at: string };
+        Insert: { project_id: string; actor_name: string; action: string };
+        Update: never;
+        Relationships: [];
+      };
+      notifications: {
+        Row: {
+          id: string;
+          user_id: string;
+          project_id: string | null;
+          event_key: string;
+          title: string;
+          description: string;
+          icon: string;
+          link: string | null;
+          read: boolean;
+          created_at: string;
+        };
+        Insert: {
+          user_id: string;
+          project_id?: string | null;
+          event_key: string;
+          title: string;
+          description?: string;
+          icon?: string;
+          link?: string | null;
+          read?: boolean;
+        };
+        Update: { read?: boolean };
         Relationships: [];
       };
     };

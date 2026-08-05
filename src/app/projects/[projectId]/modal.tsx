@@ -15,14 +15,14 @@ export function Modal({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-3 sm:p-6">
       <button
         type="button"
         aria-label="Close"
         onClick={() => router.back()}
         className="fixed inset-0 -z-10 cursor-default"
       />
-      <div className="relative w-full max-w-3xl rounded-none border border-border bg-card p-6">
+      <div className="relative w-full max-w-3xl rounded-none border border-border bg-card p-4 sm:p-6">
         <button
           type="button"
           onClick={() => router.back()}

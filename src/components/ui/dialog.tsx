@@ -31,7 +31,7 @@ export function Dialog({
   const radiusClass = radius === "none" ? "rounded-none" : "rounded-lg";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-3 sm:p-6">
       <button
         type="button"
         aria-label="Close"
@@ -39,7 +39,7 @@ export function Dialog({
         className="fixed inset-0 -z-10 cursor-default"
       />
       <div className={`relative w-full ${radiusClass} border border-border bg-card ${widthClassName}`}>
-        <div className="flex items-center justify-between border-b border-border px-6 py-4">
+        <div className="flex items-center justify-between border-b border-border px-4 py-4 sm:px-6">
           <p className="text-xs tracking-wide text-muted uppercase">{title}</p>
           <button
             type="button"
@@ -49,7 +49,7 @@ export function Dialog({
             X
           </button>
         </div>
-        <div className="px-6 py-5">{children}</div>
+        <div className="px-4 py-5 sm:px-6">{children}</div>
       </div>
     </div>
   );

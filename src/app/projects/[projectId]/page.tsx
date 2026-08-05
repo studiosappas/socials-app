@@ -43,6 +43,7 @@ export default async function ProjectOverviewPage({
     { data: trackedTasks },
     { data: strategyRow },
     { data: documentRows },
+    { data: socialLinks },
   ] = await Promise.all([
     supabase
       .from("projects")
@@ -84,7 +85,7 @@ export default async function ProjectOverviewPage({
       .eq("scheduled_date", today),
     supabase
       .from("tasks")
-      .select("id")
+      .select("id, title")
       .eq("project_id", projectId)
       .eq("user_id", user!.id)
       .eq("due_date", today)
@@ -109,6 +110,12 @@ export default async function ProjectOverviewPage({
       .select("id, source_type, filename, url, ai_analysis, created_at")
       .eq("project_id", projectId)
       .order("created_at", { ascending: false }),
+    // Isolated from the main projects select above -- instagram_url/tiktok_url
+    // are new columns that may not exist yet on a not-yet-migrated database,
+    // and PostgREST fails the whole select if any referenced column is
+    // missing. A pending migration just means these two links read as empty,
+    // not that the rest of Overview fails to load.
+    supabase.from("projects").select("instagram_url, tiktok_url").eq("id", projectId).maybeSingle(),
   ]);
 
   const canManage = membership?.role === "owner" || membership?.role === "admin";
@@ -133,9 +140,6 @@ export default async function ProjectOverviewPage({
   const focusItems: string[] = [];
   if ((postsToday ?? 0) > 0) focusItems.push(`${postsToday} post${postsToday === 1 ? "" : "s"} scheduled`);
   if ((storiesToday ?? 0) > 0) focusItems.push(`${storiesToday} stor${storiesToday === 1 ? "y" : "ies"} waiting`);
-  if ((tasksDueToday?.length ?? 0) > 0) {
-    focusItems.push(`${tasksDueToday!.length} task${tasksDueToday!.length === 1 ? "" : "s"} due today`);
-  }
   if ((inReviewCount ?? 0) > 0) focusItems.push(`${inReviewCount} approval${inReviewCount === 1 ? "" : "s"} pending`);
 
   const reminders: string[] = [];
@@ -198,6 +202,8 @@ export default async function ProjectOverviewPage({
             websiteUrl={project?.ig_website_link ?? ""}
             industry={project?.industry ?? ""}
             platform={project?.platform ?? "instagram"}
+            instagramUrl={socialLinks?.instagram_url ?? ""}
+            tiktokUrl={socialLinks?.tiktok_url ?? ""}
             profilePhotoUrl={profilePhotoUrl}
             postsPerWeek={project?.posts_per_week ?? 0}
             storiesPerWeek={project?.stories_per_week ?? 0}
@@ -207,7 +213,7 @@ export default async function ProjectOverviewPage({
           />
         </section>
 
-        <section className="grid grid-cols-2 gap-8">
+        <section className="grid grid-cols-2 gap-4 sm:gap-8">
           <StatTile label="Unscheduled Posts" value={unscheduledPosts ?? 0} />
           <StatTile label="Unscheduled Stories" value={unscheduledStories ?? 0} />
           <StatTile label="Posts This Week" value={postsThisWeek ?? 0} />
@@ -215,7 +221,7 @@ export default async function ProjectOverviewPage({
         </section>
 
         <section>
-          <WorkplaceInsightsPanel items={focusItems} reminders={reminders} />
+          <WorkplaceInsightsPanel items={focusItems} reminders={reminders} tasksDueToday={tasksDueToday ?? []} />
         </section>
       </div>
 
@@ -244,8 +250,8 @@ export default async function ProjectOverviewPage({
 
 function StatTile({ label, value }: { label: string; value: number }) {
   return (
-    <div className="flex flex-col gap-2 border border-border p-6">
-      <span className="text-5xl font-light">
+    <div className="flex flex-col gap-2 border border-border p-4 sm:p-6">
+      <span className="text-3xl font-light sm:text-5xl">
         <AnimatedNumber value={value} />
       </span>
       <span className="text-xs tracking-wide text-muted uppercase">{label}</span>

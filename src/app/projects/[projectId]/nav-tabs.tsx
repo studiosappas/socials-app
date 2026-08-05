@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
@@ -22,29 +21,8 @@ export function CurrentPageLabel({ projectId }: { projectId: string }) {
   return <span className="text-foreground">{active?.label ?? ""}</span>;
 }
 
-export function NavTabs({ projectId }: { projectId: string }) {
-  const pathname = usePathname();
-  const base = `/projects/${projectId}`;
-
-  return (
-    <nav className="flex gap-6 text-xs tracking-wide uppercase">
-      {NAV_ITEMS.map((item) => {
-        const href = item.href ? `${base}/${item.href}` : base;
-        const active = item.href ? pathname.startsWith(href) : pathname === base;
-        return (
-          <Link
-            key={item.href}
-            href={href}
-            className={`pb-1 transition-colors duration-150 ${
-              active
-                ? "border-b border-foreground text-foreground"
-                : "border-b border-transparent text-muted hover:text-foreground"
-            }`}
-          >
-            {item.label}
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
+// NavTabs itself (the always-visible tab row this file used to also export)
+// was removed as part of the navigation redesign -- project-page navigation
+// now lives in the top nav's hover dropdown (components/nav-project-menu.tsx).
+// NAV_ITEMS stays here since CurrentPageLabel (the breadcrumb's trailing
+// "/ Grid" segment) still needs it.

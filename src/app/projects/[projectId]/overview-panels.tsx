@@ -19,6 +19,8 @@ import {
   uploadBrandDocument,
 } from "@/lib/actions/overview";
 import { updateProjectProfile } from "@/lib/actions/projects";
+import { toggleTaskCompleted } from "@/lib/actions/todo";
+import { externalUrl, socialProfileUrl } from "@/lib/social-links";
 import type { AiInsights, Platform } from "@/types/database";
 
 const labelClass = "text-xs font-semibold tracking-wide uppercase";
@@ -28,8 +30,10 @@ const fieldClass =
 const PLATFORM_LABEL: Record<Platform, string> = {
   instagram: "Instagram",
   tiktok: "TikTok",
+  pinterest: "Pinterest",
+  youtube: "YouTube",
 };
-const PLATFORM_OPTIONS: Platform[] = ["instagram", "tiktok"];
+const PLATFORM_OPTIONS: Platform[] = ["instagram", "tiktok", "pinterest", "youtube"];
 
 // ---------------------------------------------------------------------------
 // Profile panel (left, top) -- read view mirrors Grid's now-read-only
@@ -50,6 +54,8 @@ export function ProfilePanel({
   websiteUrl,
   industry,
   platform,
+  instagramUrl,
+  tiktokUrl,
   profilePhotoUrl,
   postsPerWeek,
   storiesPerWeek,
@@ -68,6 +74,8 @@ export function ProfilePanel({
   websiteUrl: string;
   industry: string;
   platform: Platform;
+  instagramUrl: string;
+  tiktokUrl: string;
   profilePhotoUrl: string | null;
   postsPerWeek: number;
   storiesPerWeek: number;
@@ -100,8 +108,30 @@ export function ProfilePanel({
       </div>
 
       <div className="flex flex-col gap-1 text-sm text-muted">
-        <p>@{igUsername || "username"}</p>
-        <p>{websiteUrl || "URL"}</p>
+        {igUsername ? (
+          <a
+            href={socialProfileUrl(platform, igUsername, { instagramUrl, tiktokUrl }) ?? undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-fit transition-colors duration-150 hover:text-foreground"
+          >
+            @{igUsername}
+          </a>
+        ) : (
+          <p>username</p>
+        )}
+        {websiteUrl ? (
+          <a
+            href={externalUrl(websiteUrl) ?? undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-fit transition-colors duration-150 hover:text-foreground"
+          >
+            {websiteUrl}
+          </a>
+        ) : (
+          <p>URL</p>
+        )}
         <div className="flex items-center justify-between">
           <span>{industry || "Industry"}</span>
           <span className="font-semibold text-foreground">{PLATFORM_LABEL[platform]}</span>
@@ -155,6 +185,8 @@ export function ProfilePanel({
           website={websiteUrl}
           industry={industry}
           platform={platform}
+          instagramUrl={instagramUrl}
+          tiktokUrl={tiktokUrl}
           postsPerWeek={postsPerWeek}
           storiesPerWeek={storiesPerWeek}
           reelsPerWeek={reelsPerWeek}
@@ -179,6 +211,8 @@ function EditProfileDialog({
   website,
   industry,
   platform,
+  instagramUrl,
+  tiktokUrl,
   postsPerWeek,
   storiesPerWeek,
   reelsPerWeek,
@@ -197,6 +231,8 @@ function EditProfileDialog({
   website: string;
   industry: string;
   platform: Platform;
+  instagramUrl: string;
+  tiktokUrl: string;
   postsPerWeek: number;
   storiesPerWeek: number;
   reelsPerWeek: number;
@@ -303,6 +339,25 @@ function EditProfileDialog({
             ))}
           </div>
         </div>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={labelClass}>Instagram URL</span>
+          <input
+            name="instagram_url"
+            defaultValue={instagramUrl}
+            placeholder="https://instagram.com/..."
+            className={fieldClass}
+          />
+        </label>
+        <label className="flex flex-col gap-1.5">
+          <span className={labelClass}>TikTok URL</span>
+          <input
+            name="tiktok_url"
+            defaultValue={tiktokUrl}
+            placeholder="https://tiktok.com/@..."
+            className={fieldClass}
+          />
+        </label>
 
         <div className="flex flex-col gap-1.5">
           <span className={labelClass}>Content Amount a Week</span>
@@ -445,13 +500,32 @@ function ExpandableField({ label, value }: { label: string; value: string }) {
 // Workplace insights (left, bottom)
 // ---------------------------------------------------------------------------
 
+export type TaskDueTodayItem = { id: string; title: string };
+
 export function WorkplaceInsightsPanel({
   items,
   reminders,
+  tasksDueToday,
 }: {
   items: string[];
   reminders: string[];
+  tasksDueToday: TaskDueTodayItem[];
 }) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+  const [completedIds, setCompletedIds] = useState<Set<string>>(new Set());
+  const visibleTasks = tasksDueToday.filter((t) => !completedIds.has(t.id));
+
+  function handleToggle(taskId: string) {
+    // Optimistically drop it from "due today" immediately -- checking a task
+    // off should feel instant, not wait on a server round trip.
+    setCompletedIds((prev) => new Set(prev).add(taskId));
+    startTransition(async () => {
+      await toggleTaskCompleted(taskId, true);
+      router.refresh();
+    });
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <h2 className={labelClass}>Workplace Insights</h2>
@@ -463,13 +537,26 @@ export function WorkplaceInsightsPanel({
             <span>{label}</span>
           </label>
         ))}
+        {visibleTasks.map((task) => (
+          <label
+            key={task.id}
+            className="flex items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-sm transition-colors duration-150 hover:border-border hover:bg-black/[.02]"
+          >
+            <input
+              type="checkbox"
+              onChange={() => handleToggle(task.id)}
+              className="h-3.5 w-3.5 shrink-0 rounded-none accent-foreground"
+            />
+            <span className="truncate">{task.title}</span>
+          </label>
+        ))}
         {reminders.map((label, i) => (
           <label key={`r-${i}`} className="flex items-center gap-2 text-sm text-muted">
             <input type="checkbox" disabled className="h-3.5 w-3.5 rounded-none border-border" />
             <span>{label}</span>
           </label>
         ))}
-        {items.length === 0 && reminders.length === 0 && (
+        {items.length === 0 && reminders.length === 0 && visibleTasks.length === 0 && (
           <p className="text-sm text-muted">Nothing needs attention today.</p>
         )}
       </div>
@@ -496,17 +583,34 @@ export type BrandDocumentItem = {
   createdAt: string;
 };
 
-// 8 tiles placed at equal angles on a precise circle (radius 36% of the
-// container) around the center hub, so the ring rotates as one true circle
-// rather than a hand-scattered approximation.
+// Up to 8 tiles placed at equal angles on a precise circle (radius 36% of
+// the container) around the center hub -- laid out dynamically for however
+// many real documents exist (not a fixed 8 slots padded with placeholders),
+// so a project with e.g. 3 files shows 3 evenly-spaced tiles, not 3 tiles
+// plus 5 empty "File" ghosts.
 const TILE_RADIUS_PCT = 36;
-const TILE_SIZES = ["28%", "24%", "27%", "23%", "28%", "24%", "27%", "23%"];
-const TILE_LAYOUT: { top: string; left: string; size: string }[] = Array.from({ length: 8 }, (_, i) => {
-  const angle = (i * 360) / 8 - 90; // start at the top, go clockwise
+const MAX_ORBIT_TILES = 8;
+const TILE_SIZES = ["19%", "16%", "18%", "15%", "19%", "16%", "18%", "15%"];
+function computeTileLayout(count: number): { top: string; left: string; size: string }[] {
+  return Array.from({ length: count }, (_, i) => {
+    const angle = (i * 360) / count - 90; // start at the top, go clockwise
+    const radians = (angle * Math.PI) / 180;
+    const left = 50 + TILE_RADIUS_PCT * Math.cos(radians);
+    const top = 50 + TILE_RADIUS_PCT * Math.sin(radians);
+    return { top: `${top}%`, left: `${left}%`, size: TILE_SIZES[i % TILE_SIZES.length] };
+  });
+}
+
+// A handful of small dots traveling along the same circular path the file
+// tiles sit on -- unevenly spaced (not a clean 360/N split) so they read as
+// independent points of motion rather than a single spinning shape.
+const ORBIT_DOT_ANGLES = [0, 70, 160, 210, 300];
+const ORBIT_DOT_LAYOUT: { top: string; left: string }[] = ORBIT_DOT_ANGLES.map((angle) => {
   const radians = (angle * Math.PI) / 180;
-  const left = 50 + TILE_RADIUS_PCT * Math.cos(radians);
-  const top = 50 + TILE_RADIUS_PCT * Math.sin(radians);
-  return { top: `${top}%`, left: `${left}%`, size: TILE_SIZES[i] };
+  return {
+    left: `${50 + TILE_RADIUS_PCT * Math.cos(radians)}%`,
+    top: `${50 + TILE_RADIUS_PCT * Math.sin(radians)}%`,
+  };
 });
 
 function relativeTime(iso: string): string {
@@ -611,8 +715,10 @@ export function BrandKnowledgePanel({
   const linkCount = documents.filter((d) => d.sourceType === "link").length;
   const latest = documents[0];
 
-  const tiles: (BrandDocumentItem | null)[] = documents.slice(0, 8);
-  while (tiles.length < 8) tiles.push(null);
+  // Only real, uploaded documents get a tile -- no placeholder "File" ghosts
+  // padding the ring out to a fixed 8 slots.
+  const tiles = documents.slice(0, MAX_ORBIT_TILES);
+  const tileLayout = computeTileLayout(tiles.length);
 
   function handleDelete(documentId: string) {
     startTransition(async () => {
@@ -626,35 +732,55 @@ export function BrandKnowledgePanel({
       {/* .knowledge-wheel covers the full square, so hovering anywhere inside
           it -- including the empty gaps between tiles -- triggers the ring
           rotation (see globals.css), not just hovering an individual tile. */}
+      {/* overflow-hidden matters here beyond tidiness: a rotated element's
+          axis-aligned bounding box is wider than its resting square (a
+          rotate(45deg) square's bounding box is ~1.4x wider), and CSS
+          transforms count toward an ancestor's scrollable overflow in
+          Chromium/WebKit -- without a clip, the ring mid-spin was pushing
+          the whole page's horizontal scroll extent past the viewport on
+          mobile, letting a swipe drag the entire page sideways. The tiles
+          themselves are already positioned within this square (radius 36%
+          from center, per TILE_RADIUS_PCT), so clipping here only removes
+          the invisible rotated-bbox excess, not any real content. */}
       <div
-        className="knowledge-wheel relative mx-auto aspect-square w-full max-w-md"
+        className="knowledge-wheel relative mx-auto aspect-square w-full max-w-md overflow-hidden"
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
+        // Touch has no hover state, so without this the ring only ever
+        // spins once (the auto-spin on mount) for mobile users -- a tap
+        // anywhere in the cluster resumes it the same way hovering does on
+        // desktop.
+        onTouchStart={() => setHovering(true)}
+        onTouchEnd={() => setHovering(false)}
       >
+        {/* The orbit line + traveling dots sit behind the file tiles (painted
+            first, tiles come after) and never pause -- unlike the tile ring,
+            which only spins on hover/tap, this stays gently in motion at
+            rest so the section reads as continuous, ambient "the AI is
+            always learning" rather than something you have to trigger. */}
+        <div className="knowledge-orbit-ring" aria-hidden="true" />
+        <div className="knowledge-orbit-dots" aria-hidden="true">
+          {ORBIT_DOT_LAYOUT.map((d, i) => (
+            <span key={i} className="knowledge-orbit-dot" style={{ top: d.top, left: d.left }} />
+          ))}
+        </div>
         <div className={`knowledge-wheel-ring absolute inset-0 ${isSpinning ? "is-spinning" : ""}`}>
           {tiles.map((doc, i) => {
-            const t = TILE_LAYOUT[i];
+            const t = tileLayout[i];
             return (
+              // Keyed by the document's own id now, not slot index -- there
+              // are no placeholder slots left to worry about "popping" into,
+              // and every tile's angle is recomputed from the current count
+              // (see computeTileLayout), so keeping doc.id as the key lets
+              // React correctly track *which* tile moved when the count
+              // changes, instead of reusing/mismatching DOM nodes by position.
               <div
-                // Keyed by slot index, not document id: each of the 8
-                // positions is a fixed spot on the ring with its own
-                // continuously-running counter-rotation. Keying by doc.id
-                // would remount a slot the moment a document fills it
-                // (undefined -> a real id), snapping that one tile's
-                // animation out of sync with the ring -- the "pops to a
-                // wrong, rotated position" bug on upload.
-                key={i}
+                key={doc.id}
                 style={{ top: t.top, left: t.left, width: t.size }}
                 className="knowledge-tile absolute aspect-square rounded-[15%] flex flex-col items-center justify-center gap-1 overflow-hidden border border-dashed border-border bg-black/[.02] p-2 text-center text-[10px] tracking-wide text-muted uppercase"
               >
-                {doc ? (
-                  <>
-                    <span className="text-2xl">{doc.sourceType === "link" ? "🔗" : "📄"}</span>
-                    <span className="line-clamp-2 leading-tight">{doc.filename}</span>
-                  </>
-                ) : (
-                  "File"
-                )}
+                <span className="text-2xl">{doc.sourceType === "link" ? "🔗" : "📄"}</span>
+                <span className="line-clamp-2 leading-tight">{doc.filename}</span>
               </div>
             );
           })}
@@ -779,10 +905,14 @@ function BrandKnowledgeDialog({
         </form>
         {fileState?.message && <p className="text-xs text-error">{fileState.message}</p>}
 
-        <form ref={linkFormRef} action={linkAction} className="flex items-center gap-2">
-          <input name="label" placeholder="Label (Website, Instagram...)" className={`w-40 ${fieldClass} rounded-full`} />
-          <input name="url" placeholder="https://..." className={`flex-1 ${fieldClass} rounded-full`} />
-          <Button type="submit" variant="primary" radius="full" disabled={linkPending}>
+        <form ref={linkFormRef} action={linkAction} className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <input
+            name="label"
+            placeholder="Label (Website, Instagram...)"
+            className={`w-full min-w-0 ${fieldClass} rounded-full sm:w-40`}
+          />
+          <input name="url" placeholder="https://..." className={`w-full min-w-0 ${fieldClass} rounded-full sm:flex-1`} />
+          <Button type="submit" variant="primary" radius="full" disabled={linkPending} className="w-full sm:w-auto">
             {linkPending ? "Adding..." : "Add link"}
           </Button>
         </form>

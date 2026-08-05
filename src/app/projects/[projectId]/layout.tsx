@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { CurrentPageLabel, NavTabs } from "./nav-tabs";
+import { CurrentPageLabel } from "./nav-tabs";
 
 export default async function ProjectLayout({
   children,
@@ -25,21 +25,20 @@ export default async function ProjectLayout({
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="px-6 py-4">
-        <div className="mx-auto flex max-w-6xl items-center justify-between">
-          <div className="flex items-center gap-2 text-xs tracking-wide text-muted uppercase">
-            <Link href="/projects" className="transition-colors duration-150 hover:text-foreground">
-              Projects
-            </Link>
-            <span>/</span>
-            <span>{project.name}</span>
-            <span>/</span>
+      <header className="px-4 py-4 sm:px-6">
+        <div className="mx-auto flex max-w-6xl items-center gap-2 overflow-x-auto whitespace-nowrap text-xs tracking-wide text-muted uppercase [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <Link href="/projects" className="shrink-0 transition-colors duration-150 hover:text-foreground">
+            Projects
+          </Link>
+          <span className="shrink-0">/</span>
+          <span className="shrink-0">{project.name}</span>
+          <span className="shrink-0">/</span>
+          <span className="shrink-0">
             <CurrentPageLabel projectId={projectId} />
-          </div>
-          <NavTabs projectId={projectId} />
+          </span>
         </div>
       </header>
-      <div className="mx-auto w-full max-w-6xl flex-1 p-6">{children}</div>
+      <div className="mx-auto w-full max-w-6xl flex-1 p-4 sm:p-6">{children}</div>
       {modal}
     </div>
   );

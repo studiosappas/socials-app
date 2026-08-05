@@ -24,20 +24,29 @@ import {
   updatePost,
   uploadPostAsset,
 } from "@/lib/actions/posts";
+import { saveMediaAssetAnnotation } from "@/lib/actions/media";
+import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
+import { downloadAsset, downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
 import { convertToTask } from "@/lib/actions/todo";
 import { Button } from "@/components/ui/button";
-import type { MediaLibraryItem } from "../../grid/grid-board";
+import { AnnotationEditor } from "@/components/annotation-editor";
+import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
+import { UndoIcon, type MediaLibraryItem } from "../../grid/grid-board";
 import type { PostStatus, PostType } from "@/types/database";
 
 export type PostAssetItem = {
   postAssetId: string;
   mediaAssetId: string;
   url: string | null;
+  originalUrl: string | null;
+  annotationJson: object | null;
   mediaType: "image" | "video";
 };
 export type PostLinkItem = { id: string; url: string; label: string };
+
+type EditingImage = { mediaAssetId: string; imageUrl: string; annotationJson: object | null };
 
 type PostRecord = {
   id: string;
@@ -45,6 +54,7 @@ type PostRecord = {
   caption: string;
   notes: string;
   scheduled_date: string | null;
+  scheduled_time: string | null;
   status: PostStatus;
 };
 
@@ -73,8 +83,14 @@ export function PostEditor({
   const [prevAssets, setPrevAssets] = useState(assets);
   const [orderedAssets, setOrderedAssets] = useState(assets);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
+  const [editingImage, setEditingImage] = useState<EditingImage | null>(null);
   const [, startTransition] = useTransition();
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  function handleAnnotationSaved() {
+    setEditingImage(null);
+    router.refresh();
+  }
 
   if (assets !== prevAssets) {
     setPrevAssets(assets);
@@ -85,8 +101,21 @@ export function PostEditor({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
 
+  // Its own history stack, separate from Grid's -- the carousel only exists
+  // on this page, so there's no cross-page state to share.
+  const { push: pushCommand, undo, redo, canUndo, canRedo, isBusy: undoRedoBusy } = useUndoStack();
+  useUndoRedoShortcuts(undo, redo);
+
   function handleDragStart(event: DragStartEvent) {
     setActiveAssetId(event.active.id as string);
+  }
+
+  function applyReorder(next: PostAssetItem[]) {
+    setOrderedAssets(next);
+    startTransition(async () => {
+      await reorderPostAssets(projectId, post.id, next.map((a) => a.postAssetId));
+      router.refresh();
+    });
   }
 
   function handleDragEnd(event: DragEndEvent) {
@@ -98,11 +127,13 @@ export function PostEditor({
     const newIndex = orderedAssets.findIndex((a) => a.postAssetId === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
 
+    const before = orderedAssets;
     const next = arrayMove(orderedAssets, oldIndex, newIndex);
-    setOrderedAssets(next);
-    startTransition(async () => {
-      await reorderPostAssets(projectId, post.id, next.map((a) => a.postAssetId));
-      router.refresh();
+    applyReorder(next);
+    pushCommand({
+      label: "Reorder carousel",
+      undo: () => applyReorder(before),
+      redo: () => applyReorder(next),
     });
   }
 
@@ -115,9 +146,11 @@ export function PostEditor({
   async function handleDownloadAll() {
     setDownloading(true);
     try {
+      // Original files, not edited previews -- same "download the source,
+      // not the annotated version" convention as Brief's image chips.
       const zipAssets = orderedAssets
-        .filter((a): a is typeof a & { url: string } => Boolean(a.url))
-        .map((a, i) => ({ url: a.url, filename: filenameFromUrl(a.url, `asset-${i + 1}`) }));
+        .filter((a): a is typeof a & { originalUrl: string } => Boolean(a.originalUrl))
+        .map((a, i) => ({ url: a.originalUrl, filename: filenameFromUrl(a.originalUrl, `asset-${i + 1}`) }));
       await downloadAssetsAsZip(zipAssets, `post-${post.id}-assets.zip`);
     } finally {
       setDownloading(false);
@@ -140,6 +173,28 @@ export function PostEditor({
       )}
 
       <div className="relative">
+        {canManage && orderedAssets.length > 1 && (
+          <div className="mb-2 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => undo()}
+              disabled={!canUndo || undoRedoBusy}
+              title="Undo (⌘Z)"
+              className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+            >
+              <UndoIcon />
+            </button>
+            <button
+              type="button"
+              onClick={() => redo()}
+              disabled={!canRedo || undoRedoBusy}
+              title="Redo (⌘⇧Z)"
+              className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+            >
+              <UndoIcon redo />
+            </button>
+          </div>
+        )}
         <DndContext
           id={`post-dnd-${post.id}`}
           sensors={sensors}
@@ -162,6 +217,15 @@ export function PostEditor({
                     startTransition(async () => {
                       await removePostAsset(projectId, post.id, asset.postAssetId);
                       router.refresh();
+                    })
+                  }
+                  onEditImage={() =>
+                    asset.mediaAssetId &&
+                    asset.originalUrl &&
+                    setEditingImage({
+                      mediaAssetId: asset.mediaAssetId,
+                      imageUrl: asset.originalUrl,
+                      annotationJson: asset.annotationJson,
                     })
                   }
                 />
@@ -210,7 +274,16 @@ export function PostEditor({
       {canManage && availableMedia.length > 0 && (
         <section className="flex flex-col gap-2">
           <span className={labelClass}>Add from library</span>
-          <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+          {/* Capped to roughly 9 rows on the full page, bounded by viewport
+              height too so it doesn't grow unboundedly with a project's full
+              media library. Inside the Grid/Stories popup (hideBackLink) the
+              modal itself is already space-constrained, so cap to a single
+              visible row there instead -- scrolls internally either way. */}
+          <div
+            className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
+              hideBackLink ? "max-h-36" : "max-h-[min(1000px,65vh)]"
+            }`}
+          >
             {availableMedia.map((item) => (
               <button
                 key={item.id}
@@ -242,6 +315,17 @@ export function PostEditor({
         links={links}
         canManage={canManage}
       />
+
+      <AnnotationEditor
+        projectId={projectId}
+        attachmentId={editingImage?.mediaAssetId ?? null}
+        open={editingImage !== null}
+        imageUrl={editingImage?.imageUrl ?? null}
+        initialAnnotationJson={editingImage?.annotationJson ?? null}
+        onClose={() => setEditingImage(null)}
+        onSaved={handleAnnotationSaved}
+        saveAction={saveMediaAssetAnnotation}
+      />
     </div>
   );
 }
@@ -264,42 +348,100 @@ function SortableAsset({
   asset,
   canManage,
   onRemove,
+  onEditImage,
 }: {
   asset: PostAssetItem;
   canManage: boolean;
   onRemove: () => void;
+  onEditImage: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: asset.postAssetId,
     transition: SORTABLE_TRANSITION,
   });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
   };
 
+  function handleDownload() {
+    setMenuOpen(false);
+    if (!asset.originalUrl) return;
+    setDownloading(true);
+    downloadAsset(asset.originalUrl, filenameFromUrl(asset.originalUrl, "asset")).finally(() =>
+      setDownloading(false),
+    );
+  }
+
   return (
     <div
       ref={setNodeRef}
       style={style}
       {...(canManage ? { ...attributes, ...listeners } : {})}
-      className={`relative aspect-[3/4] w-24 shrink-0 touch-none overflow-hidden rounded-none border border-border transition-opacity duration-150 ${
+      className={`relative aspect-[3/4] w-24 shrink-0 touch-none rounded-none border border-border transition-opacity duration-150 ${
         canManage ? "cursor-grab" : ""
       } ${isDragging ? "opacity-30" : ""}`}
     >
-      <AssetPreview asset={asset} />
+      {/* overflow-hidden lives on this inner wrapper, not the slot's root --
+          the ⋮ dropdown below is a sibling, not a descendant, of this
+          clipped box, so it isn't clipped along with it. Same fix as the
+          Grid slot's own ⋮ menu (grid-board.tsx). */}
+      <div className="absolute inset-0 overflow-hidden">
+        <AssetPreview asset={asset} />
+      </div>
       {canManage && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-          className="absolute right-1 top-1 rounded bg-black/70 px-1.5 text-xs text-white"
-        >
-          X
-        </button>
+        <div ref={menuRef} className="absolute left-1 top-1 z-10">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenuOpen((v) => !v);
+            }}
+            title="Frame options"
+            className="rounded bg-black/70 px-1.5 py-0.5 text-xs text-white transition-colors duration-150 hover:bg-black/85"
+          >
+            ⋮
+          </button>
+          {menuOpen && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute left-0 top-6 w-32 rounded-none border border-border bg-background p-1 shadow-lg"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onEditImage();
+                }}
+                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+              >
+                Edit Image
+              </button>
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
+              >
+                {downloading ? "Downloading..." : "Download"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRemove();
+                }}
+                className="w-full rounded px-2 py-1 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
+              >
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -335,7 +477,11 @@ function UploadAssetTile({
         accept="image/*,video/*"
         multiple
         className="hidden"
-        onChange={() => formRef.current?.requestSubmit()}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length > 0) uploadFilesWithPosters(action, files);
+        }}
       />
       <button
         type="button"
@@ -435,7 +581,7 @@ function PostMainForm({
 
       <div className="flex flex-col gap-3">
         <span className={labelClass}>Schedule post</span>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Type</span>
             <select
@@ -463,6 +609,16 @@ function PostMainForm({
               type="date"
               name="scheduled_date"
               defaultValue={post.scheduled_date ?? ""}
+              disabled={!canManage}
+              className={fieldClass}
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Schedule time</span>
+            <input
+              type="time"
+              name="scheduled_time"
+              defaultValue={post.scheduled_time ?? ""}
               disabled={!canManage}
               className={fieldClass}
             />
@@ -569,16 +725,16 @@ function PostLinks({
       )}
 
       {canManage && (
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
             ref={labelRef}
             placeholder="Label"
-            className="w-28 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
+            className="w-full min-w-0 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-28"
           />
           <input
             ref={urlRef}
             placeholder="URL"
-            className="flex-1 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
+            className="w-full min-w-0 flex-1 rounded-full border border-border px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
           />
           <Button
             type="button"
@@ -586,7 +742,7 @@ function PostLinks({
             radius="full"
             onClick={handleAdd}
             disabled={pending}
-            className="shrink-0"
+            className="w-full shrink-0 sm:w-auto"
           >
             {pending ? "Adding..." : "Add"}
           </Button>

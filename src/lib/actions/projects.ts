@@ -24,6 +24,12 @@ export async function createProject(formData: FormData) {
     throw new Error(error?.message ?? "Failed to create project");
   }
 
+  // "layout" mode so the top nav's project list/switcher (fetched once in
+  // projects/layout.tsx, a layout segment the new project's own dynamic
+  // [projectId] segment doesn't invalidate on its own) picks up the new
+  // project immediately instead of showing it only after some later,
+  // unrelated revalidation.
+  revalidatePath("/projects", "layout");
   redirect(`/projects/${data.id}/grid`);
 }
 
@@ -58,7 +64,10 @@ export async function updateProjectProfile(
   }
 
   const platformRaw = String(formData.get("platform") ?? "instagram");
-  const platform = platformRaw === "tiktok" ? "tiktok" : "instagram";
+  const platform: "instagram" | "tiktok" | "pinterest" | "youtube" =
+    platformRaw === "tiktok" || platformRaw === "pinterest" || platformRaw === "youtube"
+      ? platformRaw
+      : "instagram";
 
   const update: {
     ig_display_name: string;
@@ -68,7 +77,7 @@ export async function updateProjectProfile(
     content_pillars: string;
     ig_website_link: string;
     industry: string;
-    platform: "instagram" | "tiktok";
+    platform: "instagram" | "tiktok" | "pinterest" | "youtube";
     posts_per_week: number;
     stories_per_week: number;
     reels_per_week: number;
@@ -109,6 +118,19 @@ export async function updateProjectProfile(
   if (error) {
     return { message: error.message };
   }
+
+  // Isolated from the update above -- instagram_url/tiktok_url are new
+  // columns that may not exist yet on a not-yet-migrated database, and
+  // PostgREST fails the WHOLE statement if any referenced column is
+  // missing. A pending migration means these two links just don't save
+  // yet, not that the rest of the profile edit breaks.
+  await supabase
+    .from("projects")
+    .update({
+      instagram_url: String(formData.get("instagram_url") ?? "").trim(),
+      tiktok_url: String(formData.get("tiktok_url") ?? "").trim(),
+    })
+    .eq("id", projectId);
 
   // Custom sections ("Add Section +") are saved as a full replace -- simplest
   // correct approach for a small, single-editor list with no concurrent

@@ -61,7 +61,12 @@ export async function GET(
     rows.map(async (row) => {
       const cells = await Promise.all(
         row.slots.map(async (slot): Promise<RawCell> => {
-          if (!slot.coverStoragePath || slot.coverMediaType !== "image") {
+          // coverStoragePath always resolves to an actual image file (the
+          // poster frame for a video cover, never the raw video itself --
+          // see getGridRowsWithCoverPaths), so it's safe to download and use
+          // regardless of coverMediaType; only a genuinely missing cover
+          // (no path at all, e.g. a video with no poster yet) falls back to blank.
+          if (!slot.coverStoragePath) {
             return blankCell;
           }
           const { data, error } = await supabase.storage

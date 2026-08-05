@@ -22,6 +22,7 @@ import {
   type CalendarItemType,
 } from "@/lib/actions/calendar";
 import { Dialog } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 
 export type CalendarItem = {
@@ -42,12 +43,11 @@ export type CalendarCell = {
   note: string | null;
 };
 
-type MenuMode = "main" | "note";
-type MenuState = { date: string; mode: MenuMode } | null;
 type LibraryDialogState = { date: string; itemType: CalendarItemType } | null;
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const UNSCHEDULED_PAGE_SIZE = 6; // 3 rows x 2 columns before "+ Load more"
+const DOUBLE_CLICK_WINDOW_MS = 220; // same value as Grid's identical slot disambiguation
 
 export function CalendarBoard({
   projectId,
@@ -68,9 +68,19 @@ export function CalendarBoard({
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
-  const [menu, setMenu] = useState<MenuState>(null);
   const [libraryDialog, setLibraryDialog] = useState<LibraryDialogState>(null);
-  const [expandedDate, setExpandedDate] = useState<string | null>(null);
+  const [dayDetailDate, setDayDetailDate] = useState<string | null>(null);
+  // Single click unfolds the whole week (row) a clicked day belongs to --
+  // every day in that row grows together via CSS Grid's own row-track
+  // sizing (all 7 cells share one implicit grid row, so giving them all the
+  // same taller min-height stretches the row as a unit, no per-week wrapper
+  // markup needed). Double-click still opens the full day-detail popup for
+  // creating/adding/notes, same disambiguation pattern as Grid's slots.
+  const [expandedRowIndex, setExpandedRowIndex] = useState<number | null>(null);
+  // Right-click quick-actions menu: add a draft item, create new, add a
+  // note, or remove whatever's scheduled -- a faster path to the same
+  // actions DayDetailDialog already offers, without opening the full modal.
+  const [contextMenu, setContextMenu] = useState<{ date: string; x: number; y: number } | null>(null);
   const [activeItem, setActiveItem] = useState<CalendarItem | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -96,6 +106,39 @@ export function CalendarBoard({
     setActiveItem((event.active.data.current?.item as CalendarItem | undefined) ?? null);
   }
 
+  // Shared by drag-and-drop and the "Add from Library" picker so both paths
+  // update the grid immediately instead of waiting on a router.refresh()
+  // round-trip -- previously only drag had this optimistic update, so the
+  // Library path's only feedback was the item vanishing from Drafts, with
+  // the target cell catching up (or not, if the refresh lagged/raced)
+  // whenever the refresh eventually landed.
+  function applySchedule(item: CalendarItem, date: string | null) {
+    const itemKey = (i: CalendarItem) => `${i.itemType}-${i.itemId}`;
+
+    const nextCells = effectiveCells.map((cell) => ({
+      ...cell,
+      items: cell.items.filter((i) => itemKey(i) !== itemKey(item)),
+    }));
+    let nextUnscheduled = effectiveUnscheduled.filter((i) => itemKey(i) !== itemKey(item));
+
+    if (date) {
+      const idx = nextCells.findIndex((c) => c.date === date);
+      if (idx !== -1) {
+        nextCells[idx] = { ...nextCells[idx], items: [...nextCells[idx].items, item] };
+      }
+    } else {
+      nextUnscheduled = [...nextUnscheduled, item];
+    }
+
+    setOverrideCells(nextCells);
+    setOverrideUnscheduled(nextUnscheduled);
+
+    startTransition(async () => {
+      await scheduleItem(projectId, item.itemType, item.itemId, date);
+      router.refresh();
+    });
+  }
+
   function handleDragEnd(event: DragEndEvent) {
     setActiveItem(null);
     const data = event.active.data.current as
@@ -103,32 +146,7 @@ export function CalendarBoard({
       | undefined;
     const overData = event.over?.data.current as { date: string | null } | undefined;
     if (!data || !overData) return;
-
-    const itemKey = (i: CalendarItem) => `${i.itemType}-${i.itemId}`;
-    const movingItem = data.item;
-
-    const nextCells = effectiveCells.map((cell) => ({
-      ...cell,
-      items: cell.items.filter((i) => itemKey(i) !== itemKey(movingItem)),
-    }));
-    let nextUnscheduled = effectiveUnscheduled.filter((i) => itemKey(i) !== itemKey(movingItem));
-
-    if (overData.date) {
-      const idx = nextCells.findIndex((c) => c.date === overData.date);
-      if (idx !== -1) {
-        nextCells[idx] = { ...nextCells[idx], items: [...nextCells[idx].items, movingItem] };
-      }
-    } else {
-      nextUnscheduled = [...nextUnscheduled, movingItem];
-    }
-
-    setOverrideCells(nextCells);
-    setOverrideUnscheduled(nextUnscheduled);
-
-    startTransition(async () => {
-      await scheduleItem(projectId, data.itemType, data.itemId, overData.date);
-      router.refresh();
-    });
+    applySchedule(data.item, overData.date);
   }
 
   const libraryCell = libraryDialog ? effectiveCells.find((c) => c.date === libraryDialog.date) : undefined;
@@ -138,16 +156,39 @@ export function CalendarBoard({
 
   function handleAssignFromLibrary(item: CalendarItem) {
     if (!libraryDialog) return;
-    const date = libraryDialog.date;
+    applySchedule(item, libraryDialog.date);
+    setLibraryDialog(null);
+  }
+
+  // Same "stay on Calendar, no navigation" fix as DayDetailDialog's own
+  // create handlers -- this is a second entry point to the identical action.
+  function handleContextCreatePost(date: string) {
+    setContextMenu(null);
     startTransition(async () => {
-      await scheduleItem(projectId, item.itemType, item.itemId, date);
-      setLibraryDialog(null);
+      await createPostForDate(projectId, date);
       router.refresh();
     });
   }
 
+  function handleContextCreateStory(date: string) {
+    setContextMenu(null);
+    startTransition(async () => {
+      await createStoryForDate(projectId, date);
+      router.refresh();
+    });
+  }
+
+  function handleRemoveFromSchedule(cell: CalendarCell) {
+    setContextMenu(null);
+    if (!confirm(`Remove ${cell.items.length > 1 ? "all scheduled content" : "this"} from ${cell.date}?`)) return;
+    for (const item of cell.items) applySchedule(item, null);
+  }
+
+  const dayDetailCell = dayDetailDate ? effectiveCells.find((c) => c.date === dayDetailDate) : undefined;
+  const contextMenuCell = contextMenu ? effectiveCells.find((c) => c.date === contextMenu.date) : undefined;
+
   return (
-    <div onClick={() => setMenu(null)}>
+    <div>
       <DndContext
         id={`calendar-dnd-${projectId}`}
         sensors={sensors}
@@ -157,14 +198,14 @@ export function CalendarBoard({
       >
         <div className="flex flex-col gap-10 lg:flex-row">
           <div className="flex-1">
-            <div className="relative mb-6 flex items-center gap-8">
+            <div className="relative mb-6 flex items-center gap-4 sm:gap-8">
               <Link
                 href={`?month=${prevMonthParam}`}
                 className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
               >
                 ‹ Prev
               </Link>
-              <div className="flex flex-1 items-center justify-center gap-10 text-border">
+              <div className="hidden flex-1 items-center justify-center gap-10 text-border sm:flex">
                 {Array.from({ length: 4 }).map((_, i) => (
                   <span key={i} className="h-1 w-1 shrink-0 rounded-full bg-current" />
                 ))}
@@ -175,41 +216,46 @@ export function CalendarBoard({
               >
                 Next ›
               </Link>
-              <h2 className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-sm font-semibold tracking-wide uppercase">
+              <h2 className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-xs font-semibold tracking-wide uppercase sm:text-sm">
                 {monthLabel}
               </h2>
             </div>
 
-            <div className="overflow-x-auto">
-              <div className="min-w-[980px]">
-                <div className="grid grid-cols-7 text-center text-xs font-semibold tracking-wide uppercase">
-                  {WEEKDAY_LABELS.map((d) => (
-                    <div key={d} className="py-2">
-                      {d}
-                    </div>
-                  ))}
-                </div>
-                <div className="grid grid-cols-7 gap-2">
-                  {effectiveCells.map((cell) => (
-                    <DayCell
-                      key={cell.date}
-                      projectId={projectId}
-                      cell={cell}
-                      canManage={canManage}
-                      menu={menu}
-                      onOpenMenu={(mode) => setMenu({ date: cell.date, mode })}
-                      onCloseMenu={() => setMenu(null)}
-                      onOpenLibrary={(itemType) => {
-                        setMenu(null);
-                        setLibraryDialog({ date: cell.date, itemType });
-                      }}
-                      expanded={expandedDate === cell.date}
-                      onToggleExpand={() =>
-                        setExpandedDate((current) => (current === cell.date ? null : cell.date))
-                      }
-                    />
-                  ))}
-                </div>
+            {/* No forced min-width/horizontal scroll here -- the grid sizes
+                itself to whatever width is available so a whole week is
+                always visible on mobile without needing to scroll on two
+                axes at once (the real usability problem with a fixed-width
+                calendar on a phone, more than any single element being too
+                small). Cell content is compact enough to work at any width;
+                tapping a day always opens the same DayDetailDialog with the
+                full item list and actions, so nothing is lost by shrinking
+                the grid down. */}
+            <div>
+              <div className="grid grid-cols-7 text-center text-[10px] font-semibold tracking-wide uppercase sm:text-xs">
+                {WEEKDAY_LABELS.map((d) => (
+                  <div key={d} className="py-2">
+                    {d.slice(0, 3)}
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-1 sm:gap-2">
+                {effectiveCells.map((cell, index) => (
+                  <DayCell
+                    key={cell.date}
+                    cell={cell}
+                    isExpanded={Math.floor(index / 7) === expandedRowIndex}
+                    onToggleRow={() =>
+                      setExpandedRowIndex((current) => {
+                        const rowIndex = Math.floor(index / 7);
+                        return current === rowIndex ? null : rowIndex;
+                      })
+                    }
+                    onOpenDetail={() => setDayDetailDate(cell.date)}
+                    onContextMenu={
+                      canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
+                    }
+                  />
+                ))}
               </div>
             </div>
           </div>
@@ -236,13 +282,52 @@ export function CalendarBoard({
         </DragOverlay>
       </DndContext>
 
+      <DayDetailDialog
+        projectId={projectId}
+        cell={dayDetailCell ?? null}
+        canManage={canManage}
+        onClose={() => setDayDetailDate(null)}
+        onOpenLibrary={(itemType) => {
+          if (!dayDetailCell) return;
+          setDayDetailDate(null);
+          setLibraryDialog({ date: dayDetailCell.date, itemType });
+        }}
+      />
+
+      {contextMenu && contextMenuCell && (
+        <DayContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          hasContent={contextMenuCell.items.length > 0}
+          onClose={() => setContextMenu(null)}
+          onAddPostFromLibrary={() => {
+            setContextMenu(null);
+            setLibraryDialog({ date: contextMenuCell.date, itemType: "post" });
+          }}
+          onAddStoryFromLibrary={() => {
+            setContextMenu(null);
+            setLibraryDialog({ date: contextMenuCell.date, itemType: "story" });
+          }}
+          onCreatePost={() => handleContextCreatePost(contextMenuCell.date)}
+          onCreateStory={() => handleContextCreateStory(contextMenuCell.date)}
+          onAddNote={() => {
+            setContextMenu(null);
+            setDayDetailDate(contextMenuCell.date);
+          }}
+          onRemoveFromSchedule={() => handleRemoveFromSchedule(contextMenuCell)}
+        />
+      )}
+
       <Dialog
         open={libraryDialog !== null}
         onClose={() => setLibraryDialog(null)}
         title={libraryDialog?.itemType === "story" ? "Add Story from Library" : "Add Post from Library"}
         radius="none"
       >
-        <div className="grid grid-cols-4 gap-2">
+        {/* Capped to roughly 9 rows, bounded by viewport height too so it
+            doesn't grow unboundedly with a project's full unscheduled
+            library -- scrolls internally for anything past that. */}
+        <div className="grid max-h-[min(1400px,70vh)] grid-cols-4 gap-2 overflow-y-auto">
           {libraryItems.map((item) => (
             <button
               key={`${item.itemType}-${item.itemId}`}
@@ -279,76 +364,73 @@ export function CalendarBoard({
 }
 
 function DayCell({
-  projectId,
   cell,
-  canManage,
-  menu,
-  onOpenMenu,
-  onCloseMenu,
-  onOpenLibrary,
-  expanded,
-  onToggleExpand,
+  isExpanded,
+  onToggleRow,
+  onOpenDetail,
+  onContextMenu,
 }: {
-  projectId: string;
   cell: CalendarCell;
-  canManage: boolean;
-  menu: MenuState;
-  onOpenMenu: (mode: MenuMode) => void;
-  onCloseMenu: () => void;
-  onOpenLibrary: (itemType: CalendarItemType) => void;
-  expanded: boolean;
-  onToggleExpand: () => void;
+  isExpanded: boolean;
+  onToggleRow: () => void;
+  onOpenDetail: () => void;
+  onContextMenu?: (x: number, y: number) => void;
 }) {
-  const router = useRouter();
-  const [, startTransition] = useTransition();
   const { isOver, setNodeRef } = useDroppable({
     id: `day-${cell.date}`,
     data: { date: cell.date },
   });
-  const noteRef = useRef<HTMLTextAreaElement>(null);
-  const [noteError, setNoteError] = useState<string | undefined>();
-  const isMenuOpen = menu?.date === cell.date;
   const hasContent = cell.items.length > 0 || Boolean(cell.note);
+  // Expanded shows fewer items, but each one full-size (an actual visible
+  // image, not a small icon) -- a narrow 7-column cell can only fit ~2 of
+  // those side by side, so this trades item count for genuinely readable size.
+  const PREVIEW_ITEMS = isExpanded ? 2 : 3;
+  const previewItems = cell.items.slice(0, PREVIEW_ITEMS);
+  const hiddenCount = cell.items.length - previewItems.length;
 
-  function handleCreatePost() {
-    startTransition(async () => {
-      const id = await createPostForDate(projectId, cell.date);
-      onCloseMenu();
-      router.push(`/projects/${projectId}/posts/${id}`);
-    });
-  }
+  // Same single/double-click disambiguation as Grid's slots (dnd-kit's
+  // PointerSensor suppresses native dblclick synthesis, so this is done by
+  // hand): a single click unfolds the row, a double-click still opens the
+  // full day-detail popup for creating/adding/notes.
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastClickAtRef = useRef(0);
 
-  function handleCreateStory() {
-    startTransition(async () => {
-      const id = await createStoryForDate(projectId, cell.date);
-      onCloseMenu();
-      router.push(`/projects/${projectId}/stories/${id}`);
-    });
-  }
+  function handleClick() {
+    const now = Date.now();
+    const isDoubleClick = now - lastClickAtRef.current < DOUBLE_CLICK_WINDOW_MS;
+    lastClickAtRef.current = now;
 
-  function handleSaveNote() {
-    setNoteError(undefined);
-    const body = noteRef.current?.value ?? "";
-    startTransition(async () => {
-      const result = await upsertCalendarNote(projectId, cell.date, body);
-      if (result.success) {
-        onCloseMenu();
-        router.refresh();
-      } else {
-        setNoteError(result.message ?? "Couldn't save note.");
+    if (isDoubleClick) {
+      if (clickTimerRef.current) {
+        clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = null;
       }
-    });
-  }
+      onOpenDetail();
+      return;
+    }
 
-  const VISIBLE_ITEMS = 2;
-  const visibleItems = cell.items.slice(0, VISIBLE_ITEMS);
-  const hiddenCount = cell.items.length - visibleItems.length;
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null;
+      onToggleRow();
+    }, DOUBLE_CLICK_WINDOW_MS);
+  }
 
   return (
-    <div
+    <button
+      type="button"
       ref={setNodeRef}
-      className={`relative flex flex-col border p-2 text-xs transition-[min-height,background-color,border-color] duration-200 ${
-        expanded ? "min-h-[420px]" : "min-h-36"
+      onClick={handleClick}
+      onContextMenu={
+        onContextMenu
+          ? (e) => {
+              e.preventDefault();
+              onContextMenu(e.clientX, e.clientY);
+            }
+          : undefined
+      }
+      title="Click to expand this week, double-click for day options, right-click for quick actions"
+      className={`flex flex-col items-start gap-1 border p-1 text-left text-xs transition-[background-color,border-color,min-height] duration-200 sm:p-2 ${
+        isExpanded ? "min-h-40 sm:min-h-56" : "min-h-16 sm:min-h-24"
       } ${
         hasContent
           ? cell.isCurrentMonth
@@ -358,166 +440,289 @@ function DayCell({
             ? "border-dashed border-border"
             : "border-dashed border-black/5 text-muted"
       } ${cell.isToday ? "outline outline-2 outline-offset-[-2px] outline-foreground" : ""} ${
-        isOver ? "bg-black/[.04]" : ""
+        isOver ? "bg-black/[.04]" : "hover:bg-black/[.02]"
       }`}
-      onClick={() => {
-        // Deliberately not stopping propagation here: bubbling up to the
-        // board's own onClick is what closes any other day's open menu when
-        // you click elsewhere in the calendar.
-        onToggleExpand();
-      }}
-      onContextMenu={(e) => {
-        if (!canManage) return;
-        e.preventDefault();
-        e.stopPropagation();
-        onOpenMenu("main");
-      }}
     >
-      {canManage && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpenMenu("main");
-          }}
-          title="Day options"
-          className="absolute right-1 top-1 z-10 rounded px-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
-        >
-          ⋮
-        </button>
-      )}
+      <div className="flex w-full shrink-0 items-center justify-between">
+        <span className="text-[11px] font-semibold sm:text-xs">{cell.dayNumber}</span>
+        {cell.note && <span className="text-[10px]">📝</span>}
+      </div>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden">
-        <div className="flex shrink-0 items-center justify-between pr-4">
-          <span className="text-xs font-semibold">{cell.dayNumber}</span>
-          {cell.note && !isMenuOpen && (
-            <span className="truncate text-[10px] italic text-muted" title={cell.note}>
-              📝
-            </span>
-          )}
-        </div>
-
-        {expanded ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-            {cell.items.map((item) => (
+      {previewItems.length > 0 && (
+        <div className={isExpanded ? "flex w-full flex-1 gap-1" : "flex flex-wrap gap-0.5"}>
+          {previewItems.map((item) =>
+            isExpanded ? (
               <Link
                 key={`${item.itemType}-${item.itemId}`}
                 href={item.href}
                 onClick={(e) => e.stopPropagation()}
-                className="flex items-center gap-3 border border-border p-2 transition-colors duration-150 hover:border-foreground/30"
+                className="group relative min-h-0 flex-1 overflow-hidden border border-border bg-black/[.03] transition-colors duration-150 hover:border-foreground/30"
               >
-                <div className="h-20 w-20 shrink-0 overflow-hidden border border-border">
-                  {item.thumbnailUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center bg-black/[.04] text-2xl text-muted">
-                      {item.itemType === "story" ? "📖" : "🖼"}
-                    </div>
-                  )}
-                </div>
-                <span className="truncate text-xs">
-                  {item.itemType === "story" ? "📖 " : "🖼 "}
+                {item.thumbnailUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-2xl">
+                    {item.itemType === "story" ? "📖" : "🖼"}
+                  </span>
+                )}
+                <span className="absolute inset-x-0 bottom-0 truncate bg-black/60 px-1 py-0.5 text-[9px] text-white">
                   {item.label}
                 </span>
               </Link>
-            ))}
-            {cell.items.length === 0 && (
-              <p className="text-[11px] text-muted">Nothing scheduled.</p>
-            )}
-          </div>
-        ) : (
-          <>
-            {visibleItems.length > 0 && (
-              <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden">
-                {visibleItems.map((item) => (
-                  <ItemChip key={`${item.itemType}-${item.itemId}`} item={item} size="pill" />
-                ))}
-              </div>
-            )}
-            {hiddenCount > 0 && (
-              <span className="shrink-0 truncate text-[10px] text-muted">+{hiddenCount} more</span>
-            )}
-          </>
-        )}
-      </div>
-
-      {isMenuOpen && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute right-1 top-6 z-20 w-44 rounded-none border border-border bg-background p-2 shadow-lg"
-        >
-          {menu.mode === "main" && (
-            <div className="flex flex-col gap-1">
-              <button
-                type="button"
-                onClick={() => onOpenLibrary("post")}
-                className="rounded px-2 py-1 text-left transition-colors duration-150 hover:bg-black/[.05]"
+            ) : (
+              // Small round icon chip, same style as Brief's image chips
+              // (h-5 w-5 rounded-full) -- consistent "this cell has content"
+              // affordance across the app.
+              <span
+                key={`${item.itemType}-${item.itemId}`}
+                className="h-4 w-4 shrink-0 overflow-hidden rounded-full border border-border bg-black/[.03] sm:h-5 sm:w-5"
               >
-                Add Post from Library
-              </button>
-              <button
-                type="button"
-                onClick={() => onOpenLibrary("story")}
-                className="rounded px-2 py-1 text-left transition-colors duration-150 hover:bg-black/[.05]"
-              >
-                Add Story from Library
-              </button>
-              <button
-                type="button"
-                onClick={handleCreatePost}
-                className="rounded px-2 py-1 text-left transition-colors duration-150 hover:bg-black/[.05]"
-              >
-                + New post
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateStory}
-                className="rounded px-2 py-1 text-left transition-colors duration-150 hover:bg-black/[.05]"
-              >
-                + New story
-              </button>
-              <button
-                type="button"
-                onClick={() => onOpenMenu("note")}
-                className="rounded px-2 py-1 text-left transition-colors duration-150 hover:bg-black/[.05]"
-              >
-                {cell.note ? "Edit Manual Notes" : "Add Manual Notes"}
-              </button>
-              <button
-                type="button"
-                onClick={onCloseMenu}
-                className="rounded px-2 py-1 text-left text-muted transition-colors duration-150 hover:bg-black/[.05]"
-              >
-                Cancel
-              </button>
-            </div>
+                {item.thumbnailUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-[8px]">
+                    {item.itemType === "story" ? "📖" : "🖼"}
+                  </span>
+                )}
+              </span>
+            ),
           )}
-
-          {menu.mode === "note" && (
-            <div className="flex flex-col gap-1">
-              <textarea
-                ref={noteRef}
-                defaultValue={cell.note ?? ""}
-                rows={3}
-                placeholder="Note for this day..."
-                className="rounded-none border border-foreground px-1 py-0.5 text-xs focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleSaveNote}
-                className="rounded-none bg-foreground px-2 py-1 text-background transition-colors duration-150 hover:bg-black/85"
-              >
-                Save
-              </button>
-              {noteError && <p className="text-[10px] text-error">{noteError}</p>}
-            </div>
-          )}
+          {hiddenCount > 0 && <span className="text-[9px] text-muted">+{hiddenCount}</span>}
         </div>
       )}
+    </button>
+  );
+}
+
+function DayContextMenu({
+  x,
+  y,
+  hasContent,
+  onClose,
+  onAddPostFromLibrary,
+  onAddStoryFromLibrary,
+  onCreatePost,
+  onCreateStory,
+  onAddNote,
+  onRemoveFromSchedule,
+}: {
+  x: number;
+  y: number;
+  hasContent: boolean;
+  onClose: () => void;
+  onAddPostFromLibrary: () => void;
+  onAddStoryFromLibrary: () => void;
+  onCreatePost: () => void;
+  onCreateStory: () => void;
+  onAddNote: () => void;
+  onRemoveFromSchedule: () => void;
+}) {
+  const menuRef = useOutsideClick<HTMLDivElement>(true, onClose);
+  // Clamp so the menu never opens off the right/bottom edge of the viewport
+  // near the last column/row of the grid.
+  const MENU_WIDTH = 200;
+  const MENU_MAX_HEIGHT = 260;
+  const left = Math.min(x, window.innerWidth - MENU_WIDTH - 8);
+  const top = Math.min(y, window.innerHeight - MENU_MAX_HEIGHT - 8);
+
+  return (
+    <div
+      ref={menuRef}
+      style={{ left, top, width: MENU_WIDTH }}
+      className="fixed z-50 flex flex-col gap-2 rounded-none border border-border bg-background p-2 text-xs shadow-[0_2px_10px_rgba(0,0,0,0.15)]"
+    >
+      <div className="flex flex-col">
+        <span className="px-1 pb-1 text-[10px] tracking-wide text-muted uppercase">Add Draft Item</span>
+        <button
+          type="button"
+          onClick={onAddPostFromLibrary}
+          className="w-full rounded px-2 py-1.5 text-left transition-colors duration-150 hover:bg-black/[.05]"
+        >
+          Add Post from Library
+        </button>
+        <button
+          type="button"
+          onClick={onAddStoryFromLibrary}
+          className="w-full rounded px-2 py-1.5 text-left transition-colors duration-150 hover:bg-black/[.05]"
+        >
+          Add Story from Library
+        </button>
+      </div>
+      <div className="flex flex-col border-t border-border pt-2">
+        <span className="px-1 pb-1 text-[10px] tracking-wide text-muted uppercase">Create New</span>
+        <button
+          type="button"
+          onClick={onCreatePost}
+          className="w-full rounded px-2 py-1.5 text-left transition-colors duration-150 hover:bg-black/[.05]"
+        >
+          + New Post
+        </button>
+        <button
+          type="button"
+          onClick={onCreateStory}
+          className="w-full rounded px-2 py-1.5 text-left transition-colors duration-150 hover:bg-black/[.05]"
+        >
+          + New Story
+        </button>
+      </div>
+      <div className="flex flex-col border-t border-border pt-2">
+        <button
+          type="button"
+          onClick={onAddNote}
+          className="w-full rounded px-2 py-1.5 text-left transition-colors duration-150 hover:bg-black/[.05]"
+        >
+          Add Note
+        </button>
+        {hasContent && (
+          <button
+            type="button"
+            onClick={onRemoveFromSchedule}
+            className="w-full rounded px-2 py-1.5 text-left text-error transition-colors duration-150 hover:bg-black/[.05]"
+          >
+            Remove from Schedule
+          </button>
+        )}
+      </div>
     </div>
   );
 }
+
+function CalendarItemRow({ item }: { item: CalendarItem }) {
+  return (
+    <Link
+      href={item.href}
+      className="flex items-center gap-3 border border-border p-2 transition-colors duration-150 hover:border-foreground/30"
+    >
+      <div className="h-16 w-16 shrink-0 overflow-hidden border border-border sm:h-20 sm:w-20">
+        {item.thumbnailUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center bg-black/[.04] text-2xl text-muted">
+            {item.itemType === "story" ? "📖" : "🖼"}
+          </div>
+        )}
+      </div>
+      <span className="truncate text-xs">
+        {item.itemType === "story" ? "📖 " : "🖼 "}
+        {item.label}
+      </span>
+    </Link>
+  );
+}
+
+function DayDetailDialog({
+  projectId,
+  cell,
+  canManage,
+  onClose,
+  onOpenLibrary,
+}: {
+  projectId: string;
+  cell: CalendarCell | null;
+  canManage: boolean;
+  onClose: () => void;
+  onOpenLibrary: (itemType: CalendarItemType) => void;
+}) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+  const noteRef = useRef<HTMLTextAreaElement>(null);
+  const [noteError, setNoteError] = useState<string | undefined>();
+  const [savingNote, setSavingNote] = useState(false);
+
+  // Deliberately no router.push to the new post/story's own editor page --
+  // closing this popup always returns to Calendar, which stays the current
+  // workspace instead of navigating away to /posts/[id] or /stories/[id].
+  // router.refresh() is what makes the new item show up in its day cell.
+  function handleCreatePost() {
+    if (!cell) return;
+    const date = cell.date;
+    onClose();
+    startTransition(async () => {
+      await createPostForDate(projectId, date);
+      router.refresh();
+    });
+  }
+
+  function handleCreateStory() {
+    if (!cell) return;
+    const date = cell.date;
+    onClose();
+    startTransition(async () => {
+      await createStoryForDate(projectId, date);
+      router.refresh();
+    });
+  }
+
+  function handleSaveNote() {
+    if (!cell) return;
+    setNoteError(undefined);
+    setSavingNote(true);
+    const date = cell.date;
+    const body = noteRef.current?.value ?? "";
+    startTransition(async () => {
+      const result = await upsertCalendarNote(projectId, date, body);
+      setSavingNote(false);
+      if (result.success) {
+        router.refresh();
+      } else {
+        setNoteError(result.message ?? "Couldn't save note.");
+      }
+    });
+  }
+
+  return (
+    <Dialog open={cell !== null} onClose={onClose} title={cell?.date ?? ""} radius="none">
+      {cell && (
+        <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            {cell.items.map((item) => (
+              <CalendarItemRow key={`${item.itemType}-${item.itemId}`} item={item} />
+            ))}
+            {cell.items.length === 0 && <p className="text-sm text-muted">Nothing scheduled.</p>}
+          </div>
+
+          {canManage && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <Button type="button" variant="secondary" radius="none" onClick={() => onOpenLibrary("post")}>
+                  Add Post from Library
+                </Button>
+                <Button type="button" variant="secondary" radius="none" onClick={() => onOpenLibrary("story")}>
+                  Add Story from Library
+                </Button>
+                <Button type="button" variant="secondary" radius="none" onClick={handleCreatePost}>
+                  + New post
+                </Button>
+                <Button type="button" variant="secondary" radius="none" onClick={handleCreateStory}>
+                  + New story
+                </Button>
+              </div>
+
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs tracking-wide text-muted uppercase">Manual notes</span>
+                <textarea
+                  ref={noteRef}
+                  defaultValue={cell.note ?? ""}
+                  rows={3}
+                  placeholder="Note for this day..."
+                  className="w-full rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none"
+                />
+              </label>
+              <Button type="button" variant="primary" radius="none" onClick={handleSaveNote} disabled={savingNote}>
+                {savingNote ? "Saving..." : "Save Note"}
+              </Button>
+              {noteError && <p className="text-sm text-error">{noteError}</p>}
+            </>
+          )}
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
 
 function UnscheduledPanel({ projectId, items }: { projectId: string; items: CalendarItem[] }) {
   const { isOver, setNodeRef } = useDroppable({
