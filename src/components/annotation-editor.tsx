@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
+import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
 
 const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
@@ -65,6 +66,7 @@ export function AnnotationEditor({
   open,
   imageUrl,
   initialAnnotationJson,
+  mediaType,
   onClose,
   onSaved,
   saveAction,
@@ -72,8 +74,14 @@ export function AnnotationEditor({
   projectId: string;
   attachmentId: string | null;
   open: boolean;
+  // For mediaType "video", this is the raw video's own URL, never something
+  // fed directly into fabric.FabricImage.fromURL (which can't decode
+  // video) -- see loadUrl below, which is what the canvas actually loads.
   imageUrl: string | null;
   initialAnnotationJson: object | null;
+  // Undefined/omitted (Brief attachments, which are always images) behaves
+  // exactly like "image" -- only "video" changes anything here.
+  mediaType?: "image" | "video";
   onClose: () => void;
   onSaved: (previewUrl: string) => void;
   // Brief attachments and post/Grid media assets are saved through
@@ -82,12 +90,20 @@ export function AnnotationEditor({
   // the editor itself stays agnostic to which one it's editing.
   saveAction: AnnotationSaveAction;
 }) {
+  const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const fabricRef = useRef<fabric.Canvas | null>(null);
   const exportScaleRef = useRef(1);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
   const restoringRef = useRef(false);
+  // Fabric v7's canvas.dispose() is asynchronous (tears down its own DOM
+  // wrapper/upper-canvas over a promise, not synchronously) -- the main
+  // load effect's construction awaits whatever this is holding before
+  // building a new Canvas, so a fast second edit (e.g. re-picking a video
+  // cover) never constructs on top of a still-in-flight disposal. See that
+  // effect for the crash this prevents.
+  const disposePromiseRef = useRef<Promise<boolean> | null>(null);
 
   const [tool, setTool] = useState<Tool>("select");
   const [saving, setSaving] = useState(false);
@@ -140,6 +156,111 @@ export function AnnotationEditor({
   const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
   const [cropFrameSize, setCropFrameSize] = useState<{ width: number; height: number } | null>(null);
 
+  // For video: a JPEG data URL of whatever frame the user picked (or, when
+  // reopening an already-edited video, one captured silently for canvas-
+  // sizing purposes -- see the effect below). Everything downstream (the
+  // main load effect, crop) treats this exactly like a normal image URL
+  // once set -- fabric.FabricImage.fromURL can decode a data URL fine, it
+  // just can't decode the raw video file this was captured from.
+  const [pickedFrameUrl, setPickedFrameUrl] = useState<string | null>(null);
+  // Forces the canvas (and its wrapper, see the render below) to remount
+  // fresh every time a new editing session starts, instead of keying on
+  // loadUrl's own content -- two different picked video frames can capture
+  // byte-identical data URLs (e.g. a static/solid-color moment in the
+  // source video), which would leave loadUrl unchanged and silently defeat
+  // a content-based key, never forcing the remount Fabric's DOM ownership
+  // needs on a second edit session.
+  const [canvasNonce, setCanvasNonce] = useState(0);
+  // True whenever the INTERACTIVE scrub-and-pick UI should be shown to the
+  // user -- a fresh video with no saved annotation yet, or after "Choose a
+  // Different Frame". Deliberately NOT the same thing as "no loadUrl yet":
+  // reopening an existing annotation also starts with no loadUrl (see the
+  // silent-capture effect below) but must NOT show this, only a bare
+  // loading state -- see loadUrl's render usage further down for why.
+  const [forcePicker, setForcePicker] = useState(false);
+  // True only while pickedFrameUrl came from the SILENT reopen-capture
+  // below (restoring a previously-saved annotation), never from an
+  // explicit user pick (fresh video, or after "Choose a Different Frame").
+  // The main load effect uses this -- not the raw initialAnnotationJson
+  // prop -- to decide whether to loadFromJSON: the prop stays truthy for
+  // the rest of THIS dialog session even after the user re-picks a brand
+  // new frame (editingImage never gets reset until the dialog actually
+  // closes), so branching on the prop directly restored the OLD saved
+  // Fabric objects (referencing the OLD frame's data URL as their photo's
+  // src) onto a canvas sized for the NEWLY picked frame -- a real, wrong
+  // state that was also the actual trigger for an intermittent Fabric/
+  // React DOM crash on a second pick, not just a cosmetic mismatch.
+  const [isRestoringSaved, setIsRestoringSaved] = useState(false);
+  const loadUrl = isVideo ? pickedFrameUrl : imageUrl;
+  const shouldRestoreAnnotation = isVideo ? isRestoringSaved : Boolean(initialAnnotationJson);
+
+  // Briefly forces the whole editor to unmount (return null, same as
+  // `!open`) around every picker<->editor transition. Editing two DIFFERENT
+  // image assets back to back (a genuine dialog close + reopen each time,
+  // `open` cycling false->true for real) never crashes; toggling between
+  // picker and editor purely via internal state while `open` stays true the
+  // entire time is what produced an intermittent Fabric/React DOM conflict
+  // ("insertBefore: node is not a child of this node") -- this makes every
+  // such transition go through a real unmount/remount too, the same way a
+  // normal close+reopen already safely does.
+  const [internallyClosed, setInternallyClosed] = useState(false);
+  function transitionWithRemount(applyChange: () => void) {
+    setInternallyClosed(true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        applyChange();
+        setInternallyClosed(false);
+      });
+    });
+  }
+
+  // Resets picker state at the start of each editing session (opening the
+  // dialog, or switching which asset it's editing) -- without this, closing
+  // and reopening on a DIFFERENT video would reuse the previous video's
+  // picked frame for a beat before the effects below caught up.
+  useEffect(() => {
+    if (!open) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPickedFrameUrl(null);
+    setForcePicker(isVideo && !initialAnnotationJson);
+    setIsRestoringSaved(false);
+    setCanvasNonce((n) => n + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, attachmentId]);
+
+  // Reopening a video that already has a saved annotation skips the picker
+  // (same as images: the saved state is what shows, not a fresh pick) --
+  // but the main load effect below still needs *some* image URL to compute
+  // the canvas's frame size from (loadFromJSON never restores canvas
+  // width/height, see the comment on that effect), and the raw video file
+  // itself can't serve that role. This silently captures one frame purely
+  // for that sizing purpose; loadFromJSON immediately overwrites its actual
+  // pixel content, so which frame it happens to be doesn't matter. While
+  // this is in flight, loadUrl is still null and the render below shows a
+  // bare loading state instead of mounting the canvas -- see there for why.
+  useEffect(() => {
+    if (!open || !isVideo || !imageUrl || !initialAnnotationJson) return;
+    if (pickedFrameUrl || forcePicker) return;
+    let cancelled = false;
+    captureVideoFrameAsDataUrl(imageUrl, 0.1).then((dataUrl) => {
+      if (!cancelled && dataUrl) {
+        setIsRestoringSaved(true);
+        setPickedFrameUrl(dataUrl);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, isVideo, imageUrl, initialAnnotationJson, pickedFrameUrl, forcePicker]);
+
+  function handleChooseDifferentFrame() {
+    if (!confirm("Pick a new cover frame? This discards your current edits on this cover.")) return;
+    transitionWithRemount(() => {
+      setPickedFrameUrl(null);
+      setForcePicker(true);
+    });
+  }
+
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(e: KeyboardEvent) {
@@ -150,19 +271,56 @@ export function AnnotationEditor({
   }, [open, onClose]);
 
   useEffect(() => {
-    if (!open || !imageUrl || !canvasElRef.current) return;
+    if (!open || !loadUrl || !canvasElRef.current) return;
+    // A separately-bound const (not the outer loadUrl prop-derived value)
+    // so TS's narrowing to non-null carries into setupCanvas below, which
+    // closes over it from a nested function declaration.
+    const url = loadUrl;
+    // See shouldRestoreAnnotation's own comment -- null here (even though
+    // the initialAnnotationJson PROP is still truthy) means "treat this as
+    // a fresh edit," which is exactly the case right after re-picking a
+    // frame via "Choose a Different Frame."
+    const restoreAnnotation = shouldRestoreAnnotation ? initialAnnotationJson : null;
 
     let disposed = false;
-    const canvas = new fabric.Canvas(canvasElRef.current, {
-      backgroundColor: "#ffffff",
-      selection: true,
-    });
-    fabricRef.current = canvas;
-    setReady(false);
-    setTool("select");
-    setCropping(false);
+    let canvas: fabric.Canvas | null = null;
 
-    fabric.FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" }).then((img) => {
+    (async () => {
+      // Wait for any previous instance's (async, see disposePromiseRef's
+      // own comment) disposal to actually finish before building a new one
+      // -- constructing while the old one is still tearing down its DOM
+      // wrapper is what caused an intermittent "insertBefore: node is not
+      // a child of this node" crash when quickly picking a second cover
+      // frame ("Choose a Different Frame" -> pick -> pick again).
+      if (disposePromiseRef.current) {
+        await disposePromiseRef.current;
+      }
+      if (disposed || !canvasElRef.current) return;
+
+      canvas = new fabric.Canvas(canvasElRef.current, {
+        backgroundColor: "#ffffff",
+        selection: true,
+      });
+      fabricRef.current = canvas;
+      setReady(false);
+      setTool("select");
+      setCropping(false);
+      // These reference objects that belong to the PREVIOUS canvas instance
+      // (disposed above/about to be) -- left stale, they kept the
+      // selection-dependent toolbar rows (Align/Arrange, Remove Background,
+      // text styling) rendered against a canvas that no longer has anything
+      // selected on a second edit session (e.g. after "Choose a Different
+      // Frame"), shifting the DOM layout React expects around the very
+      // canvas-container div Fabric owns.
+      setSelectedText(null);
+      setSelectedImage(null);
+      setSelectedObject(null);
+
+      setupCanvas(canvas);
+    })();
+
+    function setupCanvas(canvas: fabric.Canvas) {
+    fabric.FabricImage.fromURL(url, { crossOrigin: "anonymous" }).then((img) => {
       if (disposed) return;
       // Cap the canvas's actual pixel resolution to whatever's visible, not
       // just a fixed 640 -- on a narrow phone a 640px-wide canvas would
@@ -195,10 +353,45 @@ export function AnnotationEditor({
         setReady(true);
       }
 
-      if (initialAnnotationJson) {
+      if (restoreAnnotation) {
+        // For IMAGES, the saved JSON's base-photo object still carries
+        // whatever `src` it had at save time -- a Supabase SIGNED url,
+        // which expires after SIGNED_URL_TTL_SECONDS (1 hour, see
+        // media.ts). Reopening an annotation any time after that shows
+        // every other object (text, shapes -- all self-contained) but a
+        // blank gap where the photo should be, since the browser is now
+        // fetching a dead url baked into the JSON instead of the fresh,
+        // currently-valid one this effect was just handed as `url`/
+        // `loadUrl`. The underlying file hasn't changed -- only the
+        // signature/expiry has -- so swapping just the src field (same
+        // pattern handleApplyCrop already uses) is safe: every position/
+        // crop/scale value stays exactly as saved.
+        //
+        // For VIDEO this must NOT run: the saved src there is a
+        // self-contained data URL of the exact picked+annotated cover
+        // frame (never expires, no network fetch), while `url` at this
+        // point is a DIFFERENT frame silently captured only to size the
+        // canvas (see the effect above) -- patching src here would swap
+        // the correct saved cover for a random unrelated frame.
+        let patched = restoreAnnotation;
+        if (!isVideo) {
+          const clone = JSON.parse(JSON.stringify(restoreAnnotation)) as {
+            objects?: Record<string, unknown>[];
+            backgroundImage?: Record<string, unknown>;
+            [k: string]: unknown;
+          };
+          const basePhoto = clone.objects?.find((o) => o.appRole === BASE_PHOTO_ROLE);
+          if (basePhoto) basePhoto.src = url;
+          // Legacy shape (pre-migration, see the backgroundImage handling
+          // right below) stored the photo under its own top-level key
+          // instead of in `objects` -- needs the same src refresh.
+          if (clone.backgroundImage) clone.backgroundImage.src = url;
+          patched = clone;
+        }
+
         // Reload the exact saved state -- objects, background crop, everything --
         // so annotations remain fully editable across sessions, not just baked pixels.
-        canvas.loadFromJSON(initialAnnotationJson).then(() => {
+        canvas.loadFromJSON(patched).then(() => {
           if (disposed) return;
           // The base photo used to live in canvas.backgroundImage (outside
           // the reorderable object stack, always rendered first no matter
@@ -334,13 +527,30 @@ export function AnnotationEditor({
       setSelectedImage(null);
       setSelectedObject(null);
     });
+    }
 
     return () => {
       disposed = true;
-      canvas.dispose();
+      if (canvas) {
+        disposePromiseRef.current = canvas.dispose();
+      }
       fabricRef.current = null;
     };
-  }, [open, imageUrl, initialAnnotationJson]);
+    // canvasNonce is a real dependency, not just a React key: the "reset
+    // picker state" effect above bumps it on every open (for every media
+    // type, not just video), which remounts <canvas> to a brand new DOM
+    // node via its key. Without canvasNonce here, this effect can run once
+    // against the ORIGINAL canvas node before that remount happens (both
+    // effects fire in the same initial commit), attach Fabric and call
+    // setDimensions() on a node that's about to be discarded, then never
+    // run again -- leaving the node actually shown on screen a plain,
+    // un-sized, Fabric-less <canvas> stuck at the browser's 300x150
+    // default while `ready` (a separate, node-independent state variable)
+    // still flips true and shows the toolbar over it. Depending on
+    // canvasNonce forces this effect to rerun (disposing the stale
+    // instance via disposePromiseRef, then constructing fresh) against
+    // whichever canvas node is actually live.
+  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce]);
 
   // The canvas's on-screen box only actually changes when a new image
   // loads (ready flips false -> true) -- measured here once rather than on
@@ -473,10 +683,10 @@ export function AnnotationEditor({
   // override the crop-specific fields.
   function handleApplyCrop() {
     const canvas = fabricRef.current;
-    if (!canvas || !imageUrl) return;
+    if (!canvas || !loadUrl) return;
     const frameW = canvas.getWidth();
     const frameH = canvas.getHeight();
-    fabric.FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" }).then((freshImg) => {
+    fabric.FabricImage.fromURL(loadUrl, { crossOrigin: "anonymous" }).then((freshImg) => {
       const naturalW = freshImg.width ?? frameW;
       const naturalH = freshImg.height ?? frameH;
       // Same "cover" baseline as the initial image load: at zoom 1 the full
@@ -500,7 +710,7 @@ export function AnnotationEditor({
       const updatedPhoto = {
         ...(photoIndex >= 0 ? objects[photoIndex] : {}),
         appRole: BASE_PHOTO_ROLE,
-        src: imageUrl,
+        src: loadUrl,
         cropX,
         cropY,
         width: cropW,
@@ -813,10 +1023,17 @@ export function AnnotationEditor({
     }
   }
 
-  if (!open) return null;
+  if (!open || internallyClosed) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-background">
+    // Keyed on canvasNonce -- the most reliable fix found for an
+    // intermittent Fabric/React DOM conflict ("insertBefore: node is not a
+    // child of this node") that kept recurring on a second pick/edit
+    // session no matter how narrowly the remount boundary around just the
+    // canvas was scoped. Forcing the ENTIRE modal subtree fresh on every
+    // new canvas session eliminates any possibility of React trying to
+    // reconcile into DOM Fabric has touched, anywhere in this tree.
+    <div key={canvasNonce} className="fixed inset-0 z-50 flex flex-col bg-background">
       <div className="flex items-center justify-end px-6 py-4">
         <button
           type="button"
@@ -827,6 +1044,36 @@ export function AnnotationEditor({
         </button>
       </div>
 
+      {isVideo && forcePicker ? (
+        <VideoFramePicker
+          videoUrl={imageUrl}
+          onPick={(dataUrl) => {
+            transitionWithRemount(() => {
+              setPickedFrameUrl(dataUrl);
+              setForcePicker(false);
+              // Always a fresh edit, never a restore -- even when re-picking
+              // after "Choose a Different Frame" on a video that already had
+              // a saved annotation (isRestoringSaved's own comment).
+              setIsRestoringSaved(false);
+              setCanvasNonce((n) => n + 1);
+            });
+          }}
+        />
+      ) : isVideo && !loadUrl ? (
+        // Reopening an existing annotation: the silent background capture
+        // above hasn't resolved yet. Deliberately NOT mounting the canvas
+        // here at all (not just hiding it) -- Fabric takes ownership of
+        // that DOM node the instant its own effect runs, and having a
+        // plain, Fabric-untouched <canvas> sit in the tree in the meantime
+        // is what raced against a later re-render and crashed with
+        // "insertBefore: node is not a child of this node" (same class of
+        // Fabric-vs-React DOM conflict as the upper-canvas/guide-lines
+        // issues documented elsewhere in this file).
+        <div className="flex flex-1 items-center justify-center px-6 py-2">
+          <p className="text-sm text-muted">Loading…</p>
+        </div>
+      ) : (
+        <>
       <div className="flex flex-wrap items-center justify-center gap-1 px-6 pb-2">
         <ToolButton active={tool === "select"} onClick={() => activateTool("select")} label="Select" />
         <ToolButton active={false} onClick={() => activateTool("rect")} label="Rectangle" />
@@ -835,6 +1082,12 @@ export function AnnotationEditor({
         <ToolButton active={false} onClick={handleUndo} label="Undo" />
         <ToolButton active={false} onClick={handleRedo} label="Redo" />
         <ToolButton active={false} onClick={handleDeleteSelected} label="Delete" />
+        {isVideo && ready && (
+          <>
+            <span className="mx-1 h-4 w-px bg-border" />
+            <ToolButton active={false} onClick={handleChooseDifferentFrame} label="Select Cover Frame" />
+          </>
+        )}
       </div>
 
       {tool === "draw" && (
@@ -1008,7 +1261,27 @@ export function AnnotationEditor({
       )}
 
       <div className="flex flex-1 items-center justify-center overflow-auto px-6 py-2">
-        <div className="relative flex max-h-full items-center justify-center border border-dashed border-border bg-black/[.015] p-2">
+        <div
+          // Keyed on canvasNonce (not loadUrl -- two different picked video
+          // frames can capture byte-identical data URLs, e.g. a static
+          // moment in the source video, which would silently leave loadUrl
+          // unchanged), same reasoning as the canvas's own key below but one
+          // level up: Fabric wraps the <canvas> in its own internally-
+          // created container div (a "canvas-container", invisible to
+          // React's tracking) once it constructs -- so THIS div's actual DOM
+          // children end up different from what React thinks they are the
+          // moment Fabric runs. Re-keying only the canvas wasn't enough:
+          // React could still try to insert one of the sibling overlays
+          // below (loading text, crop overlay, guide lines) relative to the
+          // canvas node as a reference point, which fails once Fabric has
+          // re-parented it under its own wrapper -- "insertBefore: node is
+          // not a child of this node". Keying this whole container instead
+          // means React always discards and rebuilds the entire subtree
+          // (Fabric's foreign DOM included) rather than ever trying to diff
+          // into it.
+          key={canvasNonce}
+          className="relative flex max-h-full items-center justify-center border border-dashed border-border bg-black/[.015] p-2"
+        >
           {/* A loading/placeholder OVERLAY, not a class toggle on the canvas
               itself -- Fabric.js clones the canvas element's className into
               its own internally-created interactive "upper-canvas" once, at
@@ -1023,12 +1296,12 @@ export function AnnotationEditor({
               canvas.add() working fine, since those don't depend on the
               upper-canvas receiving events at all. The canvas element here
               must always keep the exact same className/style. */}
-          {!ready && imageUrl && (
+          {!ready && loadUrl && (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/[.015]">
               <p className="text-sm text-muted">Loading image…</p>
             </div>
           )}
-          {!imageUrl && <p className="p-24 text-2xl tracking-wide text-muted">IMAGE</p>}
+          {!loadUrl && <p className="p-24 text-2xl tracking-wide text-muted">IMAGE</p>}
           {/* max-width/height here is a display-only fallback (e.g. reopening
               an annotation that was originally saved at a larger desktop
               resolution) -- Fabric's own pointer scaling already accounts
@@ -1043,11 +1316,13 @@ export function AnnotationEditor({
               true (crop can't be entered before then), so it can't hit the
               upper-canvas construction-time staleness bug documented above. */}
           <canvas
+            // Keyed on canvasNonce, same reasoning as the wrapper div above.
+            key={canvasNonce}
             ref={canvasElRef}
             className={cropping ? "invisible" : ""}
             style={{ maxWidth: "100%", maxHeight: "100%", height: "auto" }}
           />
-          {cropping && imageUrl && cropFrameSize && (
+          {cropping && loadUrl && cropFrameSize && (
             <div
               className="absolute"
               style={{
@@ -1059,7 +1334,7 @@ export function AnnotationEditor({
               }}
             >
               <AnnotationCropOverlay
-                imageUrl={imageUrl}
+                imageUrl={loadUrl}
                 zoom={cropZoom}
                 offset={cropOffset}
                 onZoomChange={setCropZoom}
@@ -1141,6 +1416,107 @@ export function AnnotationEditor({
         </Button>
         {saveError && <p className="text-xs text-error">{saveError}</p>}
       </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Shown instead of the canvas/toolbar for a video with no picked cover
+// frame yet -- scrub to any moment, capture it, and that frame flows into
+// the exact same crop/text/arrows/draw pipeline a normal image would (see
+// pickedFrameUrl/loadUrl above). Captures directly from this <video>
+// element's current displayed frame rather than re-fetching the video a
+// second time offscreen -- it's already loaded and already showing
+// whatever the user just scrubbed to.
+function VideoFramePicker({
+  videoUrl,
+  onPick,
+}: {
+  videoUrl: string | null;
+  onPick: (dataUrl: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [capturing, setCapturing] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  function handleSeek(value: number) {
+    setCurrentTime(value);
+    const video = videoRef.current;
+    if (video) video.currentTime = value;
+  }
+
+  function handleUseFrame() {
+    const video = videoRef.current;
+    if (!video) return;
+    setCapturing(true);
+    setError(undefined);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 640;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("no 2d context");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      onPick(canvas.toDataURL("image/jpeg", 0.92));
+    } catch {
+      // A tainted canvas (crossOrigin rejected by the storage host) throws
+      // on drawImage rather than erroring earlier -- fail closed with a
+      // message instead of a silently-broken button, since here (unlike the
+      // background auto-heal capture) there's a user waiting on this click.
+      setError("Couldn't capture this frame. Try scrubbing to a different moment.");
+    } finally {
+      setCapturing(false);
+    }
+  }
+
+  if (!videoUrl) return null;
+
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 overflow-auto px-6 py-2">
+      <p className="text-sm text-muted">Scrub to a moment, then use it as the cover.</p>
+      <video
+        ref={videoRef}
+        src={videoUrl}
+        muted
+        playsInline
+        crossOrigin="anonymous"
+        className="max-h-[55dvh] max-w-full border border-dashed border-border bg-black/[.015]"
+        onLoadedMetadata={(e) => {
+          const video = e.currentTarget;
+          setDuration(video.duration || 0);
+          // Same starting point as the automatic poster capture -- a hair
+          // past 0, since frame 0 of many encodes is a solid black/blank
+          // frame -- the user can scrub anywhere from there.
+          const start = Math.min(0.1, (video.duration || 1) / 2);
+          video.currentTime = start;
+          setCurrentTime(start);
+        }}
+        onSeeked={(e) => setCurrentTime(e.currentTarget.currentTime)}
+      />
+      <input
+        type="range"
+        min={0}
+        max={duration || 0}
+        step={0.01}
+        value={currentTime}
+        onChange={(e) => handleSeek(Number(e.target.value))}
+        disabled={!duration}
+        className="w-full max-w-md accent-foreground"
+      />
+      {error && <p className="text-xs text-error">{error}</p>}
+      <Button
+        type="button"
+        variant="primary"
+        radius="full"
+        onClick={handleUseFrame}
+        disabled={capturing || !duration}
+        className="w-64"
+      >
+        {capturing ? "Capturing…" : "Use This Frame"}
+      </Button>
     </div>
   );
 }

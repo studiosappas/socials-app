@@ -1,4 +1,5 @@
 ﻿import { createClient } from "@/lib/supabase/server";
+import { getShareLinksData } from "@/lib/data/share-links";
 import { StoriesBoard } from "./stories-board";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
@@ -79,5 +80,16 @@ export default async function StoriesPage({
     thumbnailUrl: framesByStory.get(story.id)?.thumbnailUrl ?? null,
   }));
 
-  return <StoriesBoard projectId={projectId} stories={storyItems} canManage={canManage} />;
+  const shareData = await getShareLinksData(supabase, projectId);
+
+  return (
+    <StoriesBoard
+      projectId={projectId}
+      stories={storyItems}
+      canManage={canManage}
+      shareLinks={shareData.links}
+      shareStories={shareData.stories}
+      shareTableMissing={shareData.tableMissing}
+    />
+  );
 }

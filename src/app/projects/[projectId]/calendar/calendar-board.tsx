@@ -49,6 +49,17 @@ const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const UNSCHEDULED_PAGE_SIZE = 6; // 3 rows x 2 columns before "+ Load more"
 const DOUBLE_CLICK_WINDOW_MS = 220; // same value as Grid's identical slot disambiguation
 
+// Post items already carry their post_type ("post"|"reel"|"carousel") as
+// `label` (see calendar/page.tsx) -- stories don't have a type field, so
+// they're always "Story". This is what every chip/tile shows now instead of
+// a filename or a story's custom name, per the "text next to it is the
+// content type" request.
+function contentTypeLabel(item: CalendarItem): string {
+  if (item.itemType === "story") return "Story";
+  const raw = item.label || "post";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
 export function CalendarBoard({
   projectId,
   monthLabel,
@@ -82,6 +93,9 @@ export function CalendarBoard({
   // actions DayDetailDialog already offers, without opening the full modal.
   const [contextMenu, setContextMenu] = useState<{ date: string; x: number; y: number } | null>(null);
   const [activeItem, setActiveItem] = useState<CalendarItem | null>(null);
+  // Which cell (if any) is showing its inline note editor -- notes no
+  // longer open a popup; the textarea lives directly in the cell instead.
+  const [editingNoteDate, setEditingNoteDate] = useState<string | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
@@ -147,6 +161,21 @@ export function CalendarBoard({
     const overData = event.over?.data.current as { date: string | null } | undefined;
     if (!data || !overData) return;
     applySchedule(data.item, overData.date);
+  }
+
+  // Saves inline, optimistically -- the cell shows the new note text (or
+  // goes back to empty) immediately instead of waiting on the round trip,
+  // same reasoning as applySchedule's optimistic override above.
+  function handleSaveNote(date: string, body: string) {
+    setEditingNoteDate(null);
+    const trimmed = body.trim();
+    setOverrideCells(
+      effectiveCells.map((cell) => (cell.date === date ? { ...cell, note: trimmed || null } : cell)),
+    );
+    startTransition(async () => {
+      await upsertCalendarNote(projectId, date, trimmed);
+      router.refresh();
+    });
   }
 
   const libraryCell = libraryDialog ? effectiveCells.find((c) => c.date === libraryDialog.date) : undefined;
@@ -254,6 +283,11 @@ export function CalendarBoard({
                     onContextMenu={
                       canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
                     }
+                    canManage={canManage}
+                    isEditingNote={editingNoteDate === cell.date}
+                    onStartEditNote={() => setEditingNoteDate(cell.date)}
+                    onCancelEditNote={() => setEditingNoteDate(null)}
+                    onSaveNote={(body) => handleSaveNote(cell.date, body)}
                   />
                 ))}
               </div>
@@ -312,7 +346,7 @@ export function CalendarBoard({
           onCreateStory={() => handleContextCreateStory(contextMenuCell.date)}
           onAddNote={() => {
             setContextMenu(null);
-            setDayDetailDate(contextMenuCell.date);
+            setEditingNoteDate(contextMenuCell.date);
           }}
           onRemoveFromSchedule={() => handleRemoveFromSchedule(contextMenuCell)}
         />
@@ -369,12 +403,22 @@ function DayCell({
   onToggleRow,
   onOpenDetail,
   onContextMenu,
+  canManage,
+  isEditingNote,
+  onStartEditNote,
+  onCancelEditNote,
+  onSaveNote,
 }: {
   cell: CalendarCell;
   isExpanded: boolean;
   onToggleRow: () => void;
   onOpenDetail: () => void;
   onContextMenu?: (x: number, y: number) => void;
+  canManage: boolean;
+  isEditingNote: boolean;
+  onStartEditNote: () => void;
+  onCancelEditNote: () => void;
+  onSaveNote: (body: string) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({
     id: `day-${cell.date}`,
@@ -391,7 +435,7 @@ function DayCell({
   // Same single/double-click disambiguation as Grid's slots (dnd-kit's
   // PointerSensor suppresses native dblclick synthesis, so this is done by
   // hand): a single click unfolds the row, a double-click still opens the
-  // full day-detail popup for creating/adding/notes.
+  // full day-detail popup for creating content / adding from library.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickAtRef = useRef(0);
 
@@ -413,6 +457,16 @@ function DayCell({
       clickTimerRef.current = null;
       onToggleRow();
     }, DOUBLE_CLICK_WINDOW_MS);
+  }
+
+  function handleNoteKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      onCancelEditNote();
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      onSaveNote(e.currentTarget.value);
+    }
   }
 
   return (
@@ -445,54 +499,145 @@ function DayCell({
     >
       <div className="flex w-full shrink-0 items-center justify-between">
         <span className="text-[11px] font-semibold sm:text-xs">{cell.dayNumber}</span>
-        {cell.note && <span className="text-[10px]">📝</span>}
       </div>
 
+      {/* Notes no longer open a popup -- an inline textarea appears right
+          here in the cell (a "live bubble"), and a saved note renders in
+          the same bordered-frame language as the content chips/tiles below
+          it, not a separate emoji indicator. */}
+      {isEditingNote ? (
+        <textarea
+          autoFocus
+          defaultValue={cell.note ?? ""}
+          rows={2}
+          placeholder="Note..."
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={handleNoteKeyDown}
+          onBlur={(e) => onSaveNote(e.currentTarget.value)}
+          className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] focus:outline-none sm:text-[10px]"
+        />
+      ) : (
+        cell.note && (
+          // A div, not a <button> -- this already sits inside DayCell's own
+          // outer <button>, and a <button> nested in a <button> is invalid
+          // HTML that the browser's parser silently un-nests, causing a
+          // React hydration mismatch (confirmed live: "cannot be a
+          // descendant of <button>").
+          <div
+            role={canManage ? "button" : undefined}
+            tabIndex={canManage ? 0 : undefined}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (canManage) onStartEditNote();
+            }}
+            onKeyDown={(e) => {
+              if (canManage && (e.key === "Enter" || e.key === " ")) {
+                e.preventDefault();
+                e.stopPropagation();
+                onStartEditNote();
+              }
+            }}
+            title={cell.note}
+            className={`w-full shrink-0 rounded-none border border-border bg-black/[.02] px-1 py-0.5 text-left text-[9px] text-muted sm:text-[10px] ${
+              isExpanded ? "line-clamp-3 whitespace-pre-wrap" : "truncate"
+            }`}
+          >
+            {cell.note}
+          </div>
+        )
+      )}
+
       {previewItems.length > 0 && (
-        <div className={isExpanded ? "flex w-full flex-1 gap-1" : "flex flex-wrap gap-0.5"}>
+        <div className={isExpanded ? "flex w-full flex-1 items-start gap-1" : "flex flex-wrap gap-1"}>
           {previewItems.map((item) =>
             isExpanded ? (
-              <Link
-                key={`${item.itemType}-${item.itemId}`}
-                href={item.href}
-                onClick={(e) => e.stopPropagation()}
-                className="group relative min-h-0 flex-1 overflow-hidden border border-border bg-black/[.03] transition-colors duration-150 hover:border-foreground/30"
-              >
-                {item.thumbnailUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <span className="flex h-full w-full items-center justify-center text-2xl">
-                    {item.itemType === "story" ? "📖" : "🖼"}
-                  </span>
-                )}
-                <span className="absolute inset-x-0 bottom-0 truncate bg-black/60 px-1 py-0.5 text-[9px] text-white">
-                  {item.label}
-                </span>
-              </Link>
+              <ExpandedItemTile key={`${item.itemType}-${item.itemId}`} item={item} />
             ) : (
-              // Small round icon chip, same style as Brief's image chips
-              // (h-5 w-5 rounded-full) -- consistent "this cell has content"
-              // affordance across the app.
-              <span
-                key={`${item.itemType}-${item.itemId}`}
-                className="h-4 w-4 shrink-0 overflow-hidden rounded-full border border-border bg-black/[.03] sm:h-5 sm:w-5"
-              >
-                {item.thumbnailUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <span className="flex h-full w-full items-center justify-center text-[8px]">
-                    {item.itemType === "story" ? "📖" : "🖼"}
-                  </span>
-                )}
-              </span>
+              <CompactItemChip key={`${item.itemType}-${item.itemId}`} item={item} />
             ),
           )}
           {hiddenCount > 0 && <span className="text-[9px] text-muted">+{hiddenCount}</span>}
         </div>
       )}
     </button>
+  );
+}
+
+// Matches Brief's image-chip language (rounded-full pill, small circular
+// thumbnail, label text) -- draggable so an already-scheduled item can be
+// picked up and dropped on a different day, same as items dragged in from
+// the Drafts sidebar.
+function CompactItemChip({ item }: { item: CalendarItem }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `cell-item-${item.itemType}-${item.itemId}`,
+    data: { itemType: item.itemType, itemId: item.itemId, item },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      onClick={(e) => e.stopPropagation()}
+      className={`max-w-full touch-none transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
+    >
+      <Link
+        href={item.href}
+        title={contentTypeLabel(item)}
+        className="flex max-w-full items-center gap-1 rounded-full border border-border bg-background py-0.5 pr-1.5 pl-0.5 text-[9px] transition-colors duration-150 hover:border-foreground/30 sm:text-[10px]"
+      >
+        <span className="h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full bg-black/10 sm:h-4 sm:w-4">
+          {item.thumbnailUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <span className="flex h-full w-full items-center justify-center text-[7px]">
+              {item.itemType === "story" ? "📖" : "🖼"}
+            </span>
+          )}
+        </span>
+        <span className="truncate">{contentTypeLabel(item)}</span>
+      </Link>
+    </div>
+  );
+}
+
+// The expanded-row tile: a real, readable image (not a small icon) at a
+// fixed 3:4 ratio -- rather than stretching to fill however tall the row
+// happens to be -- with the content-type tag shrunk to a small corner badge
+// (the same "minimal tag" language as Grid's asset-count/video badges)
+// instead of a full-width caption bar. Draggable for the same reason as
+// CompactItemChip.
+function ExpandedItemTile({ item }: { item: CalendarItem }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `cell-item-${item.itemType}-${item.itemId}`,
+    data: { itemType: item.itemType, itemId: item.itemId, item },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      onClick={(e) => e.stopPropagation()}
+      className={`min-w-0 flex-1 touch-none self-start transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
+    >
+      <Link
+        href={item.href}
+        title={contentTypeLabel(item)}
+        className="relative block aspect-[3/4] w-full overflow-hidden border border-border bg-black/[.03] transition-colors duration-150 hover:border-foreground/30"
+      >
+        {item.thumbnailUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-2xl">
+            {item.itemType === "story" ? "📖" : "🖼"}
+          </span>
+        )}
+        <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">
+          {contentTypeLabel(item)}
+        </span>
+      </Link>
+    </div>
   );
 }
 
@@ -628,9 +773,6 @@ function DayDetailDialog({
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
-  const noteRef = useRef<HTMLTextAreaElement>(null);
-  const [noteError, setNoteError] = useState<string | undefined>();
-  const [savingNote, setSavingNote] = useState(false);
 
   // Deliberately no router.push to the new post/story's own editor page --
   // closing this popup always returns to Calendar, which stays the current
@@ -653,23 +795,6 @@ function DayDetailDialog({
     startTransition(async () => {
       await createStoryForDate(projectId, date);
       router.refresh();
-    });
-  }
-
-  function handleSaveNote() {
-    if (!cell) return;
-    setNoteError(undefined);
-    setSavingNote(true);
-    const date = cell.date;
-    const body = noteRef.current?.value ?? "";
-    startTransition(async () => {
-      const result = await upsertCalendarNote(projectId, date, body);
-      setSavingNote(false);
-      if (result.success) {
-        router.refresh();
-      } else {
-        setNoteError(result.message ?? "Couldn't save note.");
-      }
     });
   }
 
@@ -700,21 +825,6 @@ function DayDetailDialog({
                   + New story
                 </Button>
               </div>
-
-              <label className="flex flex-col gap-1.5">
-                <span className="text-xs tracking-wide text-muted uppercase">Manual notes</span>
-                <textarea
-                  ref={noteRef}
-                  defaultValue={cell.note ?? ""}
-                  rows={3}
-                  placeholder="Note for this day..."
-                  className="w-full rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none"
-                />
-              </label>
-              <Button type="button" variant="primary" radius="none" onClick={handleSaveNote} disabled={savingNote}>
-                {savingNote ? "Saving..." : "Save Note"}
-              </Button>
-              {noteError && <p className="text-sm text-error">{noteError}</p>}
             </>
           )}
         </div>

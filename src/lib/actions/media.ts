@@ -105,6 +105,68 @@ export async function saveMediaAssetAnnotation(
   return { previewUrl: signed?.signedUrl };
 }
 
+// Same shape as saveMediaAssetAnnotation above (and satisfies the same
+// AnnotationSaveAction interface, so AnnotationEditor stays agnostic to
+// which one it's calling), but for a video's manually-picked cover frame --
+// writes poster_storage_path instead of preview_storage_path, since that's
+// the column Grid/Calendar/Stories actually read for a video's cover (see
+// grid-data.ts: a video cover resolves from poster_storage_path only,
+// never preview_storage_path). annotation_json is still saved to the same
+// column images use, since a video asset never otherwise has anything in
+// it -- reopening "Edit Image" on this video later restores the exact same
+// crop/text/arrows without needing a separate column.
+export async function saveMediaAssetPosterAnnotation(
+  projectId: string,
+  mediaAssetId: string,
+  formData: FormData,
+): Promise<{ previewUrl?: string; message?: string }> {
+  const file = formData.get("file");
+  const annotationJsonRaw = formData.get("annotation_json");
+  if (!(file instanceof File) || file.size === 0) {
+    return { message: "No cover image provided." };
+  }
+  if (typeof annotationJsonRaw !== "string") {
+    return { message: "Missing annotation data." };
+  }
+
+  let annotationJson: object;
+  try {
+    annotationJson = JSON.parse(annotationJsonRaw);
+  } catch {
+    return { message: "Invalid annotation data." };
+  }
+
+  const supabase = await createClient();
+  const posterPath = `${projectId}/${crypto.randomUUID()}-poster.jpg`;
+
+  const { error: uploadError } = await supabase.storage
+    .from("project-media")
+    .upload(posterPath, file, { contentType: file.type });
+
+  if (uploadError) {
+    return { message: uploadError.message };
+  }
+
+  const { error: updateError } = await supabase
+    .from("media_assets")
+    .update({ poster_storage_path: posterPath, annotation_json: annotationJson })
+    .eq("id", mediaAssetId);
+
+  if (updateError) {
+    return { message: updateError.message };
+  }
+
+  const { data: signed } = await supabase.storage
+    .from("project-media")
+    .createSignedUrl(posterPath, SIGNED_URL_TTL_SECONDS);
+
+  revalidatePath(`/projects/${projectId}/grid`);
+  revalidatePath(`/projects/${projectId}/calendar`);
+  revalidatePath(`/projects/${projectId}/stories`);
+
+  return { previewUrl: signed?.signedUrl };
+}
+
 // Manual escape hatch for a video whose poster was never captured (e.g.
 // uploaded before poster capture existed, or the original client-side
 // capture failed/timed out) -- the client re-fetches the original video and

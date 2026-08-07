@@ -551,6 +551,237 @@ alter table public.projects
 alter table public.posts
   add column if not exists scheduled_time time;
 
+-- ---------- Brand Asset Collections (external folder links, e.g. Drive/Dropbox) ----------
+create table if not exists public.asset_collections (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  folder_url text not null,
+  provider text not null default 'other'
+    check (provider in ('google_drive', 'dropbox', 'box', 'onedrive', 'collect', 'other')),
+  name text not null,
+  asset_type text not null default 'other'
+    check (asset_type in (
+      'product_photography', 'campaign', 'lifestyle', 'packaging',
+      'ugc', 'moodboard', 'videos', 'references', 'other'
+    )),
+  notes text not null default '',
+  cover_storage_path text,
+  ai_status text not null default 'not_configured'
+    check (ai_status in ('not_configured', 'indexing', 'analyzed', 'error')),
+  last_synced_at timestamptz,
+  created_by uuid not null references public.profiles (id),
+  created_at timestamptz not null default now()
+);
+
+alter table public.asset_collections enable row level security;
+
+drop policy if exists "Members can view asset collections" on public.asset_collections;
+create policy "Members can view asset collections" on public.asset_collections for select to authenticated
+  using (public.is_project_member(project_id));
+
+drop policy if exists "Admins manage asset collections" on public.asset_collections;
+create policy "Admins manage asset collections" on public.asset_collections for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+-- ---------- Shared Client Preview (shareable, view-only links for Posts/Stories) ----------
+create table if not exists public.share_links (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  token text not null unique,
+  title text not null default '',
+  created_by uuid not null references public.profiles (id),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.share_link_items (
+  id uuid primary key default gen_random_uuid(),
+  share_link_id uuid not null references public.share_links (id) on delete cascade,
+  post_id uuid references public.posts (id) on delete cascade,
+  story_id uuid references public.stories (id) on delete cascade,
+  position integer not null default 0,
+  constraint share_link_items_one_target check (
+    (post_id is not null and story_id is null) or (post_id is null and story_id is not null)
+  )
+);
+
+alter table public.share_links enable row level security;
+alter table public.share_link_items enable row level security;
+
+drop policy if exists "Members can view share links" on public.share_links;
+create policy "Members can view share links" on public.share_links for select to authenticated
+  using (public.is_project_member(project_id));
+drop policy if exists "Admins manage share links" on public.share_links;
+create policy "Admins manage share links" on public.share_links for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+drop policy if exists "Members can view share link items" on public.share_link_items;
+create policy "Members can view share link items" on public.share_link_items for select to authenticated
+  using (exists (
+    select 1 from public.share_links sl
+    where sl.id = share_link_id and public.is_project_member(sl.project_id)
+  ));
+drop policy if exists "Admins manage share link items" on public.share_link_items;
+create policy "Admins manage share link items" on public.share_link_items for all to authenticated
+  using (exists (
+    select 1 from public.share_links sl
+    where sl.id = share_link_id and public.project_role(sl.project_id) in ('owner', 'admin')
+  ))
+  with check (exists (
+    select 1 from public.share_links sl
+    where sl.id = share_link_id and public.project_role(sl.project_id) in ('owner', 'admin')
+  ));
+
+create or replace function public.get_shared_preview(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_link record;
+  v_items jsonb;
+begin
+  select id, project_id, title into v_link
+  from share_links
+  where token = p_token;
+
+  if v_link.id is null then
+    return null;
+  end if;
+
+  select coalesce(jsonb_agg(entry.data order by entry.position), '[]'::jsonb)
+  into v_items
+  from (
+    select
+      sli.position,
+      jsonb_build_object(
+        'id', sli.id,
+        'type', case when sli.post_id is not null then 'post' else 'story' end,
+        'media', case
+          when sli.post_id is not null then (
+            select coalesce(jsonb_agg(jsonb_build_object(
+              'mediaAssetId', ma.id,
+              'storagePath', ma.storage_path,
+              'previewStoragePath', ma.preview_storage_path,
+              'posterStoragePath', ma.poster_storage_path,
+              'mediaType', ma.media_type
+            ) order by pa.position), '[]'::jsonb)
+            from post_assets pa
+            join media_assets ma on ma.id = pa.media_asset_id
+            where pa.post_id = sli.post_id
+          )
+          else (
+            select coalesce(jsonb_agg(jsonb_build_object(
+              'mediaAssetId', ma.id,
+              'storagePath', ma.storage_path,
+              'previewStoragePath', ma.preview_storage_path,
+              'posterStoragePath', ma.poster_storage_path,
+              'mediaType', ma.media_type
+            ) order by sf.position), '[]'::jsonb)
+            from story_frames sf
+            join media_assets ma on ma.id = sf.media_asset_id
+            where sf.story_id = sli.story_id
+          )
+        end
+      ) as data
+    from share_link_items sli
+    where sli.share_link_id = v_link.id
+  ) entry;
+
+  return jsonb_build_object(
+    'title', v_link.title,
+    'projectName', (select name from projects where id = v_link.project_id),
+    'items', v_items
+  );
+end;
+$$;
+
+grant execute on function public.get_shared_preview(text) to anon, authenticated;
+
+create or replace function public.is_media_path_shared(p_path text)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from share_link_items sli
+    left join post_assets pa on pa.post_id = sli.post_id
+    left join story_frames sf on sf.story_id = sli.story_id
+    join media_assets ma on ma.id = coalesce(pa.media_asset_id, sf.media_asset_id)
+    where p_path in (ma.storage_path, ma.preview_storage_path, ma.poster_storage_path)
+  );
+$$;
+
+grant execute on function public.is_media_path_shared(text) to anon, authenticated;
+
+drop policy if exists "Public can read media for active share links" on storage.objects;
+create policy "Public can read media for active share links"
+  on storage.objects for select
+  to anon, authenticated
+  using (
+    bucket_id = 'project-media'
+    and public.is_media_path_shared(storage.objects.name)
+  );
+
+-- ---------- Task Management (status/assignee/comments, shared visibility) ----------
+alter table public.tasks add column if not exists status text not null default 'todo'
+  check (status in ('todo', 'in_progress', 'done'));
+alter table public.tasks add column if not exists assignee_id uuid references public.profiles (id) on delete set null;
+alter table public.tasks add column if not exists updated_at timestamptz not null default now();
+
+-- Backfill from the old boolean, guarded so a re-run of this script is a
+-- no-op the second time (no row will ever again be status='todo' AND
+-- completed=true once this has run once).
+update public.tasks set status = 'done' where completed = true and status = 'todo';
+
+-- `completed` is intentionally NOT dropped -- kept frozen/unused rather
+-- than risking a destructive column drop in an append-only migration file.
+
+create table if not exists public.task_comments (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.tasks (id) on delete cascade,
+  author_id uuid not null references public.profiles (id),
+  text text not null,
+  created_at timestamptz not null default now()
+);
+alter table public.task_comments enable row level security;
+
+-- Visibility widens from "creator only" to "shared with the task's project
+-- team" (mirrors Grid/Calendar/Brief's own is_project_member gating) --
+-- tasks with no project stay creator-only, unchanged from before.
+drop policy if exists "Users manage their own tasks" on public.tasks;
+create policy "Members manage project tasks, users manage personal tasks"
+  on public.tasks for all to authenticated
+  using (
+    (project_id is not null and public.is_project_member(project_id))
+    or (project_id is null and user_id = auth.uid())
+  )
+  with check (
+    (project_id is not null and public.is_project_member(project_id))
+    or (project_id is null and user_id = auth.uid())
+  );
+
+drop policy if exists "Task comment visibility follows task visibility" on public.task_comments;
+create policy "Task comment visibility follows task visibility"
+  on public.task_comments for all to authenticated
+  using (exists (
+    select 1 from public.tasks t where t.id = task_comments.task_id
+    and ((t.project_id is not null and public.is_project_member(t.project_id))
+         or (t.project_id is null and t.user_id = auth.uid()))
+  ))
+  with check (
+    author_id = auth.uid() and exists (
+      select 1 from public.tasks t where t.id = task_comments.task_id
+      and ((t.project_id is not null and public.is_project_member(t.project_id))
+           or (t.project_id is null and t.user_id = auth.uid()))
+    )
+  );
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

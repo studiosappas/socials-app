@@ -105,7 +105,21 @@ export function BrandPanel({
           )}
           <div className="flex items-center justify-between">
             <span>{industry || "Industry"}</span>
-            <span>{PLATFORM_LABEL[platform]}</span>
+            {(() => {
+              const profileUrl = socialProfileUrl(platform, igUsername, { instagramUrl, tiktokUrl });
+              return profileUrl ? (
+                <a
+                  href={profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-semibold transition-colors duration-150 hover:text-foreground"
+                >
+                  {PLATFORM_LABEL[platform]}
+                </a>
+              ) : (
+                <span>{PLATFORM_LABEL[platform]}</span>
+              );
+            })()}
           </div>
         </div>
 

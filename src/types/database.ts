@@ -11,8 +11,25 @@ export type StoryStatus = "draft" | "scheduled" | "published";
 export type DesignTaskStatus = "open" | "in_progress" | "done";
 export type MediaType = "image" | "video";
 export type TaskSourceType = "manual" | "post" | "story";
+export type TaskStatus = "todo" | "in_progress" | "done";
 export type BriefTaskType = "story" | "newsletter";
 export type BriefItemSection = "references" | "images" | "products";
+export type AssetProvider = "google_drive" | "dropbox" | "box" | "onedrive" | "collect" | "other";
+export type AssetType =
+  | "product_photography"
+  | "campaign"
+  | "lifestyle"
+  | "packaging"
+  | "ugc"
+  | "moodboard"
+  | "videos"
+  | "references"
+  | "other";
+// Always "not_configured" today -- no provider (Drive/Dropbox/etc) API
+// integration exists yet to actually index a folder's contents. Kept as a
+// real enum so a future integration can flip a row through these states
+// without a schema change.
+export type AssetCollectionAiStatus = "not_configured" | "indexing" | "analyzed" | "error";
 export type BriefItemKind = "link" | "image";
 export type BriefFrameSection = "frames" | "text";
 export type AiInsights = {
@@ -604,10 +621,15 @@ export interface Database {
           title: string;
           notes: string;
           due_date: string | null;
+          // Deprecated -- see `status`. Still a real column (never dropped)
+          // but no code writes it anymore.
           completed: boolean;
+          status: TaskStatus;
+          assignee_id: string | null;
           source_type: TaskSourceType;
           source_id: string | null;
           created_at: string;
+          updated_at: string;
         };
         Insert: {
           user_id: string;
@@ -615,7 +637,8 @@ export interface Database {
           title: string;
           notes?: string;
           due_date?: string | null;
-          completed?: boolean;
+          status?: TaskStatus;
+          assignee_id?: string | null;
           source_type?: TaskSourceType;
           source_id?: string | null;
         };
@@ -623,9 +646,64 @@ export interface Database {
           title?: string;
           notes?: string;
           due_date?: string | null;
-          completed?: boolean;
+          status?: TaskStatus;
+          assignee_id?: string | null;
+          updated_at?: string;
         };
-        Relationships: [];
+        Relationships: [
+          {
+            foreignKeyName: "tasks_project_id_fkey";
+            columns: ["project_id"];
+            isOneToOne: false;
+            referencedRelation: "projects";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "tasks_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "tasks_assignee_id_fkey";
+            columns: ["assignee_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      task_comments: {
+        Row: {
+          id: string;
+          task_id: string;
+          author_id: string;
+          text: string;
+          created_at: string;
+        };
+        Insert: {
+          task_id: string;
+          author_id: string;
+          text: string;
+        };
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "task_comments_task_id_fkey";
+            columns: ["task_id"];
+            isOneToOne: false;
+            referencedRelation: "tasks";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "task_comments_author_id_fkey";
+            columns: ["author_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       activity_log: {
         Row: { id: string; project_id: string; actor_name: string; action: string; created_at: string };
@@ -659,6 +737,76 @@ export interface Database {
         Update: { read?: boolean };
         Relationships: [];
       };
+      asset_collections: {
+        Row: {
+          id: string;
+          project_id: string;
+          folder_url: string;
+          provider: AssetProvider;
+          name: string;
+          asset_type: AssetType;
+          notes: string;
+          cover_storage_path: string | null;
+          ai_status: AssetCollectionAiStatus;
+          last_synced_at: string | null;
+          created_by: string;
+          created_at: string;
+        };
+        Insert: {
+          project_id: string;
+          folder_url: string;
+          provider?: AssetProvider;
+          name: string;
+          asset_type?: AssetType;
+          notes?: string;
+          cover_storage_path?: string | null;
+          created_by: string;
+        };
+        Update: {
+          folder_url?: string;
+          provider?: AssetProvider;
+          name?: string;
+          asset_type?: AssetType;
+          notes?: string;
+          cover_storage_path?: string | null;
+        };
+        Relationships: [];
+      };
+      share_links: {
+        Row: {
+          id: string;
+          project_id: string;
+          token: string;
+          title: string;
+          created_by: string;
+          created_at: string;
+        };
+        Insert: {
+          project_id: string;
+          token: string;
+          title?: string;
+          created_by: string;
+        };
+        Update: { title?: string };
+        Relationships: [];
+      };
+      share_link_items: {
+        Row: {
+          id: string;
+          share_link_id: string;
+          post_id: string | null;
+          story_id: string | null;
+          position: number;
+        };
+        Insert: {
+          share_link_id: string;
+          post_id?: string | null;
+          story_id?: string | null;
+          position?: number;
+        };
+        Update: { position?: number };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -670,6 +818,30 @@ export interface Database {
         Args: { updates: { slotId: string; postId: string | null }[] };
         Returns: void;
       };
+      get_shared_preview: {
+        Args: { p_token: string };
+        Returns: SharedPreviewPayload | null;
+      };
     };
   };
 }
+
+export type SharedPreviewMediaItem = {
+  mediaAssetId: string;
+  storagePath: string;
+  previewStoragePath: string | null;
+  posterStoragePath: string | null;
+  mediaType: MediaType;
+};
+
+export type SharedPreviewItem = {
+  id: string;
+  type: "post" | "story";
+  media: SharedPreviewMediaItem[];
+};
+
+export type SharedPreviewPayload = {
+  title: string;
+  projectName: string;
+  items: SharedPreviewItem[];
+};

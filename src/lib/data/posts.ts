@@ -102,11 +102,28 @@ export async function getPostPageData(
     });
   }
 
+  // Isolated the same way as preview_storage_path above (a still-pending
+  // migration should only mean video covers aren't shown yet, not that the
+  // whole post editor breaks). Without this, the post editor's own asset
+  // strip had nothing pointing at a video's manually-picked/annotated cover
+  // at all -- it always showed the raw <video> element instead (see
+  // AssetPreview in post-editor.tsx), so picking a cover frame changed Grid
+  // but looked like nothing happened here, even though the save succeeded.
+  const { data: posterRows } = allMediaIds.size
+    ? await supabase.from("media_assets").select("id, poster_storage_path").in("id", Array.from(allMediaIds))
+    : { data: [] };
+  const posterPathByMediaId = new Map<string, string | null>();
+  for (const r of posterRows ?? []) {
+    posterPathByMediaId.set(r.id, (r as { id: string; poster_storage_path: string | null }).poster_storage_path ?? null);
+  }
+
   const allPaths = new Set<string>();
   for (const asset of mediaAssets ?? []) {
     allPaths.add(asset.storage_path);
     const preview = previewByMediaId.get(asset.id)?.previewPath;
     if (preview) allPaths.add(preview);
+    const poster = posterPathByMediaId.get(asset.id);
+    if (poster) allPaths.add(poster);
   }
   for (const pa of postAssets ?? []) {
     const media = pa.media_assets as { id: string; storage_path: string } | null;
@@ -114,6 +131,8 @@ export async function getPostPageData(
       allPaths.add(media.storage_path);
       const preview = previewByMediaId.get(media.id)?.previewPath;
       if (preview) allPaths.add(preview);
+      const poster = posterPathByMediaId.get(media.id);
+      if (poster) allPaths.add(poster);
     }
   }
 
@@ -141,6 +160,7 @@ export async function getPostPageData(
       originalUrl,
       annotationJson: preview?.annotationJson ?? null,
       mediaType: (media?.media_type as "image" | "video") ?? "image",
+      posterUrl: media ? (posterPathByMediaId.get(media.id) ? urlByPath.get(posterPathByMediaId.get(media.id)!) ?? null : null) : null,
     };
   });
 

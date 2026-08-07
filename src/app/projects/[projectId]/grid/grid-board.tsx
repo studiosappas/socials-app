@@ -33,6 +33,8 @@ import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { deleteMedia, uploadMedia } from "@/lib/actions/grid";
 import { generatePosterFromVideoUrl, uploadFilesWithPosters } from "@/lib/video-poster";
+import { ShareMenuButton } from "../share-menu";
+import type { ShareLinkItem, PickerPost } from "@/lib/data/share-links";
 import type { MediaType, Platform } from "@/types/database";
 
 const DOUBLE_CLICK_WINDOW_MS = 220;
@@ -54,6 +56,14 @@ export function UndoIcon({ redo = false }: { redo?: boolean }) {
         strokeLinejoin="round"
       />
       <path d="M6 2.5L3 5L6 7.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <path d="M7.5 2.5V12.5M2.5 7.5H12.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
@@ -103,6 +113,9 @@ export function GridBoard({
   rows,
   mediaLibrary,
   canManage,
+  shareLinks,
+  sharePosts,
+  shareTableMissing,
 }: {
   projectId: string;
   projectName: string;
@@ -124,6 +137,9 @@ export function GridBoard({
   rows: GridBoardRow[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  shareLinks: ShareLinkItem[];
+  sharePosts: PickerPost[];
+  shareTableMissing: boolean;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -439,25 +455,56 @@ export function GridBoard({
 
         <div className="flex flex-1 flex-col" style={{ gap: "2px" }}>
           {canManage && (
-            <div className="mb-2 flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => undo()}
-                disabled={!canUndo || undoRedoBusy}
-                title="Undo (⌘Z)"
-                className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
-              >
-                <UndoIcon />
-              </button>
-              <button
-                type="button"
-                onClick={() => redo()}
-                disabled={!canRedo || undoRedoBusy}
-                title="Redo (⌘⇧Z)"
-                className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
-              >
-                <UndoIcon redo />
-              </button>
+            <div className="mb-2 flex items-center justify-between gap-1">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => undo()}
+                  disabled={!canUndo || undoRedoBusy}
+                  title="Undo (⌘Z)"
+                  className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+                >
+                  <UndoIcon />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => redo()}
+                  disabled={!canRedo || undoRedoBusy}
+                  title="Redo (⌘⇧Z)"
+                  className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+                >
+                  <UndoIcon redo />
+                </button>
+              </div>
+              <div className="flex items-center gap-1">
+                {effectiveRows.length > 0 && (
+                  <ShareMenuButton
+                    projectId={projectId}
+                    links={shareLinks}
+                    items={sharePosts}
+                    contentType="post"
+                    canManage={canManage}
+                    tableMissing={shareTableMissing}
+                    exportLinks={[
+                      { href: `/projects/${projectId}/grid/export`, label: "Export Full Feed" },
+                      {
+                        href: `/projects/${projectId}/grid/export-pdf`,
+                        label: "Export Client PDF",
+                        title: "Export a clean PDF of every post + its details, for client review",
+                      },
+                    ]}
+                  />
+                )}
+                <form action={addGridRow.bind(null, projectId)}>
+                  <button
+                    type="submit"
+                    title="Add New Post"
+                    className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+                  >
+                    <PlusIcon />
+                  </button>
+                </form>
+              </div>
             </div>
           )}
           <SortableContext items={flatSlotIds} strategy={rectSortingStrategy}>
@@ -475,37 +522,6 @@ export function GridBoard({
           {effectiveRows.length === 0 && (
             <p className="text-sm text-muted">No rows yet — add one to start building the feed.</p>
           )}
-          <div className="mt-2 flex items-center gap-2">
-            {effectiveRows.length > 0 && (
-              <a
-                href={`/projects/${projectId}/grid/export`}
-                download
-                className="flex-1 rounded-none bg-foreground px-4 py-3 text-center text-xs tracking-wide uppercase text-background transition-colors duration-150 hover:bg-black/85"
-              >
-                Export Full Feed
-              </a>
-            )}
-            {effectiveRows.length > 0 && (
-              <a
-                href={`/projects/${projectId}/grid/export-pdf`}
-                download
-                title="Export a clean PDF of every post + its details, for client review"
-                className="flex-1 rounded-none border border-foreground px-4 py-3 text-center text-xs tracking-wide uppercase text-foreground transition-colors duration-150 hover:bg-black/[.04]"
-              >
-                Export Client PDF
-              </a>
-            )}
-            {canManage && (
-              <form action={addGridRow.bind(null, projectId)} className="flex-1">
-                <button
-                  type="submit"
-                  className="w-full rounded-none bg-foreground px-4 py-3 text-xs tracking-wide uppercase text-background transition-colors duration-150 hover:bg-black/85"
-                >
-                  Add New Post
-                </button>
-              </form>
-            )}
-          </div>
         </div>
 
         {canManage && (
@@ -625,7 +641,6 @@ function GridSlot({
   const [contentMenuOpen, setContentMenuOpen] = useState(false);
   const contentMenuRef = useOutsideClick<HTMLDivElement>(contentMenuOpen, () => setContentMenuOpen(false));
   const [, startDeleteTransition] = useTransition();
-  const [regeneratingPoster, setRegeneratingPoster] = useState(false);
   const [prevSlot, setPrevSlot] = useState(slot);
   const [overrideTransform, setOverrideTransform] = useState<GridCoverTransform | null | undefined>(
     undefined,
@@ -731,29 +746,6 @@ function GridSlot({
       await removeGridRow(projectId, rowId);
       router.refresh();
     });
-  }
-
-  async function handleRegeneratePoster() {
-    setContentMenuOpen(false);
-    if (!slot.coverMediaAssetId || !slot.coverOriginalUrl) return;
-    setRegeneratingPoster(true);
-    try {
-      const posterBlob = await generatePosterFromVideoUrl(slot.coverOriginalUrl);
-      if (!posterBlob) {
-        alert("Couldn't capture a frame from this video. Try again, or re-upload it.");
-        return;
-      }
-      const formData = new FormData();
-      formData.set("poster", new File([posterBlob], "poster.jpg", { type: "image/jpeg" }));
-      const result = await saveRegeneratedPoster(projectId, slot.coverMediaAssetId, formData);
-      if (result.message) {
-        alert(result.message);
-      } else {
-        router.refresh();
-      }
-    } finally {
-      setRegeneratingPoster(false);
-    }
   }
 
   return (
@@ -864,16 +856,6 @@ function GridSlot({
                   className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Crop Image
-                </button>
-              )}
-              {slot.coverMediaType === "video" && slot.coverOriginalUrl && (
-                <button
-                  type="button"
-                  onClick={handleRegeneratePoster}
-                  disabled={regeneratingPoster}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
-                >
-                  {regeneratingPoster ? "Capturing…" : "Regenerate Poster"}
                 </button>
               )}
               {slot.postId && (

@@ -19,7 +19,7 @@ import {
   uploadBrandDocument,
 } from "@/lib/actions/overview";
 import { updateProjectProfile } from "@/lib/actions/projects";
-import { toggleTaskCompleted } from "@/lib/actions/todo";
+import { updateTaskStatus } from "@/lib/actions/todo";
 import { externalUrl, socialProfileUrl } from "@/lib/social-links";
 import type { AiInsights, Platform } from "@/types/database";
 
@@ -134,7 +134,21 @@ export function ProfilePanel({
         )}
         <div className="flex items-center justify-between">
           <span>{industry || "Industry"}</span>
-          <span className="font-semibold text-foreground">{PLATFORM_LABEL[platform]}</span>
+          {(() => {
+            const profileUrl = socialProfileUrl(platform, igUsername, { instagramUrl, tiktokUrl });
+            return profileUrl ? (
+              <a
+                href={profileUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold text-foreground transition-colors duration-150 hover:text-muted"
+              >
+                {PLATFORM_LABEL[platform]}
+              </a>
+            ) : (
+              <span className="font-semibold text-foreground">{PLATFORM_LABEL[platform]}</span>
+            );
+          })()}
         </div>
       </div>
 
@@ -521,7 +535,7 @@ export function WorkplaceInsightsPanel({
     // off should feel instant, not wait on a server round trip.
     setCompletedIds((prev) => new Set(prev).add(taskId));
     startTransition(async () => {
-      await toggleTaskCompleted(taskId, true);
+      await updateTaskStatus(taskId, "done");
       router.refresh();
     });
   }

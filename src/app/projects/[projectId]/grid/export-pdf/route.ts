@@ -6,21 +6,19 @@ import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 const PAGE_W = 612; // US Letter, points
 const PAGE_H = 792;
 const MARGIN = 40;
-const COVER_W = 110;
-const COVER_H = 137.5; // 4:5, matching the Grid's own slot ratio
-const ROW_GAP = 18;
-const ROW_H = COVER_H + ROW_GAP;
+const CONTENT_W = PAGE_W - MARGIN * 2;
+const THUMB_GAP = 4;
+// A single-image post's thumbnail at this size; a carousel's images shrink
+// uniformly (keeping the 4:5 ratio) only as far as needed to still all fit
+// across one row, however many there are.
+const IDEAL_THUMB_W = 90;
+const TEXT_BLOCK_H = 46; // caption (up to 2 lines) + type tag
+const ROW_GAP = 16;
 
 const INK = rgb(0.09, 0.08, 0.07); // ~#171412, matches --foreground
 const MUTED = rgb(0.42, 0.42, 0.41); // ~#6b6a68, matches --muted
 const BORDER = rgb(0.91, 0.89, 0.87); // ~#e7e4de, matches --border
 
-const PLATFORM_LABEL: Record<string, string> = {
-  instagram: "Instagram",
-  tiktok: "TikTok",
-  pinterest: "Pinterest",
-  youtube: "YouTube",
-};
 const TYPE_LABEL: Record<string, string> = {
   post: "Single Image",
   carousel: "Carousel",
@@ -42,22 +40,6 @@ function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): 
   }
   if (current) lines.push(current);
   return lines;
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "Not scheduled";
-  const [y, m, d] = dateStr.split("-").map(Number);
-  if (!y || !m || !d) return dateStr;
-  return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-function formatTime(timeStr: string | null): string {
-  if (!timeStr) return "No time set";
-  const [h, m] = timeStr.split(":").map(Number);
-  if (h === undefined || m === undefined) return timeStr;
-  const period = h >= 12 ? "PM" : "AM";
-  const hour12 = h % 12 === 0 ? 12 : h % 12;
-  return `${hour12}:${String(m).padStart(2, "0")} ${period}`;
 }
 
 export async function GET(
@@ -84,17 +66,23 @@ export async function GET(
     return new Response("Forbidden", { status: 403 });
   }
 
-  const { data: project } = await supabase
-    .from("projects")
-    .select("name, platform")
-    .eq("id", projectId)
-    .single();
+  const { data: project } = await supabase.from("projects").select("name").eq("id", projectId).single();
 
   const rows = await getGridRowsWithCoverPaths(supabase, projectId);
-  const orderedPostIds = rows.flatMap((row) => row.slots).map((slot) => slot.postId);
-  const coverPathByPostId = new Map(
-    rows.flatMap((row) => row.slots).map((slot) => [slot.postId, slot.coverStoragePath] as const),
-  );
+  // getGridRowsWithCoverPaths returns rows top-to-bottom and each row's
+  // slots left-to-right -- the same order the on-screen Grid renders in,
+  // which is also real Instagram's reading order (newest post top-left,
+  // getting older as you go right then down). New rows are always added
+  // above existing ones (see addGridRow), so the OLDEST planned post ends
+  // up bottom-right, exactly like a real profile's actual posting history.
+  // Reversing this flattened order walks the grid from that oldest,
+  // bottom-right post forward to the newest, top-left one -- i.e. real
+  // chronological posting order, which is what "bottom right is first" asks for.
+  const orderedPostIds = rows
+    .flatMap((row) => row.slots)
+    .map((slot) => slot.postId)
+    .filter((id): id is string => Boolean(id))
+    .reverse();
 
   if (orderedPostIds.length === 0) {
     return new Response("Nothing to export yet.", { status: 400 });
@@ -102,21 +90,58 @@ export async function GET(
 
   const { data: postRows } = await supabase
     .from("posts")
-    .select("id, post_type, caption, scheduled_date, status")
-    .in("id", orderedPostIds.filter((id): id is string => Boolean(id)));
-
-  // Isolated from the select above -- scheduled_time is a new column that
-  // may not exist yet on a not-yet-migrated database, same reasoning as
-  // every other pending-column isolation in this codebase (see grid-data.ts).
-  const { data: timeRows } = await supabase
-    .from("posts")
-    .select("id, scheduled_time")
-    .in("id", orderedPostIds.filter((id): id is string => Boolean(id)));
-  const timeByPostId = new Map((timeRows ?? []).map((r) => [r.id, r.scheduled_time as string | null]));
-
+    .select("id, post_type, caption")
+    .in("id", orderedPostIds);
   const postById = new Map((postRows ?? []).map((p) => [p.id, p]));
 
-  const platformLabel = PLATFORM_LABEL[project?.platform ?? "instagram"] ?? "Instagram";
+  // All of every post's assets, in carousel order -- a single-image/reel
+  // post only ever uses the first one, but a carousel needs every one of
+  // them, so this fetches the full set up front rather than the single
+  // cover-only resolution grid-data.ts's getGridRowsWithCoverPaths does.
+  const { data: postAssets } = await supabase
+    .from("post_assets")
+    .select("post_id, position, media_assets(id, storage_path, media_type)")
+    .in("post_id", orderedPostIds)
+    .order("position");
+
+  const mediaAssetIds = (postAssets ?? [])
+    .map((pa) => (pa.media_assets as { id: string } | null)?.id)
+    .filter((id): id is string => Boolean(id));
+
+  // Isolated from the selects above -- preview_storage_path/poster_storage_path
+  // are newer media_assets columns that may not exist yet on a not-yet-migrated
+  // database, same reasoning as every other pending-column isolation in this
+  // codebase (see grid-data.ts). A missing one here just means that one
+  // image/video falls back to its raw upload instead of breaking the export.
+  const { data: previewRows } = mediaAssetIds.length
+    ? await supabase.from("media_assets").select("id, preview_storage_path").in("id", mediaAssetIds)
+    : { data: [] };
+  const previewByMediaId = new Map(
+    (previewRows ?? []).map((r) => [r.id, (r as { preview_storage_path: string | null }).preview_storage_path]),
+  );
+  const { data: posterRows } = mediaAssetIds.length
+    ? await supabase.from("media_assets").select("id, poster_storage_path").in("id", mediaAssetIds)
+    : { data: [] };
+  const posterByMediaId = new Map(
+    (posterRows ?? []).map((r) => [r.id, (r as { poster_storage_path: string | null }).poster_storage_path]),
+  );
+
+  const imagePathsByPostId = new Map<string, string[]>();
+  for (const pa of postAssets ?? []) {
+    const media = pa.media_assets as { id: string; storage_path: string; media_type: string } | null;
+    if (!media) continue;
+    // Grid never shows a raw video file -- a video asset resolves to its
+    // captured poster frame (or is skipped if it has none yet), exactly
+    // like the on-screen grid and the full-feed export already do.
+    const path =
+      media.media_type === "video"
+        ? (posterByMediaId.get(media.id) ?? null)
+        : (previewByMediaId.get(media.id) || media.storage_path);
+    if (!path) continue;
+    const list = imagePathsByPostId.get(pa.post_id) ?? [];
+    list.push(path);
+    imagePathsByPostId.set(pa.post_id, list);
+  }
 
   const pdfDoc = await PDFDocument.create();
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -138,87 +163,97 @@ export async function GET(
     return page;
   }
 
+  const imageCache = new Map<string, Uint8Array | null>();
+  async function embedThumb(path: string | undefined) {
+    if (!path) return null;
+    if (!imageCache.has(path)) {
+      try {
+        const { data, error } = await supabase.storage.from("project-media").download(path);
+        if (error || !data) {
+          imageCache.set(path, null);
+        } else {
+          const buf = Buffer.from(await data.arrayBuffer());
+          const jpegBuf = await sharp(buf).resize(360, 450, { fit: "cover" }).jpeg({ quality: 90 }).toBuffer();
+          imageCache.set(path, jpegBuf);
+        }
+      } catch {
+        imageCache.set(path, null);
+      }
+    }
+    const bytes = imageCache.get(path);
+    return bytes ? pdfDoc.embedJpg(bytes) : null;
+  }
+
   let page = newPage();
   let cursorY = PAGE_H - 90;
   const contentTop = PAGE_H - 90;
 
   for (const postId of orderedPostIds) {
-    if (!postId) continue;
     const post = postById.get(postId);
     if (!post) continue;
 
-    if (cursorY - ROW_H < MARGIN) {
+    const allPaths = imagePathsByPostId.get(postId) ?? [];
+    // Only a carousel shows every image, laid out across one row -- a
+    // single-image post or reel just shows its one cover, same as before.
+    const paths = post.post_type === "carousel" ? allPaths : allPaths.slice(0, 1);
+    const count = Math.max(paths.length, 1);
+
+    let thumbW = IDEAL_THUMB_W;
+    if (count * IDEAL_THUMB_W + (count - 1) * THUMB_GAP > CONTENT_W) {
+      thumbW = (CONTENT_W - (count - 1) * THUMB_GAP) / count;
+    }
+    const thumbH = thumbW * 1.25;
+    const rowH = thumbH + ROW_GAP + TEXT_BLOCK_H;
+
+    if (cursorY - rowH < MARGIN) {
       page = newPage();
       cursorY = contentTop;
     }
 
     const rowTop = cursorY;
-    const imageY = rowTop - COVER_H;
+    const imageY = rowTop - thumbH;
 
-    // Cover image, normalized to JPEG via sharp so pdf-lib can embed it
-    // regardless of the source format (uploads can be png/webp/etc, and a
-    // video's poster is always a jpg already).
-    const coverPath = coverPathByPostId.get(postId);
-    if (coverPath) {
-      try {
-        const { data, error } = await supabase.storage.from("project-media").download(coverPath);
-        if (!error && data) {
-          const buf = Buffer.from(await data.arrayBuffer());
-          const jpegBuf = await sharp(buf).resize(440, 550, { fit: "cover" }).jpeg({ quality: 90 }).toBuffer();
-          const image = await pdfDoc.embedJpg(jpegBuf);
-          page.drawImage(image, { x: MARGIN, y: imageY, width: COVER_W, height: COVER_H });
-        } else {
-          page.drawRectangle({ x: MARGIN, y: imageY, width: COVER_W, height: COVER_H, color: BORDER });
-        }
-      } catch {
-        page.drawRectangle({ x: MARGIN, y: imageY, width: COVER_W, height: COVER_H, color: BORDER });
-      }
+    if (paths.length === 0) {
+      page.drawRectangle({ x: MARGIN, y: imageY, width: thumbW, height: thumbH, color: BORDER });
     } else {
-      page.drawRectangle({ x: MARGIN, y: imageY, width: COVER_W, height: COVER_H, color: BORDER });
+      for (let i = 0; i < paths.length; i++) {
+        const x = MARGIN + i * (thumbW + THUMB_GAP);
+        const image = await embedThumb(paths[i]);
+        if (image) {
+          page.drawImage(image, { x, y: imageY, width: thumbW, height: thumbH });
+        } else {
+          page.drawRectangle({ x, y: imageY, width: thumbW, height: thumbH, color: BORDER });
+        }
+        page.drawRectangle({ x, y: imageY, width: thumbW, height: thumbH, borderColor: BORDER, borderWidth: 1 });
+      }
     }
-    page.drawRectangle({
-      x: MARGIN,
-      y: imageY,
-      width: COVER_W,
-      height: COVER_H,
-      borderColor: BORDER,
-      borderWidth: 1,
-    });
 
-    // Info column, to the right of the cover.
-    const textX = MARGIN + COVER_W + 20;
-    const textWidth = PAGE_W - MARGIN - textX;
-    let textY = rowTop - 4;
-
+    // Minimal, per the ask: just the caption and the content type -- no
+    // schedule/platform/status clutter.
+    let textY = imageY - 16;
     const captionLines = post.caption?.trim()
-      ? wrapText(post.caption.trim(), font, 10, textWidth).slice(0, 3)
+      ? wrapText(post.caption.trim(), font, 10, CONTENT_W).slice(0, 2)
       : ["No caption"];
     for (const line of captionLines) {
-      page.drawText(line, { x: textX, y: textY, size: 10, font, color: INK });
+      page.drawText(line, { x: MARGIN, y: textY, size: 10, font, color: INK });
       textY -= 13;
     }
-
-    textY -= 6;
-    const meta: [string, string][] = [
-      ["Scheduled", `${formatDate(post.scheduled_date)} · ${formatTime(timeByPostId.get(postId) ?? null)}`],
-      ["Type", TYPE_LABEL[post.post_type] ?? "Single Image"],
-      ["Platform", platformLabel],
-      ["Status", post.status.charAt(0).toUpperCase() + post.status.slice(1)],
-    ];
-    for (const [label, value] of meta) {
-      page.drawText(label.toUpperCase(), { x: textX, y: textY, size: 7, font: fontBold, color: MUTED });
-      page.drawText(value, { x: textX + 62, y: textY, size: 8.5, font, color: INK });
-      textY -= 14;
-    }
+    page.drawText((TYPE_LABEL[post.post_type] ?? "Single Image").toUpperCase(), {
+      x: MARGIN,
+      y: textY - 4,
+      size: 7.5,
+      font: fontBold,
+      color: MUTED,
+    });
 
     page.drawLine({
-      start: { x: MARGIN, y: imageY - 12 },
-      end: { x: PAGE_W - MARGIN, y: imageY - 12 },
+      start: { x: MARGIN, y: rowTop - rowH + 8 },
+      end: { x: PAGE_W - MARGIN, y: rowTop - rowH + 8 },
       thickness: 0.5,
       color: BORDER,
     });
 
-    cursorY -= ROW_H;
+    cursorY -= rowH + 10;
   }
 
   const pdfBytes = await pdfDoc.save();

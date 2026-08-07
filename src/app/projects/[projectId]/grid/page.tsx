@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
+import { getShareLinksData } from "@/lib/data/share-links";
 import { GridBoard, type GridBoardRow, type MediaLibraryItem } from "./grid-board";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
@@ -104,6 +105,8 @@ export default async function GridPage({
     posterStoragePath: asset.poster_storage_path ?? null,
   }));
 
+  const shareData = await getShareLinksData(supabase, projectId);
+
   return (
     <GridBoard
       projectId={projectId}
@@ -126,6 +129,9 @@ export default async function GridPage({
       rows={gridRows}
       mediaLibrary={mediaLibrary}
       canManage={canManage}
+      shareLinks={shareData.links}
+      sharePosts={shareData.posts}
+      shareTableMissing={shareData.tableMissing}
     />
   );
 }

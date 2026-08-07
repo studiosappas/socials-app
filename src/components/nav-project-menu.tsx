@@ -10,6 +10,7 @@ const PROJECT_PAGES = [
   { href: "grid", label: "Grid" },
   { href: "stories", label: "Stories" },
   { href: "calendar", label: "Calendar" },
+  { href: "assets", label: "Assets" },
   { href: "brief", label: "Brief" },
   { href: "settings", label: "Settings" },
 ];

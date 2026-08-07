@@ -20,7 +20,28 @@ export function generatePosterFromVideoUrl(url: string): Promise<Blob | null> {
   return generatePosterFromVideoSrc(url, () => {});
 }
 
-function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void): Promise<Blob | null> {
+// Same capture pipeline again, but at a caller-chosen timestamp instead of
+// the fixed ~0.1s heuristic, and returning a data URL (directly usable as
+// an <img>/fabric.FabricImage.fromURL source) instead of a Blob -- what the
+// annotation editor's video-timeline frame picker uses to turn "whatever
+// moment the user scrubbed to" into a real captured frame.
+export function captureVideoFrameAsDataUrl(url: string, seekTime: number): Promise<string | null> {
+  return generatePosterFromVideoSrc(url, () => {}, seekTime).then(
+    (blob) =>
+      new Promise<string | null>((resolve) => {
+        if (!blob) {
+          resolve(null);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      }),
+  );
+}
+
+function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTime?: number): Promise<Blob | null> {
   return new Promise((resolve) => {
     const video = document.createElement("video");
     video.muted = true;
@@ -30,6 +51,7 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void): Promis
     video.src = src;
 
     let settled = false;
+    let captureStarted = false;
     function cleanup() {
       video.removeAttribute("src");
       video.load();
@@ -38,28 +60,17 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void): Promis
     function finish(blob: Blob | null) {
       if (settled) return;
       settled = true;
+      clearTimeout(hardTimeout);
       cleanup();
       resolve(blob);
     }
-
-    // A handful of real-world video files (some phone-recorded .mov/.webm)
-    // never fire "seeked" reliably -- fail closed after a few seconds rather
-    // than hang the upload indefinitely.
-    const timeout = setTimeout(() => finish(null), 8000);
-
-    video.addEventListener("error", () => {
-      clearTimeout(timeout);
-      finish(null);
-    });
-
-    video.addEventListener("loadedmetadata", () => {
-      // A hair past 0 -- frame 0 of many encodes is a solid black/blank
-      // frame before the real first keyframe.
-      video.currentTime = Math.min(0.1, (video.duration || 1) / 2);
-    });
-
-    video.addEventListener("seeked", () => {
-      clearTimeout(timeout);
+    // Guarded separately from `settled` -- "seeked" and the grace timer
+    // below can both fire in quick succession (e.g. a fast seek right
+    // before the timer elapses), and without this a single successful
+    // capture could still be attempted twice.
+    function capture() {
+      if (captureStarted || settled) return;
+      captureStarted = true;
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth || 640;
       canvas.height = video.videoHeight || 640;
@@ -76,7 +87,35 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void): Promis
         // on drawImage/toBlob rather than erroring earlier -- fail closed.
         finish(null);
       }
+    }
+
+    // Absolute fail-closed ceiling for files whose metadata never loads at
+    // all (the "error" listener below never fires for these either) --
+    // hangs the upload/regenerate no longer than this rather than forever.
+    const hardTimeout = setTimeout(() => finish(null), 8000);
+
+    video.addEventListener("error", () => finish(null));
+
+    video.addEventListener("loadedmetadata", () => {
+      // A hair past 0 -- frame 0 of many encodes is a solid black/blank
+      // frame before the real first keyframe. Best-effort only: a handful
+      // of real-world files (some phone-recorded .mov/.webm) never fire
+      // "seeked" at all no matter how long you wait, which used to mean the
+      // whole capture silently failed 8s later even though the video had
+      // loaded fine. The grace timer below is the actual fix -- if the seek
+      // hasn't resolved shortly after metadata loads, it captures whatever
+      // frame is already on screen instead of holding out for a cosmetic
+      // frame-0 fix that may never come.
+      try {
+        video.currentTime = seekTime ?? Math.min(0.1, (video.duration || 1) / 2);
+      } catch {
+        // Some browsers throw synchronously if seeking isn't ready yet --
+        // the grace timer below still captures a frame regardless.
+      }
+      setTimeout(capture, 1200);
     });
+
+    video.addEventListener("seeked", capture);
   });
 }
 

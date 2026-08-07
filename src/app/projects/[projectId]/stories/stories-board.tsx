@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react";
 import { createStory } from "@/lib/actions/stories";
 import { StoryCard } from "./story-card";
+import { ShareMenuButton } from "../share-menu";
+import type { ShareLinkItem, PickerStory } from "@/lib/data/share-links";
 
 export type StoryListItem = {
   id: string;
@@ -18,10 +20,16 @@ export function StoriesBoard({
   projectId,
   stories,
   canManage,
+  shareLinks,
+  shareStories,
+  shareTableMissing,
 }: {
   projectId: string;
   stories: StoryListItem[];
   canManage: boolean;
+  shareLinks: ShareLinkItem[];
+  shareStories: PickerStory[];
+  shareTableMissing: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
@@ -62,9 +70,35 @@ export function StoriesBoard({
           />
           <SearchIcon className="h-4 w-4 shrink-0 text-muted" />
         </label>
+        {/* Same top-right icon pairing as Grid's own "Add New Post" row
+            (grid-board.tsx) -- share + "+" as compact icon buttons, not a
+            full-width text button, so the two content boards read the same. */}
+        <div className="flex shrink-0 items-center gap-1">
+          {stories.length > 0 && (
+            <ShareMenuButton
+              projectId={projectId}
+              links={shareLinks}
+              items={shareStories}
+              contentType="story"
+              canManage={canManage}
+              tableMissing={shareTableMissing}
+            />
+          )}
+          {canManage && (
+            <form action={createStory.bind(null, projectId)}>
+              <button
+                type="submit"
+                title="Add New Story"
+                className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+              >
+                <PlusIcon />
+              </button>
+            </form>
+          )}
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
         {visible.map((story) => (
           <StoryCard
             key={story.id}
@@ -80,7 +114,7 @@ export function StoriesBoard({
             type="button"
             onClick={() => setShowAll(true)}
             title="View all stories"
-            className="flex aspect-[9/16] w-full shrink-0 items-center justify-center border border-dashed border-border text-muted transition-colors duration-150 hover:border-foreground/30 hover:text-foreground"
+            className="flex aspect-[9/16] w-full shrink-0 items-center justify-center rounded-2xl border border-dashed border-border text-muted transition-colors duration-150 hover:border-foreground/30 hover:text-foreground"
           >
             <FolderIcon className="h-6 w-6" />
           </button>
@@ -102,17 +136,6 @@ export function StoriesBoard({
           View More +
         </button>
       )}
-
-      {canManage && (
-        <form action={createStory.bind(null, projectId)}>
-          <button
-            type="submit"
-            className="rounded-none bg-foreground px-4 py-3 text-xs tracking-wide uppercase text-background transition-colors duration-150 hover:bg-black/85"
-          >
-            Add New Story
-          </button>
-        </form>
-      )}
     </div>
   );
 }
@@ -130,6 +153,16 @@ function FolderIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+    </svg>
+  );
+}
+
+// Matches Grid's own PlusIcon exactly (grid-board.tsx) -- same "Add New
+// Post"/"Add New Story" icon-button pairing next to the share icon.
+function PlusIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <path d="M7.5 2.5V12.5M2.5 7.5H12.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }

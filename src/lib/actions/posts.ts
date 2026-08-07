@@ -4,6 +4,8 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { notifyProjectMembers } from "@/lib/notifications";
+import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
+import { deriveAutoTaskTitle } from "@/lib/task-title";
 import type { MediaType, PostStatus, PostType } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
@@ -29,15 +31,17 @@ export async function updatePost(
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
   const scheduledTime = String(formData.get("scheduled_time") ?? "").trim();
   const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
+  const postType = String(formData.get("post_type") ?? "post") as PostType;
+  const caption = String(formData.get("caption") ?? "");
 
   const { data: before } = await supabase.from("posts").select("status").eq("id", postId).single();
 
   const { error } = await supabase
     .from("posts")
     .update({
-      post_type: String(formData.get("post_type") ?? "post") as PostType,
+      post_type: postType,
       status: nextStatus,
-      caption: String(formData.get("caption") ?? ""),
+      caption,
       notes: String(formData.get("notes") ?? ""),
       scheduled_date: scheduledDate ? scheduledDate : null,
     })
@@ -45,6 +49,22 @@ export async function updatePost(
 
   if (error) {
     return { message: error.message };
+  }
+
+  if (scheduledDate) {
+    await ensureAutoTaskForPost(supabase, projectId, postId, {
+      title: deriveAutoTaskTitle(caption, postType, scheduledDate),
+      dueDate: scheduledDate,
+    });
+  }
+
+  // Auto-complete is a one-way push toward "done" on an in-app-observable
+  // signal (the team marking the post Published themselves) -- not real
+  // Instagram publish state, which this app has no way to observe. Manual
+  // override afterward (reopening the task) always stays possible since
+  // this never runs again once the task is already done.
+  if (nextStatus === "published" && before?.status !== "published") {
+    await completeAutoTaskForPost(supabase, postId);
   }
 
   // Isolated from the update above -- scheduled_time is a new column that
@@ -70,6 +90,7 @@ export async function updatePost(
 
   revalidatePath(`/projects/${projectId}/posts/${postId}`);
   revalidatePath(`/projects/${projectId}/grid`);
+  revalidatePath("/projects/todo");
   return undefined;
 }
 

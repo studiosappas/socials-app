@@ -24,7 +24,7 @@ import {
   updatePost,
   uploadPostAsset,
 } from "@/lib/actions/posts";
-import { saveMediaAssetAnnotation } from "@/lib/actions/media";
+import { saveMediaAssetAnnotation, saveMediaAssetPosterAnnotation } from "@/lib/actions/media";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { downloadAsset, downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
@@ -43,10 +43,22 @@ export type PostAssetItem = {
   originalUrl: string | null;
   annotationJson: object | null;
   mediaType: "image" | "video";
+  // Only ever set for mediaType "video" -- the manually-picked/annotated
+  // cover frame (see saveMediaAssetPosterAnnotation), same source Grid's
+  // own cover resolves from. Without this, this page's own asset tile had
+  // no way to reflect a saved cover change at all -- it always showed the
+  // raw <video> element instead, which looks identical whether a cover was
+  // ever picked or not.
+  posterUrl: string | null;
 };
 export type PostLinkItem = { id: string; url: string; label: string };
 
-type EditingImage = { mediaAssetId: string; imageUrl: string; annotationJson: object | null };
+type EditingImage = {
+  mediaAssetId: string;
+  imageUrl: string;
+  annotationJson: object | null;
+  mediaType: "image" | "video";
+};
 
 type PostRecord = {
   id: string;
@@ -226,6 +238,7 @@ export function PostEditor({
                       mediaAssetId: asset.mediaAssetId,
                       imageUrl: asset.originalUrl,
                       annotationJson: asset.annotationJson,
+                      mediaType: asset.mediaType,
                     })
                   }
                 />
@@ -322,9 +335,10 @@ export function PostEditor({
         open={editingImage !== null}
         imageUrl={editingImage?.imageUrl ?? null}
         initialAnnotationJson={editingImage?.annotationJson ?? null}
+        mediaType={editingImage?.mediaType}
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
-        saveAction={saveMediaAssetAnnotation}
+        saveAction={editingImage?.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}
       />
     </div>
   );
@@ -337,9 +351,16 @@ function AssetPreview({ asset }: { asset: PostAssetItem }) {
         // eslint-disable-next-line @next/next/no-img-element
         <img src={asset.url} alt="" className="h-full w-full object-cover" draggable={false} />
       )}
-      {asset.url && asset.mediaType === "video" && (
-        <video src={asset.url} className="h-full w-full object-cover" muted />
-      )}
+      {asset.mediaType === "video" &&
+        (asset.posterUrl ? (
+          // A picked/annotated cover exists -- show that, same as Grid,
+          // instead of the raw video (which would look unchanged either way
+          // and never reflects what "Edit Cover" actually saved).
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={asset.posterUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+        ) : (
+          asset.url && <video src={asset.url} className="h-full w-full object-cover" muted />
+        ))}
     </>
   );
 }
@@ -419,7 +440,7 @@ function SortableAsset({
                 }}
                 className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
               >
-                Edit Image
+                {asset.mediaType === "video" ? "Edit Cover" : "Edit Image"}
               </button>
               <button
                 type="button"

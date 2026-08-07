@@ -36,7 +36,7 @@ export function StoryCard({
       <Link
         href={href}
         title={name}
-        className={`relative flex h-full w-full items-center justify-center overflow-hidden border transition-colors duration-150 ${
+        className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border transition-colors duration-150 ${
           thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
         }`}
       >

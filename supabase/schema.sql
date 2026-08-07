@@ -641,7 +641,8 @@ create policy "Admins can delete brand documents storage"
     and public.project_role((storage.foldername(name))[1]::uuid) in ('owner', 'admin')
   );
 
--- ---------- Personal to-do list (global, user-scoped, spans every project) ----------
+-- ---------- Task management (global page; personal tasks stay private,
+-- project-linked tasks are shared with that project's team) ----------
 create table public.tasks (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (id) on delete cascade,
@@ -649,17 +650,55 @@ create table public.tasks (
   title text not null,
   notes text not null default '',
   due_date date,
+  -- Deprecated in favor of `status` below; kept (unused by the app) rather
+  -- than dropped, since dropping a column in a schema file that's also
+  -- replayed as an idempotent migration is needlessly destructive.
   completed boolean not null default false,
+  status text not null default 'todo' check (status in ('todo', 'in_progress', 'done')),
+  assignee_id uuid references public.profiles (id) on delete set null,
   source_type text not null default 'manual' check (source_type in ('manual', 'post', 'story')),
   source_id uuid,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 alter table public.tasks enable row level security;
 
-create policy "Users manage their own tasks" on public.tasks for all to authenticated
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid());
+create policy "Members manage project tasks, users manage personal tasks"
+  on public.tasks for all to authenticated
+  using (
+    (project_id is not null and public.is_project_member(project_id))
+    or (project_id is null and user_id = auth.uid())
+  )
+  with check (
+    (project_id is not null and public.is_project_member(project_id))
+    or (project_id is null and user_id = auth.uid())
+  );
+
+create table public.task_comments (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.tasks (id) on delete cascade,
+  author_id uuid not null references public.profiles (id),
+  text text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.task_comments enable row level security;
+
+create policy "Task comment visibility follows task visibility"
+  on public.task_comments for all to authenticated
+  using (exists (
+    select 1 from public.tasks t where t.id = task_comments.task_id
+    and ((t.project_id is not null and public.is_project_member(t.project_id))
+         or (t.project_id is null and t.user_id = auth.uid()))
+  ))
+  with check (
+    author_id = auth.uid() and exists (
+      select 1 from public.tasks t where t.id = task_comments.task_id
+      and ((t.project_id is not null and public.is_project_member(t.project_id))
+           or (t.project_id is null and t.user_id = auth.uid()))
+    )
+  );
 
 -- ---------- Brief image attachments (original preserved separately from annotations) ----------
 create table public.brief_attachments (
@@ -821,3 +860,199 @@ create policy "Project members can create notifications for other members"
   on public.notifications for insert
   to authenticated
   with check (project_id is null or public.is_project_member(project_id));
+
+-- ---------- Brand Asset Collections ----------
+-- Each row is a *link* to an external folder (Google Drive, Dropbox, etc),
+-- never a copy of its contents -- this app has no OAuth/API integration
+-- with any of these providers yet, so there is no automated way to list a
+-- folder's files, fetch a cover image from them, or index them for search.
+-- The fields below reflect that honestly: cover_storage_path/ai_status are
+-- there so a real integration has a place to write to later without a
+-- schema change, but nothing populates them today.
+create table public.asset_collections (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  folder_url text not null,
+  provider text not null default 'other'
+    check (provider in ('google_drive', 'dropbox', 'box', 'onedrive', 'collect', 'other')),
+  name text not null,
+  asset_type text not null default 'other'
+    check (asset_type in (
+      'product_photography', 'campaign', 'lifestyle', 'packaging',
+      'ugc', 'moodboard', 'videos', 'references', 'other'
+    )),
+  notes text not null default '',
+  cover_storage_path text,
+  ai_status text not null default 'not_configured'
+    check (ai_status in ('not_configured', 'indexing', 'analyzed', 'error')),
+  last_synced_at timestamptz,
+  created_by uuid not null references public.profiles (id),
+  created_at timestamptz not null default now()
+);
+
+alter table public.asset_collections enable row level security;
+
+create policy "Members can view asset collections" on public.asset_collections for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage asset collections" on public.asset_collections for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+-- ---------- Shared Client Preview ----------
+-- A share_links row is an unguessable token pointing at an ordered set of
+-- posts/stories from one project, meant to be opened by someone with no
+-- account at all (a client) at /preview/{token}. Deleting the row (no
+-- separate "revoke" flag -- same hard-delete convention as everything else
+-- in this app) immediately cuts off both the RPC below and the storage
+-- policy that lets that token's media be read anonymously.
+create table public.share_links (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  token text not null unique,
+  title text not null default '',
+  created_by uuid not null references public.profiles (id),
+  created_at timestamptz not null default now()
+);
+
+create table public.share_link_items (
+  id uuid primary key default gen_random_uuid(),
+  share_link_id uuid not null references public.share_links (id) on delete cascade,
+  post_id uuid references public.posts (id) on delete cascade,
+  story_id uuid references public.stories (id) on delete cascade,
+  position integer not null default 0,
+  constraint share_link_items_one_target check (
+    (post_id is not null and story_id is null) or (post_id is null and story_id is not null)
+  )
+);
+
+alter table public.share_links enable row level security;
+alter table public.share_link_items enable row level security;
+
+create policy "Members can view share links" on public.share_links for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage share links" on public.share_links for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+create policy "Members can view share link items" on public.share_link_items for select to authenticated
+  using (exists (
+    select 1 from public.share_links sl
+    where sl.id = share_link_id and public.is_project_member(sl.project_id)
+  ));
+create policy "Admins manage share link items" on public.share_link_items for all to authenticated
+  using (exists (
+    select 1 from public.share_links sl
+    where sl.id = share_link_id and public.project_role(sl.project_id) in ('owner', 'admin')
+  ))
+  with check (exists (
+    select 1 from public.share_links sl
+    where sl.id = share_link_id and public.project_role(sl.project_id) in ('owner', 'admin')
+  ));
+
+-- Public, unauthenticated read path for a share link's content. SECURITY
+-- DEFINER so it can read posts/stories/media_assets (all otherwise
+-- member-only) on behalf of an anonymous caller -- but only ever the rows
+-- reachable from a token that actually exists, so nothing else is exposed.
+create or replace function public.get_shared_preview(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_link record;
+  v_items jsonb;
+begin
+  select id, project_id, title into v_link
+  from share_links
+  where token = p_token;
+
+  if v_link.id is null then
+    return null;
+  end if;
+
+  select coalesce(jsonb_agg(entry.data order by entry.position), '[]'::jsonb)
+  into v_items
+  from (
+    select
+      sli.position,
+      jsonb_build_object(
+        'id', sli.id,
+        'type', case when sli.post_id is not null then 'post' else 'story' end,
+        'media', case
+          when sli.post_id is not null then (
+            select coalesce(jsonb_agg(jsonb_build_object(
+              'mediaAssetId', ma.id,
+              'storagePath', ma.storage_path,
+              'previewStoragePath', ma.preview_storage_path,
+              'posterStoragePath', ma.poster_storage_path,
+              'mediaType', ma.media_type
+            ) order by pa.position), '[]'::jsonb)
+            from post_assets pa
+            join media_assets ma on ma.id = pa.media_asset_id
+            where pa.post_id = sli.post_id
+          )
+          else (
+            select coalesce(jsonb_agg(jsonb_build_object(
+              'mediaAssetId', ma.id,
+              'storagePath', ma.storage_path,
+              'previewStoragePath', ma.preview_storage_path,
+              'posterStoragePath', ma.poster_storage_path,
+              'mediaType', ma.media_type
+            ) order by sf.position), '[]'::jsonb)
+            from story_frames sf
+            join media_assets ma on ma.id = sf.media_asset_id
+            where sf.story_id = sli.story_id
+          )
+        end
+      ) as data
+    from share_link_items sli
+    where sli.share_link_id = v_link.id
+  ) entry;
+
+  return jsonb_build_object(
+    'title', v_link.title,
+    'projectName', (select name from projects where id = v_link.project_id),
+    'items', v_items
+  );
+end;
+$$;
+
+grant execute on function public.get_shared_preview(text) to anon, authenticated;
+
+-- A storage policy's USING clause still enforces RLS on any table its
+-- subquery touches -- share_link_items/post_assets/story_frames/media_assets
+-- are all "to authenticated" only, so a raw subquery here would silently see
+-- zero rows for an anon caller and never grant access. SECURITY DEFINER
+-- (same fix as get_shared_preview above) is what makes it actually work.
+create or replace function public.is_media_path_shared(p_path text)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from share_link_items sli
+    left join post_assets pa on pa.post_id = sli.post_id
+    left join story_frames sf on sf.story_id = sli.story_id
+    join media_assets ma on ma.id = coalesce(pa.media_asset_id, sf.media_asset_id)
+    where p_path in (ma.storage_path, ma.preview_storage_path, ma.poster_storage_path)
+  );
+$$;
+
+grant execute on function public.is_media_path_shared(text) to anon, authenticated;
+
+-- Lets an anonymous visitor's createSignedUrl calls succeed for exactly the
+-- media referenced by an existing share link -- project-media stays private
+-- to everyone else. Mirrors get_shared_preview's reachability: a path is
+-- readable here iff it belongs to a post/story attached to *some* share_link
+-- row, the same condition that makes get_shared_preview return it.
+create policy "Public can read media for active share links"
+  on storage.objects for select
+  to anon, authenticated
+  using (
+    bucket_id = 'project-media'
+    and public.is_media_path_shared(storage.objects.name)
+  );

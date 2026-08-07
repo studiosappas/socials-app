@@ -89,7 +89,7 @@ export default async function ProjectOverviewPage({
       .eq("project_id", projectId)
       .eq("user_id", user!.id)
       .eq("due_date", today)
-      .eq("completed", false),
+      .neq("status", "done"),
     supabase
       .from("posts")
       .select("*", { count: "exact", head: true })

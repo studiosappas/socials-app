@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { logActivity } from "@/lib/activity-log";
+import { ensureAutoTaskForPost } from "@/lib/actions/task-automation";
+import { deriveAutoTaskTitle } from "@/lib/task-title";
 
 export type CalendarItemType = "post" | "story";
 
@@ -24,9 +26,22 @@ export async function scheduleItem(
     throw new Error(error.message);
   }
 
+  // v1 auto-task scope is posts only, per the brief ("starting with
+  // scheduled posts from the Calendar") -- stories don't get one yet.
+  if (itemType === "post" && date) {
+    const { data: post } = await supabase.from("posts").select("caption, post_type").eq("id", itemId).single();
+    if (post) {
+      await ensureAutoTaskForPost(supabase, projectId, itemId, {
+        title: deriveAutoTaskTitle(post.caption, post.post_type, date),
+        dueDate: date,
+      });
+    }
+  }
+
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/stories`);
+  revalidatePath("/projects/todo");
 }
 
 export async function createPostForDate(projectId: string, date: string): Promise<string> {
@@ -47,8 +62,14 @@ export async function createPostForDate(projectId: string, date: string): Promis
 
   if (user) await logActivity(supabase, projectId, user.id, "created a post");
 
+  await ensureAutoTaskForPost(supabase, projectId, post.id, {
+    title: deriveAutoTaskTitle("", "post", date),
+    dueDate: date,
+  });
+
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/grid`);
+  revalidatePath("/projects/todo");
   return post.id;
 }
 

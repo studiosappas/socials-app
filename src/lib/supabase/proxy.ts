@@ -31,8 +31,12 @@ export async function updateSession(request: NextRequest) {
 
   const isAuthRoute = request.nextUrl.pathname.startsWith("/login") ||
     request.nextUrl.pathname.startsWith("/register");
+  // The one deliberately-public route in the app: a Shared Client Preview
+  // link is opened by someone with no account at all, so it must never
+  // bounce to /login the way every other route does.
+  const isPublicRoute = isAuthRoute || request.nextUrl.pathname.startsWith("/preview");
 
-  if (!user && !isAuthRoute) {
+  if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
