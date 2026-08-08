@@ -90,6 +90,10 @@ export type MediaLibraryItem = {
   // restored without re-uploading (see restoreMediaAsset).
   storagePath?: string;
   posterStoragePath?: string | null;
+  // True when this asset already appears in some OTHER carousel post in the
+  // project -- purely informational (see the badge on MediaThumbPreview),
+  // never blocks picking it again.
+  usedInCarousel?: boolean;
 };
 export type GridCoverTransform = { scale: number; x: number; y: number };
 export type GridBoardSlot = {

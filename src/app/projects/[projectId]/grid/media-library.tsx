@@ -17,7 +17,7 @@ export function MediaThumbPreview({
   className?: string;
 }) {
   return (
-    <div className={`h-full w-full overflow-hidden ${className}`}>
+    <div className={`relative h-full w-full overflow-hidden ${className}`}>
       {item.url && item.mediaType === "image" && (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={item.url} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -25,7 +25,27 @@ export function MediaThumbPreview({
       {item.url && item.mediaType === "video" && (
         <video src={item.url} className="h-full w-full object-cover" muted />
       )}
+      {item.usedInCarousel && (
+        <span
+          title="Already used in a carousel"
+          className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+        >
+          <CarouselUsageIcon className="h-2.5 w-2.5" />
+        </span>
+      )}
     </div>
+  );
+}
+
+// Stacked-frames glyph -- distinct from the scheduled-content calendar icon
+// (grid-board.tsx/story-card.tsx) so the two badge meanings read differently
+// at a glance, same "small bg-black/70 corner chip" visual language.
+function CarouselUsageIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <rect x="7" y="7" width="14" height="14" rx="2" />
+      <path d="M3 13V5a2 2 0 0 1 2-2h8" />
+    </svg>
   );
 }
 

@@ -59,6 +59,21 @@ export default async function GridPage({
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
 
+  // Which assets already belong to some carousel post, for the "already
+  // used in a carousel" badge on the media library -- two plain queries
+  // (not a joined/embedded filter) to match this file's existing style of
+  // isolated lookups.
+  const { data: carouselPosts } = await supabase
+    .from("posts")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("post_type", "carousel");
+  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
+  const { data: carouselAssetRows } = carouselPostIds.length
+    ? await supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
+    : { data: [] };
+  const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+
   const allPaths = new Set<string>();
   for (const asset of mediaAssets ?? []) allPaths.add(asset.storage_path);
   for (const row of gridRowsWithPaths) {
@@ -104,6 +119,7 @@ export default async function GridPage({
     // restoreMediaAsset in lib/actions/grid.ts.
     storagePath: asset.storage_path,
     posterStoragePath: asset.poster_storage_path ?? null,
+    usedInCarousel: usedInCarouselIds.has(asset.id),
   }));
 
   const shareData = await getShareLinksData(supabase, projectId);

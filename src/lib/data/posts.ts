@@ -74,6 +74,20 @@ export async function getPostPageData(
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
 
+  // Same "already used in a carousel" lookup as Grid's own media library
+  // (grid/page.tsx) -- kept as two plain queries rather than a joined
+  // filter, matching this file's existing isolated-lookup style.
+  const { data: carouselPosts } = await supabase
+    .from("posts")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("post_type", "carousel");
+  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
+  const { data: carouselAssetRows } = carouselPostIds.length
+    ? await supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
+    : { data: [] };
+  const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+
   // Fetched independently, same reasoning as Grid's cover_transform/
   // preview_storage_path isolation in grid-data.ts: preview_storage_path/
   // annotation_json are newer columns that may not exist yet on a
@@ -170,6 +184,7 @@ export async function getPostPageData(
       id: asset.id,
       url: preview ? urlByPath.get(preview) ?? urlByPath.get(asset.storage_path) ?? null : urlByPath.get(asset.storage_path) ?? null,
       mediaType: asset.media_type,
+      usedInCarousel: usedInCarouselIds.has(asset.id),
     };
   });
 

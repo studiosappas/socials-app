@@ -321,7 +321,7 @@ export function PostEditor({
                     router.refresh();
                   })
                 }
-                className="aspect-[3/4] overflow-hidden rounded-none border border-border"
+                className="relative aspect-[3/4] overflow-hidden rounded-none border border-border"
               >
                 {item.url && item.mediaType === "image" && (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -329,6 +329,14 @@ export function PostEditor({
                 )}
                 {item.url && item.mediaType === "video" && (
                   <video src={item.url} className="h-full w-full object-cover" muted />
+                )}
+                {item.usedInCarousel && (
+                  <span
+                    title="Already used in a carousel"
+                    className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+                  >
+                    <CarouselUsageIcon className="h-2.5 w-2.5" />
+                  </span>
                 )}
               </button>
             ))}
@@ -786,5 +794,16 @@ function PostLinks({
       )}
       {message && <p className="text-xs text-error">{message}</p>}
     </div>
+  );
+}
+
+// Matches media-library.tsx's own CarouselUsageIcon exactly -- duplicated,
+// not shared, same convention as the scheduled-content badge icons.
+function CarouselUsageIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <rect x="7" y="7" width="14" height="14" rx="2" />
+      <path d="M3 13V5a2 2 0 0 1 2-2h8" />
+    </svg>
   );
 }
