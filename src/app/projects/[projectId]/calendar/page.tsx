@@ -49,6 +49,30 @@ export default async function CalendarPage({
 
   const canManage = membership?.role === "owner" || membership?.role === "admin";
 
+  // Automatic publish-marking: this app has no way to observe a post/story
+  // actually going live on Instagram (no API integration), so "automatic"
+  // is a date-based heuristic instead -- once scheduled_date has passed and
+  // nothing already moved it off "scheduled," treat it as published. A
+  // one-way push (mirrors completeAutoTaskForPost's convention in
+  // task-automation.ts), run once per page load; manual override via the
+  // post/story editor's own status field, or the calendar toggle below,
+  // always still works in either direction afterward.
+  const todayStr = format(new Date(), "yyyy-MM-dd");
+  await Promise.all([
+    supabase
+      .from("posts")
+      .update({ status: "published" })
+      .eq("project_id", projectId)
+      .eq("status", "scheduled")
+      .lte("scheduled_date", todayStr),
+    supabase
+      .from("stories")
+      .update({ status: "published" })
+      .eq("project_id", projectId)
+      .eq("status", "scheduled")
+      .lte("scheduled_date", todayStr),
+  ]);
+
   const [
     { data: scheduledPosts },
     { data: scheduledStories },
@@ -57,24 +81,24 @@ export default async function CalendarPage({
   ] = await Promise.all([
     supabase
       .from("posts")
-      .select("id, post_type, scheduled_date")
+      .select("id, post_type, scheduled_date, status")
       .eq("project_id", projectId)
       .gte("scheduled_date", monthStartStr)
       .lte("scheduled_date", monthEndStr),
     supabase
       .from("stories")
-      .select("id, name, scheduled_date")
+      .select("id, name, scheduled_date, status")
       .eq("project_id", projectId)
       .gte("scheduled_date", monthStartStr)
       .lte("scheduled_date", monthEndStr),
     supabase
       .from("posts")
-      .select("id, post_type, scheduled_date")
+      .select("id, post_type, scheduled_date, status")
       .eq("project_id", projectId)
       .is("scheduled_date", null),
     supabase
       .from("stories")
-      .select("id, name, scheduled_date")
+      .select("id, name, scheduled_date, status")
       .eq("project_id", projectId)
       .is("scheduled_date", null),
   ]);
@@ -165,6 +189,7 @@ export default async function CalendarPage({
       thumbnailUrl: thumbnailByPost.get(post.id) ?? null,
       assetUrls: assetsByPost.get(post.id) ?? [],
       href: `/projects/${projectId}/posts/${post.id}`,
+      status: post.status,
     });
     itemsByDate.set(post.scheduled_date, list);
   }
@@ -178,6 +203,7 @@ export default async function CalendarPage({
       thumbnailUrl: thumbnailByStory.get(story.id) ?? null,
       assetUrls: assetsByStory.get(story.id) ?? [],
       href: `/projects/${projectId}/stories/${story.id}`,
+      status: story.status,
     });
     itemsByDate.set(story.scheduled_date, list);
   }
@@ -203,6 +229,7 @@ export default async function CalendarPage({
       thumbnailUrl: thumbnailByPost.get(p.id) ?? null,
       assetUrls: assetsByPost.get(p.id) ?? [],
       href: `/projects/${projectId}/posts/${p.id}`,
+      status: p.status,
     })),
     ...(unscheduledStories ?? []).map((s) => ({
       itemType: "story" as const,
@@ -211,6 +238,7 @@ export default async function CalendarPage({
       thumbnailUrl: thumbnailByStory.get(s.id) ?? null,
       assetUrls: assetsByStory.get(s.id) ?? [],
       href: `/projects/${projectId}/stories/${s.id}`,
+      status: s.status,
     })),
   ];
 

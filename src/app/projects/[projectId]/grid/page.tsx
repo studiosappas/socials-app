@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { getShareLinksData } from "@/lib/data/share-links";
-import { GridBoard, type GridBoardRow, type MediaLibraryItem } from "./grid-board";
+import { GridBoard, type GridBoardRow, type MediaFolder, type MediaLibraryItem } from "./grid-board";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -58,6 +58,24 @@ export default async function GridPage({
     .select("id, storage_path, media_type, poster_storage_path, created_at")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
+
+  // Isolated from the select above, same reasoning as socialLinks below --
+  // folder_id/media_folders are new and may not exist yet on a
+  // not-yet-migrated database, and PostgREST fails the whole select if any
+  // referenced column/table is missing. A failed lookup here just means no
+  // folders show yet, not a broken Grid page.
+  const { data: mediaFolderRows } = await supabase
+    .from("media_folders")
+    .select("id, name")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: true });
+  const mediaFolders: MediaFolder[] = (mediaFolderRows ?? []).map((f) => ({ id: f.id, name: f.name }));
+
+  const assetIds = (mediaAssets ?? []).map((a) => a.id);
+  const { data: folderAssignmentRows } = assetIds.length
+    ? await supabase.from("media_assets").select("id, folder_id").in("id", assetIds)
+    : { data: [] };
+  const folderIdByAssetId = new Map((folderAssignmentRows ?? []).map((r) => [r.id, r.folder_id as string | null]));
 
   // Which assets already belong to some carousel post, for the "already
   // used in a carousel" badge on the media library -- two plain queries
@@ -120,6 +138,7 @@ export default async function GridPage({
     storagePath: asset.storage_path,
     posterStoragePath: asset.poster_storage_path ?? null,
     usedInCarousel: usedInCarouselIds.has(asset.id),
+    folderId: folderIdByAssetId.get(asset.id) ?? null,
   }));
 
   const shareData = await getShareLinksData(supabase, projectId);
@@ -145,6 +164,7 @@ export default async function GridPage({
       newsletterPerWeek={project?.newsletter_per_week ?? 0}
       rows={gridRows}
       mediaLibrary={mediaLibrary}
+      mediaFolders={mediaFolders}
       canManage={canManage}
       shareLinks={shareData.links}
       sharePosts={shareData.posts}

@@ -94,7 +94,12 @@ export type MediaLibraryItem = {
   // project -- purely informational (see the badge on MediaThumbPreview),
   // never blocks picking it again.
   usedInCarousel?: boolean;
+  // Optional for the same reason as storagePath/posterStoragePath above --
+  // only Grid's own page.tsx populates it. null/undefined both mean
+  // "unfoldered," shown in the library's root view.
+  folderId?: string | null;
 };
+export type MediaFolder = { id: string; name: string };
 export type GridCoverTransform = { scale: number; x: number; y: number };
 export type GridBoardSlot = {
   id: string;
@@ -129,6 +134,7 @@ export function GridBoard({
   tiktokUrl,
   rows,
   mediaLibrary,
+  mediaFolders,
   canManage,
   shareLinks,
   sharePosts,
@@ -153,6 +159,7 @@ export function GridBoard({
   tiktokUrl: string;
   rows: GridBoardRow[];
   mediaLibrary: MediaLibraryItem[];
+  mediaFolders: MediaFolder[];
   canManage: boolean;
   shareLinks: ShareLinkItem[];
   sharePosts: PickerPost[];
@@ -548,7 +555,7 @@ export function GridBoard({
           // opens MediaPickerDialog instead (also has its own upload entry
           // point, so nothing is lost on mobile).
           <div className="hidden lg:block lg:w-64 lg:shrink-0">
-            <MediaLibrary projectId={projectId} items={mediaLibrary} pushCommand={pushCommand} />
+            <MediaLibrary projectId={projectId} items={mediaLibrary} folders={mediaFolders} pushCommand={pushCommand} />
           </div>
         )}
       </div>

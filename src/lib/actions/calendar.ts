@@ -44,6 +44,34 @@ export async function scheduleItem(
   revalidatePath("/projects/todo");
 }
 
+// Manual override of the Calendar's auto-publish heuristic (see the
+// date-based lazy flip in calendar/page.tsx) -- toggles straight between
+// "published" and "scheduled" rather than trying to recall whatever status
+// preceded it, since every item this is called on already has a
+// scheduled_date (it only renders on a day cell's own tile).
+export async function setItemPublished(
+  projectId: string,
+  itemType: CalendarItemType,
+  itemId: string,
+  published: boolean,
+) {
+  const supabase = await createClient();
+  const table = itemType === "post" ? "posts" : "stories";
+
+  const { error } = await supabase
+    .from(table)
+    .update({ status: published ? "published" : "scheduled" })
+    .eq("id", itemId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  revalidatePath(`/projects/${projectId}/calendar`);
+  revalidatePath(`/projects/${projectId}/grid`);
+  revalidatePath(`/projects/${projectId}/stories`);
+}
+
 export async function createPostForDate(projectId: string, date: string): Promise<string> {
   const supabase = await createClient();
   const {

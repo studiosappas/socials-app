@@ -175,6 +175,58 @@ export async function restoreMediaAsset(
   return { id: mediaAsset.id };
 }
 
+export async function createMediaFolder(
+  projectId: string,
+  name: string,
+): Promise<{ id: string } | { message: string }> {
+  const trimmed = name.trim();
+  if (!trimmed) return { message: "Folder name can't be empty." };
+
+  const supabase = await createClient();
+  const { data: folder, error } = await supabase
+    .from("media_folders")
+    .insert({ project_id: projectId, name: trimmed })
+    .select("id")
+    .single();
+
+  if (error || !folder) {
+    return { message: error?.message ?? "Failed to create folder." };
+  }
+
+  revalidatePath(`/projects/${projectId}/grid`);
+  return { id: folder.id };
+}
+
+// Bulk counterpart of deleteMedia -- same "storage object is never removed"
+// convention (see the comment on restoreMediaAsset above): this only ever
+// deletes media_assets rows, leaving their storage objects orphaned but
+// still live, same as a single delete does today.
+export async function bulkDeleteMedia(projectId: string, mediaAssetIds: string[]) {
+  if (mediaAssetIds.length === 0) return;
+  const supabase = await createClient();
+  const { error } = await supabase.from("media_assets").delete().in("id", mediaAssetIds);
+  if (error) {
+    throw new Error(error.message);
+  }
+  revalidatePath(`/projects/${projectId}/grid`);
+  revalidatePath(`/projects/${projectId}/posts`);
+  revalidatePath(`/projects/${projectId}/stories`);
+}
+
+// folderId of null moves assets back to the unfoldered root view.
+export async function moveMediaToFolder(projectId: string, mediaAssetIds: string[], folderId: string | null) {
+  if (mediaAssetIds.length === 0) return;
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("media_assets")
+    .update({ folder_id: folderId })
+    .in("id", mediaAssetIds);
+  if (error) {
+    throw new Error(error.message);
+  }
+  revalidatePath(`/projects/${projectId}/grid`);
+}
+
 export async function placeMediaInSlot(
   projectId: string,
   slotId: string,

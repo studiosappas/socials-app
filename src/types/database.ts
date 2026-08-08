@@ -8,6 +8,9 @@ export type ProjectPermission = "overview" | "grid" | "stories" | "calendar" | "
 export type PostType = "post" | "reel" | "carousel";
 export type PostStatus = "draft" | "scheduled" | "published" | "in_review";
 export type StoryStatus = "draft" | "scheduled" | "published";
+// Independent of PostStatus/StoryStatus above -- see the review_status
+// column comment in schema.sql. Client Review Mode's approve/request-changes.
+export type ReviewStatus = "pending" | "approved" | "changes_requested";
 export type DesignTaskStatus = "open" | "in_progress" | "done";
 export type MediaType = "image" | "video";
 export type TaskSourceType = "manual" | "post" | "story";
@@ -204,6 +207,7 @@ export interface Database {
           preview_storage_path: string | null;
           annotation_json: object | null;
           poster_storage_path: string | null;
+          folder_id: string | null;
           created_at: string;
         };
         Insert: {
@@ -212,6 +216,7 @@ export interface Database {
           media_type?: MediaType;
           uploaded_by: string;
           poster_storage_path?: string | null;
+          folder_id?: string | null;
         };
         Update: {
           storage_path?: string;
@@ -219,7 +224,14 @@ export interface Database {
           preview_storage_path?: string | null;
           annotation_json?: object | null;
           poster_storage_path?: string | null;
+          folder_id?: string | null;
         };
+        Relationships: [];
+      };
+      media_folders: {
+        Row: { id: string; project_id: string; name: string; created_at: string };
+        Insert: { project_id: string; name: string };
+        Update: { name?: string };
         Relationships: [];
       };
       grid_rows: {
@@ -238,6 +250,7 @@ export interface Database {
           scheduled_date: string | null;
           scheduled_time: string | null;
           status: PostStatus;
+          review_status: ReviewStatus;
           cover_transform: object | null;
           created_at: string;
         };
@@ -249,6 +262,7 @@ export interface Database {
           scheduled_date?: string | null;
           scheduled_time?: string | null;
           status?: PostStatus;
+          review_status?: ReviewStatus;
           cover_transform?: object | null;
         };
         Update: {
@@ -258,6 +272,7 @@ export interface Database {
           scheduled_date?: string | null;
           scheduled_time?: string | null;
           status?: PostStatus;
+          review_status?: ReviewStatus;
           cover_transform?: object | null;
         };
         Relationships: [];
@@ -312,6 +327,7 @@ export interface Database {
           name: string;
           scheduled_date: string | null;
           status: StoryStatus;
+          review_status: ReviewStatus;
           notes: string;
           position: number;
           created_at: string;
@@ -321,6 +337,7 @@ export interface Database {
           name?: string;
           scheduled_date?: string | null;
           status?: StoryStatus;
+          review_status?: ReviewStatus;
           notes?: string;
           position?: number;
         };
@@ -328,6 +345,7 @@ export interface Database {
           name?: string;
           scheduled_date?: string | null;
           status?: StoryStatus;
+          review_status?: ReviewStatus;
           notes?: string;
           position?: number;
         };
@@ -705,6 +723,18 @@ export interface Database {
           },
         ];
       };
+      post_comments: {
+        Row: { id: string; post_id: string; author_id: string; text: string; created_at: string };
+        Insert: { post_id: string; author_id: string; text: string };
+        Update: never;
+        Relationships: [];
+      };
+      story_comments: {
+        Row: { id: string; story_id: string; author_id: string; text: string; created_at: string };
+        Insert: { story_id: string; author_id: string; text: string };
+        Update: never;
+        Relationships: [];
+      };
       activity_log: {
         Row: { id: string; project_id: string; actor_name: string; action: string; created_at: string };
         Insert: { project_id: string; actor_name: string; action: string };
@@ -821,6 +851,14 @@ export interface Database {
       get_shared_preview: {
         Args: { p_token: string };
         Returns: SharedPreviewPayload | null;
+      };
+      set_post_review_status: {
+        Args: { p_post_id: string; p_status: ReviewStatus };
+        Returns: void;
+      };
+      set_story_review_status: {
+        Args: { p_story_id: string; p_status: ReviewStatus };
+        Returns: void;
       };
     };
   };

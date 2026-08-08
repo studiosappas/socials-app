@@ -1,13 +1,21 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useTransition } from "react";
+import { useActionState, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useDraggable } from "@dnd-kit/core";
-import { deleteMedia, restoreMediaAsset, uploadMedia } from "@/lib/actions/grid";
+import {
+  bulkDeleteMedia,
+  createMediaFolder,
+  deleteMedia,
+  moveMediaToFolder,
+  restoreMediaAsset,
+  uploadMedia,
+} from "@/lib/actions/grid";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { Button } from "@/components/ui/button";
+import { Dialog } from "@/components/ui/dialog";
 import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
-import type { MediaLibraryItem } from "./grid-board";
+import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 
 export function MediaThumbPreview({
   item,
@@ -52,10 +60,12 @@ function CarouselUsageIcon({ className }: { className?: string }) {
 export function MediaLibrary({
   projectId,
   items,
+  folders,
   pushCommand,
 }: {
   projectId: string;
   items: MediaLibraryItem[];
+  folders: MediaFolder[];
   pushCommand: (command: UndoableCommand) => void;
 }) {
   const router = useRouter();
@@ -65,6 +75,58 @@ export function MediaLibrary({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // null = root view (folder tiles + unfoldered assets). Non-null = browsing
+  // one folder's assets, with a "back" affordance to return to root.
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null;
+  const visibleItems = items.filter((item) =>
+    activeFolderId ? item.folderId === activeFolderId : !item.folderId,
+  );
+
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const [bulkDeleting, startBulkDelete] = useTransition();
+  function handleBulkDelete() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!confirm(`Delete ${ids.length} selected asset${ids.length === 1 ? "" : "s"}? This removes ${ids.length === 1 ? "it" : "them"} from any post or story using ${ids.length === 1 ? "it" : "them"}.`)) return;
+    startBulkDelete(async () => {
+      await bulkDeleteMedia(projectId, ids);
+      setSelectedIds(new Set());
+      router.refresh();
+    });
+  }
+
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [moveError, setMoveError] = useState<string | undefined>();
+  const [moving, startMove] = useTransition();
+  function handleMoveToNewFolder() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0 || !newFolderName.trim()) return;
+    setMoveError(undefined);
+    startMove(async () => {
+      const result = await createMediaFolder(projectId, newFolderName);
+      if ("message" in result) {
+        setMoveError(result.message);
+        return;
+      }
+      await moveMediaToFolder(projectId, ids, result.id);
+      setSelectedIds(new Set());
+      setNewFolderName("");
+      setMoveDialogOpen(false);
+      router.refresh();
+    });
+  }
 
   // Undo/redo of add/delete both round-trip through server actions that
   // change `items` (a new row appears/disappears once revalidatePath lands),
@@ -151,18 +213,43 @@ export function MediaLibrary({
         {state?.message && <p className="text-xs text-error">{state.message}</p>}
       </form>
 
+      {activeFolder ? (
+        <button
+          type="button"
+          onClick={() => setActiveFolderId(null)}
+          className="flex items-center gap-1 text-xs tracking-wide text-muted uppercase hover:text-foreground"
+        >
+          ← All Media <span className="text-foreground">/ {activeFolder.name}</span>
+        </button>
+      ) : null}
+
       {/* Capped to roughly 9 rows (grid-cols-3, ~82px square cells at this
           sidebar's w-64 width, plus gaps) so a project with hundreds of
           uploads doesn't grow the sidebar unboundedly -- scrolls internally
           for anything past that instead. */}
       <div className="grid max-h-[620px] grid-cols-3 gap-1 overflow-y-auto">
-        {items.map((item) => (
+        {!activeFolderId &&
+          folders.map((folder) => (
+            <button
+              key={folder.id}
+              type="button"
+              onClick={() => setActiveFolderId(folder.id)}
+              title={folder.name}
+              className="flex aspect-square flex-col items-center justify-center gap-1 border border-border p-1 text-center transition-colors duration-150 hover:border-foreground/30"
+            >
+              <FolderIcon className="h-5 w-5 text-muted" />
+              <span className="w-full truncate text-[10px] text-muted">{folder.name}</span>
+            </button>
+          ))}
+        {visibleItems.map((item) => (
           <MediaThumb
             key={item.id}
             projectId={projectId}
             item={item}
             pushCommand={pushCommand}
             suppressAutoTrackRef={suppressAutoTrackRef}
+            selected={selectedIds.has(item.id)}
+            onToggleSelect={() => toggleSelected(item.id)}
           />
         ))}
         <button
@@ -174,7 +261,82 @@ export function MediaLibrary({
           +
         </button>
       </div>
+
+      {selectedIds.size > 0 && (
+        <div className="sticky bottom-0 z-10 flex items-center justify-between gap-2 border border-border bg-card px-3 py-2 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+          <span className="text-xs tracking-wide text-muted uppercase">{selectedIds.size} selected</span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="secondary"
+              radius="none"
+              onClick={() => setMoveDialogOpen(true)}
+              className="px-2 py-1 text-xs"
+            >
+              Move to Folder
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              radius="none"
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              className="px-2 py-1 text-xs"
+            >
+              {bulkDeleting ? "Deleting…" : "Delete"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <Dialog
+        open={moveDialogOpen}
+        onClose={() => {
+          setMoveDialogOpen(false);
+          setMoveError(undefined);
+        }}
+        title="Move to New Folder"
+        radius="none"
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleMoveToNewFolder();
+          }}
+          className="flex flex-col gap-3"
+        >
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs tracking-wide text-muted uppercase">Folder name</span>
+            <input
+              type="text"
+              autoFocus
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              placeholder="e.g. Q1 Campaign"
+              className="rounded-none border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
+            />
+          </label>
+          {moveError && <p className="text-xs text-error">{moveError}</p>}
+          <Button
+            type="submit"
+            variant="primary"
+            radius="none"
+            disabled={moving || !newFolderName.trim()}
+            className="w-full py-2.5 text-xs tracking-wide uppercase"
+          >
+            {moving ? "Moving…" : `Create & Move ${selectedIds.size} Asset${selectedIds.size === 1 ? "" : "s"}`}
+          </Button>
+        </form>
+      </Dialog>
     </div>
+  );
+}
+
+function FolderIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -183,11 +345,15 @@ function MediaThumb({
   item,
   pushCommand,
   suppressAutoTrackRef,
+  selected,
+  onToggleSelect,
 }: {
   projectId: string;
   item: MediaLibraryItem;
   pushCommand: (command: UndoableCommand) => void;
   suppressAutoTrackRef: React.MutableRefObject<boolean>;
+  selected: boolean;
+  onToggleSelect: () => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -242,6 +408,26 @@ function MediaThumb({
       <div ref={setNodeRef} {...listeners} {...attributes} className="absolute inset-0">
         <MediaThumbPreview item={item} />
       </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleSelect();
+        }}
+        title={selected ? "Deselect" : "Select"}
+        className="absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full"
+      >
+        {selected ? (
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="7" className="fill-accent" stroke="white" strokeWidth="1" />
+            <path d="M4.8 8.2 6.8 10.1 11.2 5.7" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="7" className="fill-black/30" stroke="white" strokeWidth="1.2" />
+          </svg>
+        )}
+      </button>
       <button
         type="button"
         onClick={handleDelete}

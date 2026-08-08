@@ -24,7 +24,7 @@ const ROLE_LABEL: Record<ProjectRole, string> = {
   designer: "Editor",
   editor: "Editor",
   viewer: "Viewer",
-  client: "Client",
+  client: "Client Reviewer",
 };
 const PERMISSION_PAGES: { key: string; label: string }[] = [
   { key: "overview", label: "Overview" },

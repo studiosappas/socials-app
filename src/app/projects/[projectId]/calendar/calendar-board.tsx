@@ -18,12 +18,14 @@ import {
   createPostForDate,
   createStoryForDate,
   scheduleItem,
+  setItemPublished,
   upsertCalendarNote,
   type CalendarItemType,
 } from "@/lib/actions/calendar";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import type { PostStatus, StoryStatus } from "@/types/database";
 
 export type CalendarItem = {
   itemType: CalendarItemType;
@@ -32,6 +34,7 @@ export type CalendarItem = {
   thumbnailUrl: string | null;
   assetUrls: string[];
   href: string;
+  status: PostStatus | StoryStatus;
 };
 
 export type CalendarCell = {
@@ -271,6 +274,7 @@ export function CalendarBoard({
                 {effectiveCells.map((cell, index) => (
                   <DayCell
                     key={cell.date}
+                    projectId={projectId}
                     cell={cell}
                     isExpanded={Math.floor(index / 7) === expandedRowIndex}
                     onToggleRow={() =>
@@ -398,6 +402,7 @@ export function CalendarBoard({
 }
 
 function DayCell({
+  projectId,
   cell,
   isExpanded,
   onToggleRow,
@@ -409,6 +414,7 @@ function DayCell({
   onCancelEditNote,
   onSaveNote,
 }: {
+  projectId: string;
   cell: CalendarCell;
   isExpanded: boolean;
   onToggleRow: () => void;
@@ -425,12 +431,15 @@ function DayCell({
     data: { date: cell.date },
   });
   const hasContent = cell.items.length > 0 || Boolean(cell.note);
-  // Expanded shows fewer items, but each one full-size (an actual visible
-  // image, not a small icon) -- a narrow 7-column cell can only fit ~2 of
-  // those side by side, so this trades item count for genuinely readable size.
-  const PREVIEW_ITEMS = isExpanded ? 2 : 3;
+  // Expanded now stacks every item vertically (see the container below)
+  // instead of capping at 2 side-by-side -- the cell's own height grows to
+  // fit instead of hiding extras behind a "+N" count. Compact mode's small
+  // pill-chip cap is unrelated (that's not the layout this changed) and
+  // stays as-is.
+  const PREVIEW_ITEMS = isExpanded ? cell.items.length : 3;
   const previewItems = cell.items.slice(0, PREVIEW_ITEMS);
   const hiddenCount = cell.items.length - previewItems.length;
+  const allPublished = cell.items.length > 0 && cell.items.every((item) => item.status === "published");
 
   // Same single/double-click disambiguation as Grid's slots (dnd-kit's
   // PointerSensor suppresses native dblclick synthesis, so this is done by
@@ -494,7 +503,11 @@ function DayCell({
             ? "border-dashed border-border"
             : "border-dashed border-black/5 text-muted"
       } ${cell.isToday ? "outline outline-2 outline-offset-[-2px] outline-foreground" : ""} ${
-        isOver ? "bg-black/[.04]" : "hover:bg-black/[.02]"
+        // Every item in the day is Published -- the "completed day" dark
+        // read-at-a-glance state. A mix of published/unpublished items keeps
+        // the cell's normal border/background; each tile still shows its own
+        // published state individually (see ExpandedItemTile).
+        allPublished ? "border-foreground bg-foreground text-background" : isOver ? "bg-black/[.04]" : "hover:bg-black/[.02]"
       }`}
     >
       <div className="flex w-full shrink-0 items-center justify-between">
@@ -548,10 +561,15 @@ function DayCell({
       )}
 
       {previewItems.length > 0 && (
-        <div className={isExpanded ? "flex w-full flex-1 items-start gap-1" : "flex flex-wrap gap-1"}>
+        <div className={isExpanded ? "flex w-full flex-col gap-1" : "flex flex-wrap gap-1"}>
           {previewItems.map((item) =>
             isExpanded ? (
-              <ExpandedItemTile key={`${item.itemType}-${item.itemId}`} item={item} />
+              <ExpandedItemTile
+                key={`${item.itemType}-${item.itemId}`}
+                projectId={projectId}
+                item={item}
+                canManage={canManage}
+              />
             ) : (
               <CompactItemChip key={`${item.itemType}-${item.itemId}`} item={item} />
             ),
@@ -602,40 +620,110 @@ function CompactItemChip({ item }: { item: CalendarItem }) {
 }
 
 // The expanded-row tile: a real, readable image (not a small icon) at a
-// fixed 3:4 ratio -- rather than stretching to fill however tall the row
-// happens to be -- with the content-type tag shrunk to a small corner badge
-// (the same "minimal tag" language as Grid's asset-count/video badges)
-// instead of a full-width caption bar. Draggable for the same reason as
-// CompactItemChip.
-function ExpandedItemTile({ item }: { item: CalendarItem }) {
+// fixed 3:4 ratio, full width of the cell -- these now stack vertically
+// (see DayCell's container above) rather than sharing a row, so this is
+// `w-full` instead of the old `flex-1` row-sharing width. Content-type tag
+// stays a small corner badge (the same "minimal tag" language as Grid's
+// asset-count/video badges). Draggable for the same reason as CompactItemChip.
+function ExpandedItemTile({
+  projectId,
+  item,
+  canManage,
+}: {
+  projectId: string;
+  item: CalendarItem;
+  canManage: boolean;
+}) {
+  const router = useRouter();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `cell-item-${item.itemType}-${item.itemId}`,
     data: { itemType: item.itemType, itemId: item.itemId, item },
   });
+  const [pending, startTransition] = useTransition();
+  // Optimistic override so the toggle flips instantly instead of waiting on
+  // the server round-trip + router.refresh() -- null means "trust item.status".
+  const [optimisticPublished, setOptimisticPublished] = useState<boolean | null>(null);
+  const published = optimisticPublished ?? item.status === "published";
+
+  function togglePublished() {
+    if (pending) return;
+    const next = !published;
+    setOptimisticPublished(next);
+    startTransition(async () => {
+      await setItemPublished(projectId, item.itemType, item.itemId, next);
+      router.refresh();
+    });
+  }
+
   return (
     <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
       onClick={(e) => e.stopPropagation()}
-      className={`min-w-0 flex-1 touch-none self-start transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
+      className={`w-full touch-none transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
     >
       <Link
         href={item.href}
         title={contentTypeLabel(item)}
-        className="relative block aspect-[3/4] w-full overflow-hidden border border-border bg-black/[.03] transition-colors duration-150 hover:border-foreground/30"
+        className={`relative block aspect-[3/4] w-full overflow-hidden border transition-colors duration-150 ${
+          published ? "border-foreground/60 bg-black/[.03]" : "border-border bg-black/[.03] hover:border-foreground/30"
+        }`}
       >
         {item.thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+          <img
+            src={item.thumbnailUrl}
+            alt=""
+            className={`h-full w-full object-cover ${published ? "opacity-70" : ""}`}
+          />
         ) : (
           <span className="flex h-full w-full items-center justify-center text-2xl">
             {item.itemType === "story" ? "📖" : "🖼"}
           </span>
         )}
+        {published && <div className="absolute inset-0 bg-black/40" />}
         <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">
           {contentTypeLabel(item)}
         </span>
+        {canManage && (
+          // A <span role="button">, not a real <button> -- this already sits
+          // inside a <Link> (an <a>) which itself sits inside DayCell's own
+          // outer <button>, and a <button> nested in a <button> is invalid
+          // HTML the browser's parser silently un-nests, causing a React
+          // hydration mismatch (confirmed live: "cannot contain a nested
+          // <button>") -- same reasoning as DayCell's own note-edit div above.
+          <span
+            role="button"
+            tabIndex={0}
+            aria-disabled={pending}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              togglePublished();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                togglePublished();
+              }
+            }}
+            title={published ? "Mark not published" : "Mark published"}
+            className={`absolute right-1 top-1 rounded-full ${pending ? "opacity-50" : ""}`}
+          >
+            {published ? (
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <circle cx="9" cy="9" r="8" fill="white" />
+                <path d="M5.5 9.2 7.7 11.3 12.5 6.5" stroke="black" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <circle cx="9" cy="9" r="8" className="fill-black/40" stroke="white" strokeWidth="1.4" />
+              </svg>
+            )}
+          </span>
+        )}
       </Link>
     </div>
   );

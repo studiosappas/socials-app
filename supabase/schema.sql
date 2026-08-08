@@ -250,6 +250,29 @@ create policy "Owners/admins can delete media"
   to authenticated
   using (public.project_role(project_id) in ('owner', 'admin'));
 
+-- ---------- Media folders ----------
+create table public.media_folders (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.media_assets add column folder_id uuid references public.media_folders (id) on delete set null;
+
+alter table public.media_folders enable row level security;
+
+create policy "Members can view media folders"
+  on public.media_folders for select
+  to authenticated
+  using (public.is_project_member(project_id));
+
+create policy "Admins manage media folders"
+  on public.media_folders for all
+  to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
 -- ---------- Feed grid ----------
 create table public.grid_rows (
   id uuid primary key default gen_random_uuid(),
@@ -1056,3 +1079,109 @@ create policy "Public can read media for active share links"
     bucket_id = 'project-media'
     and public.is_media_path_shared(storage.objects.name)
   );
+
+-- ---------- Client Review Mode ----------
+-- Independent of `status` (draft/scheduled/published/in_review, the
+-- workflow-stage field) -- a post can be status='scheduled' AND
+-- review_status='approved' at once. Client Reviewer role, comments, and
+-- approve/request-changes actions all key off this instead.
+alter table public.posts add column review_status text not null default 'pending'
+  check (review_status in ('pending', 'approved', 'changes_requested'));
+alter table public.stories add column review_status text not null default 'pending'
+  check (review_status in ('pending', 'approved', 'changes_requested'));
+
+-- Same shape/policy pattern as task_comments -- any project member (any
+-- role) can read/write, so owner/admin can see and reply to a client's
+-- comment, not just the client who left it.
+create table public.post_comments (
+  id uuid primary key default gen_random_uuid(),
+  post_id uuid not null references public.posts (id) on delete cascade,
+  author_id uuid not null references public.profiles (id),
+  text text not null,
+  created_at timestamptz not null default now()
+);
+
+create table public.story_comments (
+  id uuid primary key default gen_random_uuid(),
+  story_id uuid not null references public.stories (id) on delete cascade,
+  author_id uuid not null references public.profiles (id),
+  text text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.post_comments enable row level security;
+alter table public.story_comments enable row level security;
+
+create policy "Post comment visibility follows post visibility"
+  on public.post_comments for all to authenticated
+  using (exists (select 1 from public.posts p where p.id = post_comments.post_id and public.is_project_member(p.project_id)))
+  with check (
+    author_id = auth.uid()
+    and exists (select 1 from public.posts p where p.id = post_comments.post_id and public.is_project_member(p.project_id))
+  );
+
+create policy "Story comment visibility follows story visibility"
+  on public.story_comments for all to authenticated
+  using (exists (select 1 from public.stories s where s.id = story_comments.story_id and public.is_project_member(s.project_id)))
+  with check (
+    author_id = auth.uid()
+    and exists (select 1 from public.stories s where s.id = story_comments.story_id and public.is_project_member(s.project_id))
+  );
+
+-- The only write surface for review_status: a plain RLS policy scoped to
+-- `project_role = 'client'` couldn't stop that same UPDATE from also
+-- touching caption/status/etc (RLS is row-level, not column-level), so this
+-- is a SECURITY DEFINER function instead (same precedent as
+-- get_shared_preview/is_media_path_shared above) that does its own
+-- authorization check and only ever writes review_status. Owner/admin
+-- resetting a post back to 'pending' uses a plain .update() instead,
+-- already covered by their existing "Admins manage posts/stories" policy.
+create function public.set_post_review_status(p_post_id uuid, p_status text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_project_id uuid;
+begin
+  select project_id into v_project_id from public.posts where id = p_post_id;
+  if v_project_id is null then
+    raise exception 'Post not found';
+  end if;
+  if public.project_role(v_project_id) <> 'client' then
+    raise exception 'Not authorized';
+  end if;
+  if p_status not in ('approved', 'changes_requested') then
+    raise exception 'Invalid status';
+  end if;
+  update public.posts set review_status = p_status where id = p_post_id;
+end;
+$$;
+
+grant execute on function public.set_post_review_status(uuid, text) to authenticated;
+
+create function public.set_story_review_status(p_story_id uuid, p_status text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_project_id uuid;
+begin
+  select project_id into v_project_id from public.stories where id = p_story_id;
+  if v_project_id is null then
+    raise exception 'Story not found';
+  end if;
+  if public.project_role(v_project_id) <> 'client' then
+    raise exception 'Not authorized';
+  end if;
+  if p_status not in ('approved', 'changes_requested') then
+    raise exception 'Invalid status';
+  end if;
+  update public.stories set review_status = p_status where id = p_story_id;
+end;
+$$;
+
+grant execute on function public.set_story_review_status(uuid, text) to authenticated;
