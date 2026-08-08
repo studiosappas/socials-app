@@ -106,6 +106,7 @@ export function StoriesBoard({
             storyId={story.id}
             name={story.name}
             thumbnailUrl={story.thumbnailUrl}
+            scheduledDate={story.scheduledDate}
             canManage={canManage}
           />
         ))}

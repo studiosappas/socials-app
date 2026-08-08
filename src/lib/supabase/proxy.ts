@@ -31,10 +31,14 @@ export async function updateSession(request: NextRequest) {
 
   const isAuthRoute = request.nextUrl.pathname.startsWith("/login") ||
     request.nextUrl.pathname.startsWith("/register");
-  // The one deliberately-public route in the app: a Shared Client Preview
-  // link is opened by someone with no account at all, so it must never
-  // bounce to /login the way every other route does.
-  const isPublicRoute = isAuthRoute || request.nextUrl.pathname.startsWith("/preview");
+  // The deliberately-public routes: a Shared Client Preview link is opened
+  // by someone with no account at all, and "/" is now the marketing landing
+  // page (exact match only -- NOT a prefix, or every route would match) --
+  // both must never bounce to /login the way every other route does.
+  // "/"'s own page.tsx still redirects an ALREADY-authenticated visitor on
+  // to /projects; this just lets an anonymous one reach it at all.
+  const isPublicRoute =
+    isAuthRoute || request.nextUrl.pathname.startsWith("/preview") || request.nextUrl.pathname === "/";
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();

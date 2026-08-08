@@ -91,6 +91,7 @@ export default async function GridPage({
       coverOriginalUrl: slot.coverOriginalPath ? urlByPath.get(slot.coverOriginalPath) ?? null : null,
       assetCount: slot.assetCount,
       coverTransform: slot.coverTransform,
+      scheduledDate: slot.scheduledDate,
     })),
   }));
 

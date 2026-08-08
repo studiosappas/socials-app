@@ -17,6 +17,7 @@ export type GridSlotWithPath = {
   coverOriginalPath: string | null;
   assetCount: number;
   coverTransform: CoverTransform | null;
+  scheduledDate: string | null;
 };
 
 export type GridRowWithSlots = { rowId: string; slots: GridSlotWithPath[] };
@@ -55,11 +56,13 @@ export async function getGridRowsWithCoverPaths(
   // whole grid. Keyed by post_id (not slot_id) so a post's crop stays
   // attached to it when moved to a different grid cell -- see posts.cover_transform.
   const { data: transformRows } = postIds.length
-    ? await supabase.from("posts").select("id, cover_transform").in("id", postIds)
+    ? await supabase.from("posts").select("id, cover_transform, scheduled_date").in("id", postIds)
     : { data: [] };
   const transformByPostId = new Map<string, CoverTransform | null>();
+  const scheduledDateByPostId = new Map<string, string | null>();
   for (const t of transformRows ?? []) {
     transformByPostId.set(t.id, (t.cover_transform as CoverTransform | null) ?? null);
+    scheduledDateByPostId.set(t.id, (t as { scheduled_date: string | null }).scheduled_date ?? null);
   }
 
   const { data: postAssets } = postIds.length
@@ -147,6 +150,7 @@ export async function getGridRowsWithCoverPaths(
       coverOriginalPath: slot.post_id ? coverOriginalPathByPost.get(slot.post_id) ?? null : null,
       assetCount: slot.post_id ? countByPost.get(slot.post_id) ?? 0 : 0,
       coverTransform: slot.post_id ? transformByPostId.get(slot.post_id) ?? null : null,
+      scheduledDate: slot.post_id ? scheduledDateByPostId.get(slot.post_id) ?? null : null,
     })),
   }));
 }

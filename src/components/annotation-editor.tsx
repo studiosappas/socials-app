@@ -9,6 +9,10 @@ const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
 const CROP_MIN_ZOOM = 1;
 const CROP_MAX_ZOOM = 4;
+// Fixed export pixel width for every targetAspect-locked frame (cover
+// 1080x1350, carousel slide 1080x1440) -- the height follows from
+// targetAspect itself, so only the width needs to be a shared constant.
+const TARGET_EXPORT_W = 1080;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -67,6 +71,7 @@ export function AnnotationEditor({
   imageUrl,
   initialAnnotationJson,
   mediaType,
+  targetAspect,
   onClose,
   onSaved,
   saveAction,
@@ -82,6 +87,16 @@ export function AnnotationEditor({
   // Undefined/omitted (Brief attachments, which are always images) behaves
   // exactly like "image" -- only "video" changes anything here.
   mediaType?: "image" | "video";
+  // When set, the canvas frame is locked to this ratio (e.g. {w:4,h:5} for
+  // a post's cover, {w:3,h:4} for every other carousel slide) instead of
+  // the source image's own natural aspect ratio -- the image is fit via
+  // "cover" (overflow cropped, same as CSS object-fit:cover) into that
+  // fixed frame, so whatever the user crops to is already exactly the
+  // shape the export pipeline expects, with no secondary auto-crop needed
+  // at export time. Omitted preserves today's exact behavior (Brief's own
+  // usage, and any other unconstrained case) -- canvas sized from the
+  // image's own ratio.
+  targetAspect?: { w: number; h: number };
   onClose: () => void;
   onSaved: (previewUrl: string) => void;
   // Brief attachments and post/Grid media assets are saved through
@@ -332,7 +347,21 @@ export function AnnotationEditor({
       const naturalW = img.width ?? maxDisplay;
       const naturalH = img.height ?? maxDisplay;
       const displayScale = Math.min(1, maxDisplay / Math.max(naturalW, naturalH));
-      exportScaleRef.current = displayScale > 0 ? 1 / displayScale : 1;
+
+      // With a targetAspect, the frame is locked to that ratio (both
+      // supported ratios -- 4:5 cover, 3:4 slide -- are portrait, so height
+      // is always the binding dimension against maxDisplay) instead of the
+      // source image's own shape, and exportScaleRef targets a FIXED final
+      // pixel width (1080) rather than "scale back up to this image's own
+      // native resolution" -- so toDataURL always produces exactly
+      // 1080xN regardless of source size or maxDisplay.
+      const canvasW = targetAspect ? maxDisplay * (targetAspect.w / targetAspect.h) : naturalW * displayScale;
+      const canvasH = targetAspect ? maxDisplay : naturalH * displayScale;
+      exportScaleRef.current = targetAspect
+        ? TARGET_EXPORT_W / canvasW
+        : displayScale > 0
+          ? 1 / displayScale
+          : 1;
 
       // Fabric's own toJSON()/loadFromJSON() never include canvas width/height
       // (their docs say so explicitly: "loadFromJSON does not affect canvas
@@ -345,7 +374,7 @@ export function AnnotationEditor({
       // save time -- rendering them into a differently-sized frame makes
       // them overflow past the visible canvas edge, which is exactly what
       // "the image is cut off" looked like.
-      canvas.setDimensions({ width: naturalW * displayScale, height: naturalH * displayScale });
+      canvas.setDimensions({ width: canvasW, height: canvasH });
 
       function finish() {
         historyRef.current = [JSON.stringify(canvas.toJSON())];
@@ -412,7 +441,17 @@ export function AnnotationEditor({
           finish();
         });
       } else {
-        img.scale(displayScale);
+        // targetAspect fits the image via "cover" (like CSS object-fit:
+        // cover) -- scaled up until it fills the fixed frame on both axes,
+        // overflow on one axis cropped by the canvas boundary, centered.
+        // Without targetAspect the frame IS the image's own scaled size
+        // (set above), so plain top-left placement already fills it exactly
+        // with no cropping -- the original, unconstrained behavior.
+        const imgScale = targetAspect ? Math.max(canvasW / naturalW, canvasH / naturalH) : displayScale;
+        img.scale(imgScale);
+        if (targetAspect) {
+          img.set({ left: (canvasW - naturalW * imgScale) / 2, top: (canvasH - naturalH * imgScale) / 2 });
+        }
         // originX/originY default to "center" for every Fabric object
         // (including images) -- every left/top value anywhere in this file
         // is written assuming top-left positioning (0,0 = canvas corner),

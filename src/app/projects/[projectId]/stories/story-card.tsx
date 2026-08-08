@@ -10,12 +10,14 @@ export function StoryCard({
   storyId,
   name,
   thumbnailUrl,
+  scheduledDate,
   canManage,
 }: {
   projectId: string;
   storyId: string;
   name: string;
   thumbnailUrl: string | null;
+  scheduledDate: string | null;
   canManage: boolean;
 }) {
   const [, startTransition] = useTransition();
@@ -47,6 +49,17 @@ export function StoryCard({
           <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
         )}
       </Link>
+
+      {/* Same corner badge/icon as Grid's own scheduled indicator -- kept
+          top-left, matching the ⋮ menu's top-right so the two never collide. */}
+      {scheduledDate && (
+        <span
+          title={`Scheduled for ${scheduledDate}`}
+          className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+        >
+          <ScheduledIcon className="h-2.5 w-2.5" />
+        </span>
+      )}
 
       {canManage && (
         <div ref={menuRef} className="absolute right-1 top-1 z-10">
@@ -86,5 +99,14 @@ export function StoryCard({
         </div>
       )}
     </div>
+  );
+}
+
+function ScheduledIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M3 10h18M8 3v4M16 3v4" />
+    </svg>
   );
 }

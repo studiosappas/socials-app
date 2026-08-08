@@ -68,6 +68,18 @@ function PlusIcon() {
   );
 }
 
+// Same glyph as Task Management's Auto-source badge (task-row.tsx's
+// CalendarIcon) -- one consistent "this is scheduled" visual language
+// across the app rather than a second calendar icon shape.
+function ScheduledIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M3 10h18M8 3v4M16 3v4" />
+    </svg>
+  );
+}
+
 export type MediaLibraryItem = {
   id: string;
   url: string | null;
@@ -89,6 +101,7 @@ export type GridBoardSlot = {
   coverOriginalUrl: string | null;
   assetCount: number;
   coverTransform: GridCoverTransform | null;
+  scheduledDate: string | null;
 };
 export type GridBoardRow = { id: string; slots: GridBoardSlot[] };
 
@@ -809,6 +822,18 @@ function GridSlot({
           className="absolute bottom-1 left-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-[9px] text-white"
         >
           ▶
+        </span>
+      )}
+      {/* Top-left is the one corner not already claimed by the video badge
+          (bottom-left), asset count (bottom-right), or the ⋮ menu (top-right)
+          -- subtle, informational only, never blocks the slot's own click
+          behavior since it's a plain absolutely-positioned span. */}
+      {slot.scheduledDate && (
+        <span
+          title={`Scheduled for ${slot.scheduledDate}`}
+          className="absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+        >
+          <ScheduledIcon className="h-2.5 w-2.5" />
         </span>
       )}
       {slot.assetCount > 1 && (

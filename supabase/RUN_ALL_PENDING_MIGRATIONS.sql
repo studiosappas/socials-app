@@ -755,6 +755,7 @@ alter table public.task_comments enable row level security;
 -- team" (mirrors Grid/Calendar/Brief's own is_project_member gating) --
 -- tasks with no project stay creator-only, unchanged from before.
 drop policy if exists "Users manage their own tasks" on public.tasks;
+drop policy if exists "Members manage project tasks, users manage personal tasks" on public.tasks;
 create policy "Members manage project tasks, users manage personal tasks"
   on public.tasks for all to authenticated
   using (

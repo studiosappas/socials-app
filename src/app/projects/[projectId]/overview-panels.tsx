@@ -21,6 +21,7 @@ import {
 import { updateProjectProfile } from "@/lib/actions/projects";
 import { updateTaskStatus } from "@/lib/actions/todo";
 import { externalUrl, socialProfileUrl } from "@/lib/social-links";
+import { computeTileLayout, MAX_ORBIT_TILES, ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import type { AiInsights, Platform } from "@/types/database";
 
 const labelClass = "text-xs font-semibold tracking-wide uppercase";
@@ -596,36 +597,6 @@ export type BrandDocumentItem = {
   aiAnalysis: string;
   createdAt: string;
 };
-
-// Up to 8 tiles placed at equal angles on a precise circle (radius 36% of
-// the container) around the center hub -- laid out dynamically for however
-// many real documents exist (not a fixed 8 slots padded with placeholders),
-// so a project with e.g. 3 files shows 3 evenly-spaced tiles, not 3 tiles
-// plus 5 empty "File" ghosts.
-const TILE_RADIUS_PCT = 36;
-const MAX_ORBIT_TILES = 8;
-const TILE_SIZES = ["19%", "16%", "18%", "15%", "19%", "16%", "18%", "15%"];
-function computeTileLayout(count: number): { top: string; left: string; size: string }[] {
-  return Array.from({ length: count }, (_, i) => {
-    const angle = (i * 360) / count - 90; // start at the top, go clockwise
-    const radians = (angle * Math.PI) / 180;
-    const left = 50 + TILE_RADIUS_PCT * Math.cos(radians);
-    const top = 50 + TILE_RADIUS_PCT * Math.sin(radians);
-    return { top: `${top}%`, left: `${left}%`, size: TILE_SIZES[i % TILE_SIZES.length] };
-  });
-}
-
-// A handful of small dots traveling along the same circular path the file
-// tiles sit on -- unevenly spaced (not a clean 360/N split) so they read as
-// independent points of motion rather than a single spinning shape.
-const ORBIT_DOT_ANGLES = [0, 70, 160, 210, 300];
-const ORBIT_DOT_LAYOUT: { top: string; left: string }[] = ORBIT_DOT_ANGLES.map((angle) => {
-  const radians = (angle * Math.PI) / 180;
-  return {
-    left: `${50 + TILE_RADIUS_PCT * Math.cos(radians)}%`,
-    top: `${50 + TILE_RADIUS_PCT * Math.sin(radians)}%`,
-  };
-});
 
 function relativeTime(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();

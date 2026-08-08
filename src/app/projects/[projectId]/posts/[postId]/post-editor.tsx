@@ -27,7 +27,8 @@ import {
 import { saveMediaAssetAnnotation, saveMediaAssetPosterAnnotation } from "@/lib/actions/media";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { downloadAsset, downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
+import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
+import { saveAs } from "file-saver";
 import { convertToTask } from "@/lib/actions/todo";
 import { Button } from "@/components/ui/button";
 import { AnnotationEditor } from "@/components/annotation-editor";
@@ -35,6 +36,12 @@ import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { UndoIcon, type MediaLibraryItem } from "../../grid/grid-board";
 import type { PostStatus, PostType } from "@/types/database";
+
+// Module-level constants (not object literals inline in JSX) so the same
+// reference is passed on every render regardless of which asset is being
+// edited -- 1080x1350 cover, 1080x1440 carousel slide.
+const COVER_ASPECT = { w: 4, h: 5 };
+const SLIDE_ASPECT = { w: 3, h: 4 };
 
 export type PostAssetItem = {
   postAssetId: string;
@@ -58,6 +65,10 @@ type EditingImage = {
   imageUrl: string;
   annotationJson: object | null;
   mediaType: "image" | "video";
+  // Position 0 in the post's own asset order is its cover; every other
+  // position is a carousel slide -- the two get different export targets
+  // (4:5 cover vs 3:4 slide), see targetAspect below.
+  isCover: boolean;
 };
 
 type PostRecord = {
@@ -158,12 +169,14 @@ export function PostEditor({
   async function handleDownloadAll() {
     setDownloading(true);
     try {
-      // Original files, not edited previews -- same "download the source,
-      // not the annotated version" convention as Brief's image chips.
-      const zipAssets = orderedAssets
-        .filter((a): a is typeof a & { originalUrl: string } => Boolean(a.originalUrl))
-        .map((a, i) => ({ url: a.originalUrl, filename: filenameFromUrl(a.originalUrl, `asset-${i + 1}`) }));
-      await downloadAssetsAsZip(zipAssets, `post-${post.id}-assets.zip`);
+      // Hits the server export route instead of zipping raw source bytes --
+      // this needs real per-asset resizing (1080x1350 cover / 1080x1440
+      // slides) and must apply the user's saved crop, neither of which a
+      // client-side byte-for-byte zip (downloadAssetsAsZip) can do.
+      const response = await fetch(`/projects/${projectId}/posts/${post.id}/export`);
+      if (!response.ok) return;
+      const blob = await response.blob();
+      saveAs(blob, `post-${post.id}-export.zip`);
     } finally {
       setDownloading(false);
     }
@@ -220,7 +233,7 @@ export function PostEditor({
             strategy={rectSortingStrategy}
           >
             <div ref={scrollRef} className="flex gap-2 overflow-x-auto scroll-smooth pb-1">
-              {orderedAssets.map((asset) => (
+              {orderedAssets.map((asset, index) => (
                 <SortableAsset
                   key={asset.postAssetId}
                   asset={asset}
@@ -239,6 +252,7 @@ export function PostEditor({
                       imageUrl: asset.originalUrl,
                       annotationJson: asset.annotationJson,
                       mediaType: asset.mediaType,
+                      isCover: index === 0,
                     })
                   }
                 />
@@ -336,6 +350,7 @@ export function PostEditor({
         imageUrl={editingImage?.imageUrl ?? null}
         initialAnnotationJson={editingImage?.annotationJson ?? null}
         mediaType={editingImage?.mediaType}
+        targetAspect={editingImage ? (editingImage.isCover ? COVER_ASPECT : SLIDE_ASPECT) : undefined}
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
         saveAction={editingImage?.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}
