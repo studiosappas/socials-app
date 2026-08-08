@@ -233,15 +233,36 @@ export function AnnotationEditor({
   // dialog, or switching which asset it's editing) -- without this, closing
   // and reopening on a DIFFERENT video would reuse the previous video's
   // picked frame for a beat before the effects below caught up.
-  useEffect(() => {
-    if (!open) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  //
+  // This used to be a useEffect keyed on [open, attachmentId] that called
+  // setCanvasNonce -- which meant the nonce bump (and therefore the
+  // `key={canvasNonce}` remount below) landed in a SEPARATE, LATER commit
+  // than the one that first rendered `open: true`. The main load effect
+  // below reruns in that earlier commit too (it also depends on `open`),
+  // so on a fast close-one-asset/open-a-different-one sequence it could
+  // already be constructing a new fabric.Canvas on the not-yet-remounted
+  // node before the nonce-bump commit swapped that node out from under it
+  // -- an intermittent "insertBefore: node is not a child of this node"
+  // crash. Computing the bump here, during render, is React's documented
+  // pattern for "reset state when a prop changes" -- it lands in the SAME
+  // commit as the rest of this render, so the remount and the load
+  // effect's teardown/construct cycle stay in lock-step.
+  const [session, setSession] = useState<{ active: boolean; attachmentId: string | null }>({
+    active: false,
+    attachmentId: null,
+  });
+  if (open && (!session.active || session.attachmentId !== attachmentId)) {
+    setSession({ active: true, attachmentId });
     setPickedFrameUrl(null);
     setForcePicker(isVideo && !initialAnnotationJson);
     setIsRestoringSaved(false);
     setCanvasNonce((n) => n + 1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, attachmentId]);
+  } else if (!open && session.active) {
+    // Bookkeeping only (no picker/canvas resets) -- marks the session as
+    // over so a later reopen of the SAME attachmentId is still detected as
+    // a fresh session (attachmentId alone wouldn't have changed).
+    setSession({ active: false, attachmentId: null });
+  }
 
   // Reopening a video that already has a saved annotation skips the picker
   // (same as images: the saved state is what shows, not a fresh pick) --
