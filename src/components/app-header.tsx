@@ -32,8 +32,11 @@ export function AppHeader({
   return (
     <header className="px-4 py-4 sm:px-6">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <Link href="/projects" className="shrink-0 whitespace-nowrap text-sm tracking-wide">
-          SOCIALS APP
+        <Link
+          href="/projects"
+          className="shrink-0 whitespace-nowrap text-xl font-semibold font-[family-name:var(--font-fraunces)] tracking-wide"
+        >
+          Flow
         </Link>
         <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-full bg-foreground/[0.04] px-4 py-2 text-xs tracking-wide uppercase sm:gap-6">
           <NavNotificationBell items={notificationItems} unreadCount={unreadCount} />
@@ -74,7 +77,7 @@ export function AppHeader({
 export function AppFooter() {
   return (
     <footer className="px-6 py-10 text-center text-xs tracking-wide text-muted uppercase">
-      Powered by Studio Sappas
+      by ASAP Labs
     </footer>
   );
 }

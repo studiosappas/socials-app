@@ -763,7 +763,12 @@ create table public.brand_moodboard_items (
   category text not null check (
     category in ('logo', 'font', 'color', 'guideline', 'campaign', 'reference', 'texture', 'illustration', 'marketing', 'other')
   ),
-  storage_path text not null,
+  -- 'file' covers images, font files (.ttf/.otf/.woff), and PDFs (brand
+  -- guideline docs) -- storage_path is set for 'file', url is set for
+  -- 'link' (e.g. a Pinterest board or a hosted style guide), never both.
+  kind text not null default 'file' check (kind in ('file', 'link')),
+  storage_path text,
+  url text,
   label text not null default '',
   notes text not null default '',
   created_at timestamptz not null default now()

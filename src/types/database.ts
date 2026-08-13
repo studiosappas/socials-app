@@ -22,7 +22,12 @@ export type DesignTaskStatus = "open" | "in_progress" | "done";
 export type MediaType = "image" | "video";
 export type TaskSourceType = "manual" | "post" | "story";
 export type TaskStatus = "todo" | "in_progress" | "done";
-export type BriefTaskType = "story" | "newsletter";
+// Same 4 values as GeneratedDesignPostType (defined below) -- a Brief
+// task's "type" pill and its Generate Design "Post Type" pill used to be
+// two separate rows/concepts; merged into one single-select field per
+// product feedback, so the type saved on the task IS the canvas size used
+// at generation time.
+export type BriefTaskType = GeneratedDesignPostType;
 export type BriefItemSection = "references" | "images" | "products";
 export type AssetProvider = "google_drive" | "dropbox" | "box" | "onedrive" | "collect" | "other";
 export type AssetType =
@@ -53,6 +58,7 @@ export type BrandMoodboardCategory =
   | "illustration"
   | "marketing"
   | "other";
+export type BrandMoodboardItemKind = "file" | "link";
 export type GeneratedDesignPostType = "post" | "story" | "reel_cover" | "newsletter";
 export type AiInsights = {
   brand_health_pct: number;
@@ -495,7 +501,9 @@ export interface Database {
           id: string;
           project_id: string;
           category: BrandMoodboardCategory;
-          storage_path: string;
+          kind: BrandMoodboardItemKind;
+          storage_path: string | null;
+          url: string | null;
           label: string;
           notes: string;
           created_at: string;
@@ -503,7 +511,9 @@ export interface Database {
         Insert: {
           project_id: string;
           category: BrandMoodboardCategory;
-          storage_path: string;
+          kind?: BrandMoodboardItemKind;
+          storage_path?: string | null;
+          url?: string | null;
           label?: string;
           notes?: string;
         };

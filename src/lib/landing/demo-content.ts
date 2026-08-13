@@ -1,7 +1,7 @@
 import type { CtaLink, MediaRef } from "./types";
 
 export const NAV_CONTENT = {
-  logoLabel: "Socials App",
+  logoLabel: "Flow",
   links: {
     pricing: { label: "Pricing", href: "/pricing" } satisfies CtaLink,
     bookDemo: { label: "Book a Demo", href: "/book-a-demo" } satisfies CtaLink,

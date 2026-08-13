@@ -28,7 +28,7 @@ export function MarketingNav() {
         transition={{ ease: EASE }}
       />
       <nav className="mx-auto flex max-w-6xl items-center justify-between">
-        <Link href="/" className="text-sm font-semibold tracking-wide">
+        <Link href="/" className="text-lg font-semibold font-[family-name:var(--font-fraunces)] tracking-wide">
           {NAV_CONTENT.logoLabel}
         </Link>
 

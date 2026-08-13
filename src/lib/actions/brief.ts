@@ -5,7 +5,13 @@ import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
 import { generateWithImages } from "@/lib/ai/client";
 import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
-import type { BriefFrameSection, BriefItemSection, BriefTaskType, GeneratedDesignPostType } from "@/types/database";
+import type {
+  BriefFrameSection,
+  BriefItemKind,
+  BriefItemSection,
+  BriefTaskType,
+  GeneratedDesignPostType,
+} from "@/types/database";
 
 const DEFAULT_FRAME_LABELS = ["Cover", "Body 1", "Body 2", "Closure"];
 
@@ -79,50 +85,29 @@ export async function deleteBriefTask(projectId: string, taskId: string): Promis
   return { success: true };
 }
 
-export async function addBriefTaskLink(
-  projectId: string,
-  taskId: string,
-  section: BriefItemSection,
-  url: string,
-  notes: string,
-  position: number,
-): Promise<ActionResult> {
-  if (!url.trim()) return { success: false, message: "URL is required." };
-  const supabase = await createClient();
-  const { error } = await supabase.from("brief_task_items").insert({
-    task_id: taskId,
-    section,
-    kind: "link",
-    url: url.trim(),
-    label: url.trim(),
-    notes: notes.trim(),
-    position,
-  });
-  if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
-  return { success: true };
-}
-
-export async function addBriefTaskImage(
+// Shared by every path that creates an "image" brief_task_item -- a real
+// upload (addBriefTaskImage) and a pasted URL (addBriefTaskLink) end up
+// with the exact same brief_attachments + brief_task_items rows, so they're
+// indistinguishable afterward: same editable object, same "Edit Image"
+// flow, no link-shaped item ever created for either path.
+async function createBriefImageItem(
   projectId: string,
   taskId: string,
   section: BriefItemSection,
   notes: string,
   position: number,
-  formData: FormData,
-): Promise<ActionResult> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    return { success: false, message: "No file provided." };
-  }
-
+  fileBytes: File | Buffer,
+  contentType: string,
+  fileName: string,
+): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
   const supabase = await createClient();
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
+  const extFromName = fileName.includes(".") ? fileName.split(".").pop() : undefined;
+  const ext = extFromName || contentType.split("/").pop();
   const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
 
   const { error: uploadError } = await supabase.storage
     .from("brief-media")
-    .upload(storagePath, file, { contentType: file.type });
+    .upload(storagePath, fileBytes, { contentType });
   if (uploadError) {
     return { success: false, message: uploadError.message };
   }
@@ -136,19 +121,182 @@ export async function addBriefTaskImage(
     return { success: false, message: attachmentError?.message ?? "Failed to save attachment." };
   }
 
-  const { error: itemError } = await supabase.from("brief_task_items").insert({
-    task_id: taskId,
-    section,
-    kind: "image",
-    label: file.name,
-    notes: notes.trim(),
-    attachment_id: attachment.id,
-    position,
-  });
+  const { data: item, error: itemError } = await supabase
+    .from("brief_task_items")
+    .insert({
+      task_id: taskId,
+      section,
+      kind: "image",
+      label: fileName,
+      notes: notes.trim(),
+      attachment_id: attachment.id,
+      position,
+    })
+    .select("id")
+    .single();
   if (itemError) return { success: false, message: itemError.message };
 
   revalidatePath(`/projects/${projectId}/brief`);
-  return { success: true };
+  return { success: true, itemId: item?.id, attachmentId: attachment.id, label: fileName };
+}
+
+// og:image (checked both attribute orders) first, then twitter:image, then
+// the first real <img> on the page -- a plain regex scan rather than a full
+// HTML parser dependency, which is enough for meta tags' simple, regular
+// shape and matches how most lightweight link-preview scrapers work.
+function extractPrimaryImageUrl(html: string, pageUrl: string): string | null {
+  const patterns = [
+    /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["']/i,
+    /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i,
+    /<img[^>]+src=["'](https?:\/\/[^"']+|\/[^"']+)["']/i,
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (!match?.[1]) continue;
+    try {
+      return new URL(match[1], pageUrl).toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function createBriefLinkItem(
+  projectId: string,
+  taskId: string,
+  section: BriefItemSection,
+  url: string,
+  notes: string,
+  position: number,
+): Promise<ActionResult & { itemId?: string }> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("brief_task_items")
+    .insert({ task_id: taskId, section, kind: "link", url, label: url, notes: notes.trim(), position })
+    .select("id")
+    .single();
+  if (error) return { success: false, message: error.message };
+  revalidatePath(`/projects/${projectId}/brief`);
+  return { success: true, itemId: data?.id };
+}
+
+// One "Link" entry point: tries to convert the URL into a real editable
+// image first -- a direct image URL is used as-is, a webpage's primary
+// image (og:image/twitter:image/first real <img>) is fetched otherwise --
+// and only falls back to a plain external-link item when no image can be
+// found anywhere. Covers both "paste a product photo URL" and "paste a
+// reference doc/article link" from one field, no separate tabs.
+export async function addBriefTaskLink(
+  projectId: string,
+  taskId: string,
+  section: BriefItemSection,
+  url: string,
+  notes: string,
+  position: number,
+): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string; kind?: BriefItemKind }> {
+  const trimmedUrl = url.trim();
+  if (!trimmedUrl) return { success: false, message: "URL is required." };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmedUrl);
+  } catch {
+    return { success: false, message: "That doesn't look like a valid URL." };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { success: false, message: "Only http/https URLs are supported." };
+  }
+
+  let targetUrl = trimmedUrl;
+  let response: Response;
+  try {
+    response = await fetch(targetUrl);
+  } catch {
+    return { success: false, message: "Couldn't reach that URL." };
+  }
+  if (!response.ok) return { success: false, message: `Couldn't fetch that URL (${response.status}).` };
+
+  let contentType = response.headers.get("content-type") ?? "";
+  let imageBuffer: Buffer | null = null;
+
+  if (contentType.startsWith("image/")) {
+    imageBuffer = Buffer.from(await response.arrayBuffer());
+  } else {
+    // Not a direct image -- look for the page's primary image instead of
+    // giving up immediately. Any failure along this path (no image found,
+    // fetch failed, wasn't actually an image) just falls through to the
+    // plain-link fallback below rather than erroring the whole add.
+    const html = await response.text();
+    const imageUrl = extractPrimaryImageUrl(html, targetUrl);
+    if (imageUrl) {
+      try {
+        const fetched = await fetch(imageUrl);
+        const fetchedType = fetched.headers.get("content-type") ?? "";
+        if (fetched.ok && fetchedType.startsWith("image/")) {
+          imageBuffer = Buffer.from(await fetched.arrayBuffer());
+          contentType = fetchedType;
+          targetUrl = imageUrl;
+        }
+      } catch {
+        // Falls through to the plain-link path.
+      }
+    }
+  }
+
+  if (imageBuffer) {
+    const fileName = decodeURIComponent(targetUrl.split("/").pop()?.split("?")[0] || "image");
+    const result = await createBriefImageItem(projectId, taskId, section, notes, position, imageBuffer, contentType, fileName);
+    return { ...result, kind: "image" };
+  }
+
+  const linkResult = await createBriefLinkItem(projectId, taskId, section, trimmedUrl, notes, position);
+  return { ...linkResult, kind: "link" };
+}
+
+// Re-inserts a brief_task_items row with the exact fields it had before --
+// used both as "redo" of Add (link or image) and "undo" of Remove, see
+// useUndoStack in brief-board.tsx. Never re-uploads a file: removeBriefTaskItem
+// only ever deletes the *item* row, never the underlying brief_attachments
+// row an "image" item points at, so that attachment is always still there
+// to re-link.
+export async function restoreBriefTaskItem(
+  projectId: string,
+  taskId: string,
+  section: BriefItemSection,
+  kind: BriefItemKind,
+  label: string,
+  notes: string,
+  attachmentId: string | null,
+  url: string | null,
+  position: number,
+): Promise<ActionResult & { itemId?: string }> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("brief_task_items")
+    .insert({ task_id: taskId, section, kind, label, notes, attachment_id: attachmentId, url, position })
+    .select("id")
+    .single();
+  if (error) return { success: false, message: error.message };
+  revalidatePath(`/projects/${projectId}/brief`);
+  return { success: true, itemId: data?.id };
+}
+
+export async function addBriefTaskImage(
+  projectId: string,
+  taskId: string,
+  section: BriefItemSection,
+  notes: string,
+  position: number,
+  formData: FormData,
+): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return { success: false, message: "No file provided." };
+  }
+  return createBriefImageItem(projectId, taskId, section, notes, position, file, file.type, file.name);
 }
 
 export async function removeBriefTaskItem(projectId: string, itemId: string): Promise<ActionResult> {
@@ -163,15 +311,60 @@ export async function addBriefTaskFrame(
   projectId: string,
   taskId: string,
   section: BriefFrameSection,
-  position: number,
-): Promise<ActionResult> {
+): Promise<ActionResult & { frameId?: string; label?: string; position?: number }> {
   const supabase = await createClient();
-  const { error } = await supabase
+
+  const { data: existing } = await supabase
     .from("brief_task_frames")
-    .insert({ task_id: taskId, section, label: `Text ${position + 1}`, position });
+    .select("id, label, position")
+    .eq("task_id", taskId)
+    .eq("section", section)
+    .order("position");
+  const frames = existing ?? [];
+
+  // New boxes land second-to-last (just before whatever's currently last --
+  // "Closure" by default) instead of appended at the very end, and are
+  // auto-numbered as the next "Body N" -- this section is really a fixed
+  // opening/closing frame with a growing middle, not a flat list.
+  const bodyCount = frames.filter((f) => /^Body \d+$/.test(f.label)).length;
+  const label = `Body ${bodyCount + 1}`;
+  const insertPosition = Math.max(0, frames.length - 1);
+
+  const toShift = frames.filter((f) => f.position >= insertPosition);
+  await Promise.all(
+    toShift.map((f) => supabase.from("brief_task_frames").update({ position: f.position + 1 }).eq("id", f.id)),
+  );
+
+  const { data: frame, error } = await supabase
+    .from("brief_task_frames")
+    .insert({ task_id: taskId, section, label, position: insertPosition })
+    .select("id")
+    .single();
   if (error) return { success: false, message: error.message };
   revalidatePath(`/projects/${projectId}/brief`);
-  return { success: true };
+  return { success: true, frameId: frame?.id, label, position: insertPosition };
+}
+
+// Re-inserts a brief_task_frames row with the exact fields it had before --
+// used both as "redo" of Add Frame and "undo" of Remove Frame, see
+// useUndoStack in brief-board.tsx.
+export async function restoreBriefTaskFrame(
+  projectId: string,
+  taskId: string,
+  section: BriefFrameSection,
+  label: string,
+  body: string,
+  position: number,
+): Promise<ActionResult & { frameId?: string }> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("brief_task_frames")
+    .insert({ task_id: taskId, section, label, body, position })
+    .select("id")
+    .single();
+  if (error) return { success: false, message: error.message };
+  revalidatePath(`/projects/${projectId}/brief`);
+  return { success: true, frameId: data?.id };
 }
 
 export async function renameBriefTaskFrame(
@@ -326,7 +519,7 @@ export async function generateBriefDesign(
       // Isolated -- brand_moodboard_items may not exist yet on a
       // not-yet-migrated database; a missing moodboard should never break
       // generation, just mean less brand context is available.
-      supabase.from("brand_moodboard_items").select("category, storage_path, label").eq("project_id", projectId),
+      supabase.from("brand_moodboard_items").select("category, kind, storage_path, label").eq("project_id", projectId),
     ]);
 
   if (!task) return { success: false, message: "Task not found." };
@@ -392,11 +585,20 @@ export async function generateBriefDesign(
 
   // Capped at 4 -- references first (the spec's explicit style-guidance
   // source), then moodboard campaign/reference material, bounding both
-  // latency and cost on every generation.
+  // latency and cost on every generation. Only actual uploaded IMAGE files
+  // are usable as vision input -- link items have no bytes to send, and
+  // font/PDF files aren't images Claude's vision input can decode.
+  const IMAGE_EXT = new Set(["jpg", "jpeg", "png", "gif", "webp"]);
   const visionCandidates = [
     ...referenceAssets.map((i) => publicUrl(i.attachment!.original_storage_path)),
     ...(moodboard ?? [])
-      .filter((m) => m.category === "reference" || m.category === "campaign")
+      .filter(
+        (m): m is typeof m & { storage_path: string } =>
+          m.kind === "file" &&
+          Boolean(m.storage_path) &&
+          (m.category === "reference" || m.category === "campaign") &&
+          IMAGE_EXT.has(m.storage_path!.split(".").pop()?.toLowerCase() ?? ""),
+      )
       .map((m) => supabase.storage.from("project-media").getPublicUrl(m.storage_path).data.publicUrl),
   ].slice(0, 4);
   const visionImages = (

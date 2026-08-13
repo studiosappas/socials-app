@@ -1125,11 +1125,19 @@ create table if not exists public.brand_moodboard_items (
   category text not null check (
     category in ('logo', 'font', 'color', 'guideline', 'campaign', 'reference', 'texture', 'illustration', 'marketing', 'other')
   ),
-  storage_path text not null,
+  storage_path text,
   label text not null default '',
   notes text not null default '',
   created_at timestamptz not null default now()
 );
+
+-- Additive for a database where brand_moodboard_items already existed
+-- (storage_path started NOT NULL, file-only) -- 'file' covers images, font
+-- files, and PDFs; 'link' covers a hosted URL (e.g. a Pinterest board),
+-- which has a url but no storage_path.
+alter table public.brand_moodboard_items alter column storage_path drop not null;
+alter table public.brand_moodboard_items add column if not exists kind text not null default 'file';
+alter table public.brand_moodboard_items add column if not exists url text;
 
 alter table public.brand_moodboard_items enable row level security;
 

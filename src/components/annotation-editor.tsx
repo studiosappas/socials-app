@@ -1078,6 +1078,22 @@ export function AnnotationEditor({
         // open with no feedback at all.
         setSaveError(result.message ?? "Couldn't save changes.");
       }
+    } catch (error) {
+      // canvas.toDataURL() throws a SecurityError (silently, with no
+      // network request ever sent) if any object on the canvas is a
+      // cross-origin image whose source didn't actually send permissive
+      // CORS headers -- previously uncaught here, so the whole save
+      // silently no-opped: the dialog stayed open looking like nothing was
+      // wrong, but nothing was ever sent to saveAction, and reopening later
+      // showed the pre-edit state because there was never anything new to
+      // load. Surfacing it here doesn't fix a bad source, but at least
+      // makes the failure visible instead of indistinguishable from success.
+      console.error("Failed to save annotation:", error);
+      setSaveError(
+        error instanceof DOMException && error.name === "SecurityError"
+          ? "Couldn't save -- an image on this canvas failed to load securely. Try re-adding it and save again."
+          : "Couldn't save changes. Try again.",
+      );
     } finally {
       setSaving(false);
     }

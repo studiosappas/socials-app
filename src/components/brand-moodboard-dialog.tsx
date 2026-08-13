@@ -4,7 +4,7 @@ import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { uploadMoodboardItem, deleteMoodboardItem } from "@/lib/actions/brand-moodboard";
+import { uploadMoodboardItem, addMoodboardLink, deleteMoodboardItem } from "@/lib/actions/brand-moodboard";
 import type { BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import type { BrandMoodboardCategory } from "@/types/database";
 
@@ -20,6 +20,11 @@ const CATEGORIES: { value: BrandMoodboardCategory; label: string }[] = [
   { value: "marketing", label: "Marketing Materials" },
   { value: "other", label: "Other" },
 ];
+
+// Any file type is accepted -- images, font files (brand typefaces), and
+// PDFs (guideline docs) all belong here; only images render as a thumbnail
+// (see MoodboardTile below), everything else shows as a generic file chip.
+const FILE_ACCEPT = "image/*,.ttf,.otf,.woff,.woff2,application/pdf,.pdf";
 
 // Compact category-tabs + upload/grid, matching Media Library's own
 // upload/thumbnail visual language -- fed to "Generate Design" as ongoing
@@ -44,7 +49,13 @@ export function BrandMoodboardDialog({
   const [, startTransition] = useTransition();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkLabel, setLinkLabel] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
+  const [addingLink, setAddingLink] = useState(false);
+
   const visibleItems = items.filter((i) => i.category === category);
+  const categoryLabel = CATEGORIES.find((c) => c.value === category)?.label;
 
   function handleUploadClick() {
     fileInputRef.current?.click();
@@ -69,6 +80,25 @@ export function BrandMoodboardDialog({
     });
   }
 
+  function handleAddLink(e: React.FormEvent) {
+    e.preventDefault();
+    if (!linkUrl.trim() || addingLink) return;
+    setError(undefined);
+    setAddingLink(true);
+    startTransition(async () => {
+      const result = await addMoodboardLink(projectId, category, linkLabel, linkUrl);
+      setAddingLink(false);
+      if (!result.success) {
+        setError(result.message ?? "Couldn't add link.");
+        return;
+      }
+      setLinkLabel("");
+      setLinkUrl("");
+      setLinkOpen(false);
+      router.refresh();
+    });
+  }
+
   function handleDelete(itemId: string) {
     if (!confirm("Remove this item from the Brand Moodboard?")) return;
     startTransition(async () => {
@@ -86,10 +116,10 @@ export function BrandMoodboardDialog({
               key={c.value}
               type="button"
               onClick={() => setCategory(c.value)}
-              className={`rounded-full border px-3 py-1 text-[11px] tracking-wide uppercase transition-colors duration-150 ${
+              className={`rounded-full border px-3 py-1 text-[11px] tracking-wide uppercase transition-all duration-150 active:scale-95 ${
                 category === c.value
                   ? "border-foreground bg-foreground text-background"
-                  : "border-border text-muted hover:border-foreground/40"
+                  : "border-border text-muted hover:border-foreground/50 hover:bg-black/[.03] hover:text-foreground"
               }`}
             >
               {c.label}
@@ -98,40 +128,57 @@ export function BrandMoodboardDialog({
         </div>
 
         {canManage && (
-          <>
-            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
-            <Button
-              type="button"
-              variant="secondary"
-              radius="none"
-              onClick={handleUploadClick}
-              disabled={uploading}
-              className="w-fit text-xs"
-            >
-              {uploading ? "Uploading…" : `+ Add to ${CATEGORIES.find((c) => c.value === category)?.label}`}
-            </Button>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <input ref={fileInputRef} type="file" accept={FILE_ACCEPT} className="hidden" onChange={handleFileChange} />
+              <Button
+                type="button"
+                variant="secondary"
+                radius="none"
+                onClick={handleUploadClick}
+                disabled={uploading}
+                className="w-fit text-xs"
+              >
+                {uploading ? "Uploading…" : `+ Upload to ${categoryLabel}`}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                radius="none"
+                onClick={() => setLinkOpen((v) => !v)}
+                className="w-fit text-xs"
+              >
+                + Add Link
+              </Button>
+            </div>
+
+            {linkOpen && (
+              <form onSubmit={handleAddLink} className="flex flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center">
+                <input
+                  value={linkLabel}
+                  onChange={(e) => setLinkLabel(e.target.value)}
+                  placeholder="Label (optional)"
+                  className="w-full min-w-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-40"
+                />
+                <input
+                  value={linkUrl}
+                  onChange={(e) => setLinkUrl(e.target.value)}
+                  placeholder="https://…"
+                  className="w-full min-w-0 flex-1 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none"
+                />
+                <Button type="submit" variant="primary" radius="full" disabled={addingLink || !linkUrl.trim()} className="w-full shrink-0 sm:w-auto">
+                  {addingLink ? "Adding…" : "Add"}
+                </Button>
+              </form>
+            )}
+
             {error && <p className="text-xs text-error">{error}</p>}
-          </>
+          </div>
         )}
 
         <div className="grid max-h-[50vh] grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-5">
           {visibleItems.map((item) => (
-            <div key={item.id} className="group relative aspect-square overflow-hidden border border-border">
-              {item.url && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={item.url} alt={item.label} className="h-full w-full object-cover" />
-              )}
-              {canManage && (
-                <button
-                  type="button"
-                  onClick={() => handleDelete(item.id)}
-                  title="Remove"
-                  className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white opacity-0 transition-opacity duration-150 hover:bg-black/85 group-hover:opacity-100"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
+            <MoodboardTile key={item.id} item={item} canManage={canManage} onDelete={() => handleDelete(item.id)} />
           ))}
           {visibleItems.length === 0 && (
             <p className="col-span-full py-6 text-center text-xs text-muted">Nothing here yet.</p>
@@ -139,5 +186,85 @@ export function BrandMoodboardDialog({
         </div>
       </div>
     </Dialog>
+  );
+}
+
+function MoodboardTile({
+  item,
+  canManage,
+  onDelete,
+}: {
+  item: BrandMoodboardItem;
+  canManage: boolean;
+  onDelete: () => void;
+}) {
+  const isImage = item.kind === "file" && item.fileType === "image" && item.fileUrl;
+
+  const content = isImage ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={item.fileUrl!} alt={item.label} className="h-full w-full object-cover" />
+  ) : (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black/[.03] p-1 text-center">
+      <FileKindIcon kind={item.kind} fileType={item.fileType} className="h-5 w-5 text-muted" />
+      <span className="w-full truncate text-[9px] text-muted">{item.label}</span>
+    </div>
+  );
+
+  return (
+    <div className="group relative aspect-square overflow-hidden border border-border">
+      {item.kind === "link" ? (
+        <a href={item.linkUrl ?? "#"} target="_blank" rel="noreferrer" className="block h-full w-full">
+          {content}
+        </a>
+      ) : (
+        content
+      )}
+      {canManage && (
+        <button
+          type="button"
+          onClick={onDelete}
+          title="Remove"
+          className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white opacity-0 transition-opacity duration-150 hover:bg-black/85 group-hover:opacity-100"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+function FileKindIcon({
+  kind,
+  fileType,
+  className,
+}: {
+  kind: BrandMoodboardItem["kind"];
+  fileType: BrandMoodboardItem["fileType"];
+  className?: string;
+}) {
+  if (kind === "link") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+        <path d="M10 14a4 4 0 0 0 5.7 0l2.3-2.3a4 4 0 0 0-5.6-5.6l-1 1" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M14 10a4 4 0 0 0-5.7 0L6 12.3a4 4 0 0 0 5.6 5.6l1-1" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (fileType === "pdf") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+        <path d="M6 2h9l5 5v15H6Z" strokeLinejoin="round" />
+        <path d="M15 2v5h5" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  // Font (or any other non-image file) shares the same generic document
+  // glyph -- a "T" mark is the only visual cue that distinguishes it.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path d="M6 2h9l5 5v15H6Z" strokeLinejoin="round" />
+      <path d="M15 2v5h5" strokeLinejoin="round" />
+      <path d="M9.5 13h5M12 13v5" strokeLinecap="round" />
+    </svg>
   );
 }

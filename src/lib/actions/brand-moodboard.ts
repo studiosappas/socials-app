@@ -32,8 +32,35 @@ export async function uploadMoodboardItem(
   const { error } = await supabase.from("brand_moodboard_items").insert({
     project_id: projectId,
     category,
+    kind: "file",
     storage_path: storagePath,
     label: label.trim() || file.name,
+  });
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/brief`);
+  return { success: true };
+}
+
+// Same category set as uploaded files -- a link (e.g. a Pinterest board, a
+// hosted brand guideline page) is style/reference context exactly like an
+// uploaded image, it just has no file to store.
+export async function addMoodboardLink(
+  projectId: string,
+  category: BrandMoodboardCategory,
+  label: string,
+  url: string,
+): Promise<ActionResult> {
+  const trimmedUrl = url.trim();
+  if (!trimmedUrl) return { success: false, message: "URL is required." };
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("brand_moodboard_items").insert({
+    project_id: projectId,
+    category,
+    kind: "link",
+    url: trimmedUrl,
+    label: label.trim() || trimmedUrl,
   });
   if (error) return { success: false, message: error.message };
 
