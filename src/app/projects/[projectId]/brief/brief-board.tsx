@@ -21,6 +21,7 @@ import {
   saveBriefAnnotation,
   setBriefTaskTypes,
   updateBriefTaskFrameBody,
+  updateBriefTaskItemNotes,
 } from "@/lib/actions/brief";
 import { saveMediaAssetAnnotation } from "@/lib/actions/media";
 import { AnnotationEditor } from "@/components/annotation-editor";
@@ -354,7 +355,7 @@ function TaskCard({
                 ⋮
               </button>
               {menuOpen && (
-                <div className="absolute right-0 top-7 z-20 w-40 rounded-none border border-border bg-background p-1 shadow-lg">
+                <div className="absolute right-0 top-7 z-20 w-40 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
                   <button
                     type="button"
                     onClick={handleDelete}
@@ -664,6 +665,14 @@ function ItemSection({
     });
   }
 
+  function handleNotesBlur(itemId: string, value: string, original: string) {
+    if (value.trim() === original) return;
+    startTransition(async () => {
+      await updateBriefTaskItemNotes(projectId, itemId, value);
+      router.refresh();
+    });
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <span className={labelClass}>{title}</span>
@@ -692,7 +701,17 @@ function ItemSection({
               ) : (
                 <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
               )}
-              {item.notes && <span className="text-[10px] italic text-muted">{item.notes}</span>}
+              {canManage ? (
+                <input
+                  key={`${item.id}-notes`}
+                  defaultValue={item.notes}
+                  placeholder="Add a note"
+                  onBlur={(e) => handleNotesBlur(item.id, e.target.value, item.notes)}
+                  className="w-28 min-w-0 shrink-0 border-b border-transparent bg-transparent text-[10px] italic text-muted focus:border-foreground focus:text-foreground focus:outline-none"
+                />
+              ) : (
+                item.notes && <span className="text-[10px] italic text-muted">{item.notes}</span>
+              )}
             </div>
           ))}
         </div>
@@ -856,7 +875,7 @@ function ImageItemChip({
         )}
       </div>
       {menuOpen && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-36 rounded-none border border-border bg-background p-1 shadow-lg">
+        <div className="absolute left-0 top-full z-20 mt-1 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
           <button
             type="button"
             onClick={() => {

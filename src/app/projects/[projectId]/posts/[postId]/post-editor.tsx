@@ -469,7 +469,7 @@ function SortableAsset({
           {menuOpen && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="absolute left-0 top-6 w-32 rounded-none border border-border bg-background p-1 shadow-lg"
+              className="absolute left-0 top-6 w-32 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
               <button
                 type="button"

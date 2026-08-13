@@ -299,6 +299,16 @@ export async function addBriefTaskImage(
   return createBriefImageItem(projectId, taskId, section, notes, position, file, file.type, file.name);
 }
 
+// Edits an already-added link/image item's note -- previously notes could
+// only be set once, at add time, with no way back in.
+export async function updateBriefTaskItemNotes(projectId: string, itemId: string, notes: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("brief_task_items").update({ notes: notes.trim() }).eq("id", itemId);
+  if (error) return { success: false, message: error.message };
+  revalidatePath(`/projects/${projectId}/brief`);
+  return { success: true };
+}
+
 export async function removeBriefTaskItem(projectId: string, itemId: string): Promise<ActionResult> {
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").delete().eq("id", itemId);

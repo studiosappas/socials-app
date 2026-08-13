@@ -36,7 +36,7 @@ export function FilterPopover({
         <FilterIcon className="h-4 w-4" />
       </button>
       {open && (
-        <div className="absolute right-0 top-9 z-20 w-52 rounded-md border border-border bg-background p-3 shadow-lg">
+        <div className="absolute right-0 top-9 z-20 w-52 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-3 shadow-lg">
           <p className="mb-1.5 text-xs tracking-wide text-muted uppercase">Assignee</p>
           <div className="mb-3 flex flex-col gap-0.5">
             <FilterOption active={filters.assignee === null} onClick={() => onChange({ ...filters, assignee: null })}>

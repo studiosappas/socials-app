@@ -369,7 +369,11 @@ function MediaThumb({
           onToggleSelect();
         }}
         title={selected ? "Deselect" : "Select"}
-        className={`absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 ${
+        // pointer-coarse: touch has no hover state to reveal this with, so
+        // it's always shown there (matching the picker dialog's own
+        // always-visible delete button, which already handles this same
+        // case) -- desktop keeps the existing hover-only reveal unchanged.
+        className={`absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100 ${
           selected ? "opacity-100" : "opacity-0"
         }`}
       >
@@ -387,7 +391,7 @@ function MediaThumb({
       {item.usedInCarousel && (
         <span
           title="Already used in a carousel"
-          className="pointer-events-none absolute right-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          className="pointer-events-none absolute right-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100"
         >
           <CarouselUsageIcon className="h-2.5 w-2.5" />
         </span>

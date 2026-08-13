@@ -29,6 +29,10 @@ export function Dialog({
   if (!open) return null;
 
   const radiusClass = radius === "none" ? "rounded-none" : "rounded-lg";
+  // The header below now paints its own bg-card (so scrolled content can't
+  // show through the sticky header) -- that background needs the box's own
+  // top corner radius, or it'd square off what should be a rounded corner.
+  const topRadiusClass = radius === "none" ? "" : "rounded-t-lg";
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-3 sm:p-6">
@@ -39,7 +43,7 @@ export function Dialog({
         className="fixed inset-0 -z-10 cursor-default"
       />
       <div className={`relative w-full ${radiusClass} border border-border bg-card ${widthClassName}`}>
-        <div className="flex items-center justify-between border-b border-border px-4 py-4 sm:px-6">
+        <div className={`sticky top-0 z-10 flex items-center justify-between border-b border-border bg-card px-4 py-4 sm:px-6 ${topRadiusClass}`}>
           <p className="text-xs tracking-wide text-muted uppercase">{title}</p>
           <button
             type="button"

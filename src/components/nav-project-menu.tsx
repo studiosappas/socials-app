@@ -100,7 +100,7 @@ export function NavProjectMenu({ projectId }: { projectId: string | null }) {
             open ? "pointer-events-auto translate-y-0 opacity-100" : "pointer-events-none -translate-y-1 opacity-0"
           }`}
         >
-          <div className="w-44 rounded-none border border-border bg-background py-1 shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
+          <div className="w-44 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background py-1 shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
             {PROJECT_PAGES.map((page) => {
               const href = page.href ? `${base}/${page.href}` : base;
               const active = page.href ? pathname.startsWith(href) : pathname === base;

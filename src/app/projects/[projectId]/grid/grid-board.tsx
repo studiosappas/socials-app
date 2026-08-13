@@ -978,7 +978,7 @@ function GridSlot({
           {contentMenuOpen && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-7 w-36 rounded-none border border-border bg-background p-1 shadow-lg"
+              className="absolute right-0 top-7 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
               {slot.postId && (
                 <button

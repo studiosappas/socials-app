@@ -514,7 +514,7 @@ function DayCell({
           : undefined
       }
       title="Click to expand this week, double-click for day options, right-click for quick actions"
-      className={`flex flex-col items-start gap-1 border p-1 text-left text-xs transition-[background-color,border-color,min-height] duration-200 sm:p-2 ${
+      className={`flex min-w-0 flex-col items-start gap-1 overflow-hidden border p-1 text-left text-xs transition-[background-color,border-color,min-height] duration-200 sm:p-2 ${
         isExpanded ? "min-h-40 sm:min-h-56" : "min-h-16 sm:min-h-24"
       } ${
         hasContent
@@ -534,6 +534,37 @@ function DayCell({
     >
       <div className="flex w-full shrink-0 items-center justify-between">
         <span className="text-[11px] font-semibold sm:text-xs">{cell.dayNumber}</span>
+        {canManage && onContextMenu && (
+          // Right-click (DayContextMenu's only other trigger) generally
+          // doesn't fire from a long-press on touch devices, so this gives
+          // mobile an explicit, discoverable way to reach the exact same
+          // menu -- sm:hidden since desktop already has right-click.
+          // A <span role="button">, not a real <button>, for the same
+          // nested-<button> HTML-validity reason as the publish-toggle
+          // below (this already sits inside DayCell's own outer <button>).
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const rect = e.currentTarget.getBoundingClientRect();
+              onContextMenu(rect.right, rect.bottom);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                onContextMenu(rect.right, rect.bottom);
+              }
+            }}
+            title="Day options"
+            className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted before:absolute before:-inset-2 before:content-[''] sm:hidden"
+          >
+            ⋮
+          </span>
+        )}
       </div>
 
       {/* Notes no longer open a popup -- an inline textarea appears right
@@ -586,7 +617,7 @@ function DayCell({
       )}
 
       {previewItems.length > 0 && (
-        <div className={isExpanded ? "flex w-full flex-col gap-1" : "flex flex-wrap gap-1"}>
+        <div className={isExpanded ? "flex w-full flex-col gap-1" : "flex w-full flex-wrap gap-1"}>
           {previewItems.map((item) =>
             isExpanded ? (
               <ExpandedItemTile
@@ -717,7 +748,10 @@ function ExpandedItemTile({
             comment UI. */}
         <span
           title="Comments"
-          className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          // pointer-coarse: touch has no hover state to reveal this with, so
+          // it's always shown there -- desktop keeps the existing
+          // hover-only reveal unchanged.
+          className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100"
         >
           💬
         </span>
@@ -745,7 +779,12 @@ function ExpandedItemTile({
               }
             }}
             title={published ? "Mark not published" : "Mark published"}
-            className={`absolute right-1 top-1 rounded-full ${pending ? "opacity-50" : ""}`}
+            // The visible glyph stays exactly 18x18 on every device -- the
+            // pointer-coarse:before: rule only adds an invisible, larger hit
+            // area around it (closer to the ~44px touch-target minimum)
+            // without changing anything about how this looks or sits on
+            // desktop, where a mouse doesn't need the extra margin.
+            className={`absolute right-1 top-1 rounded-full pointer-coarse:before:absolute pointer-coarse:before:-inset-3 pointer-coarse:before:content-[''] ${pending ? "opacity-50" : ""}`}
           >
             {published ? (
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -1042,7 +1081,7 @@ function CreateContentMenu({ projectId, onClose }: { projectId: string; onClose:
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="absolute right-0 top-full z-20 mt-1 w-40 rounded-none border border-border bg-background p-1 shadow-lg"
+      className="absolute right-0 top-full z-20 mt-1 w-40 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
     >
       <Link
         href={`/projects/${projectId}/grid`}

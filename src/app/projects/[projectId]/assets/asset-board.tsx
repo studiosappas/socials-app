@@ -267,7 +267,7 @@ function AssetCard({
                 e.preventDefault();
                 e.stopPropagation();
               }}
-              className="absolute right-0 top-8 w-40 rounded-lg border border-border bg-background p-1 shadow-lg"
+              className="absolute right-0 top-8 w-40 max-w-[calc(100vw-1.5rem)] rounded-lg border border-border bg-background p-1 shadow-lg"
             >
               <button
                 type="button"

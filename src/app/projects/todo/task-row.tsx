@@ -90,7 +90,7 @@ export function TaskRow({
         {assigneeOpen && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute right-0 top-6 z-20 w-44 rounded-md border border-border bg-background p-1 shadow-lg"
+            className="absolute right-0 top-6 z-20 w-44 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-1 shadow-lg"
           >
             {task.projectId ? (
               <>

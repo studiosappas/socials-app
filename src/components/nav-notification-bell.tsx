@@ -61,12 +61,18 @@ export function NavNotificationBell({
         )}
       </button>
 
+      {/* Below sm, the trigger's own horizontal position is unpredictable
+          (it sits inside the header's own flex-wrap pill, which can wrap to
+          a second line and start anywhere) -- a fixed, viewport-anchored
+          placement guarantees this is always fully on-screen regardless of
+          where the bell lands. At sm+ the header never wraps, so this
+          reverts to the original trigger-relative placement unchanged. */}
       <div
-        className={`absolute right-0 top-full z-30 pt-2 transition-[opacity,transform] duration-150 ${
+        className={`fixed inset-x-3 top-3 z-30 transition-[opacity,transform] duration-150 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:pt-2 ${
           open ? "pointer-events-auto translate-y-0 opacity-100" : "pointer-events-none -translate-y-1 opacity-0"
         }`}
       >
-        <div className="flex max-h-[min(480px,70vh)] w-80 flex-col rounded-none border border-border bg-background shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
+        <div className="flex max-h-[min(480px,70vh)] w-full flex-col rounded-none border border-border bg-background shadow-[0_4px_20px_rgba(0,0,0,0.08)] sm:w-80">
           <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
             <span className="text-xs font-semibold tracking-wide uppercase">Notifications</span>
             {unreadCount > 0 && (

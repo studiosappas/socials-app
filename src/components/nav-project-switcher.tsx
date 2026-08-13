@@ -57,7 +57,7 @@ export function NavProjectSwitcher({
           open ? "pointer-events-auto translate-y-0 opacity-100" : "pointer-events-none -translate-y-1 opacity-0"
         }`}
       >
-        <div className="w-56 rounded-none border border-border bg-background py-1 shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
+        <div className="w-56 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background py-1 shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
           <ProjectRow project={currentProject} active onClick={() => switchTo(currentProject.id)} />
           {others.map((p) => (
             <ProjectRow key={p.id} project={p} onClick={() => switchTo(p.id)} />

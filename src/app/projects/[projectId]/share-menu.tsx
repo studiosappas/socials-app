@@ -65,7 +65,7 @@ export function ShareMenuButton({
         <ShareIcon />
       </button>
       {menuOpen && (
-        <div className="absolute right-0 top-8 z-20 w-56 rounded-none border border-border bg-background p-1 shadow-lg">
+        <div className="absolute right-0 top-8 z-20 w-56 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
           {exportLinks.map((link) => (
             <a
               key={link.href}

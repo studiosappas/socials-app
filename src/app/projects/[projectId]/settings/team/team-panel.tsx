@@ -223,7 +223,7 @@ function TeamMemberRow({
                 ⋮
               </button>
               {menuOpen && (
-                <div className="absolute right-0 top-7 z-10 w-48 rounded-none border border-border bg-background p-1 shadow-lg">
+                <div className="absolute right-0 top-7 z-10 w-48 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
                   <button
                     type="button"
                     onClick={() => {
