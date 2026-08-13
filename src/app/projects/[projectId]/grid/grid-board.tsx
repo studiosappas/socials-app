@@ -94,8 +94,14 @@ export type MediaLibraryItem = {
   posterStoragePath?: string | null;
   // True when this asset already appears in some OTHER carousel post in the
   // project -- purely informational (see the badge on MediaThumbPreview),
-  // never blocks picking it again.
+  // never blocks picking it again. Post Editor's own "already reused across
+  // carousels" warning; distinct from usedInGrid below.
   usedInCarousel?: boolean;
+  // True when this asset already occupies a slot on the Grid (any post
+  // type, not just carousels) -- only Grid's own page.tsx populates this;
+  // drives the always-visible badge in the Media Library sidebar so it's
+  // obvious at a glance which assets are already placed.
+  usedInGrid?: boolean;
   // Optional for the same reason as storagePath/posterStoragePath above --
   // only Grid's own page.tsx populates it. null/undefined both mean
   // "unfoldered," shown in the library's root view.
@@ -1107,7 +1113,7 @@ function MediaPickerDialog({
             read as "about 9 rows" on a typically-sized one. */}
         <div className="grid max-h-[min(1400px,70vh)] grid-cols-3 gap-2 overflow-y-auto">
           {items.map((item) => (
-            <div key={item.id} className="relative">
+            <div key={item.id} className="relative min-w-0">
               <button
                 type="button"
                 onClick={() => onSelect(item)}

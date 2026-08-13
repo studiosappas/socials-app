@@ -77,20 +77,19 @@ export default async function GridPage({
     : { data: [] };
   const folderIdByAssetId = new Map((folderAssignmentRows ?? []).map((r) => [r.id, r.folder_id as string | null]));
 
-  // Which assets already belong to some carousel post, for the "already
-  // used in a carousel" badge on the media library -- two plain queries
-  // (not a joined/embedded filter) to match this file's existing style of
-  // isolated lookups.
-  const { data: carouselPosts } = await supabase
-    .from("posts")
-    .select("id")
-    .eq("project_id", projectId)
-    .eq("post_type", "carousel");
-  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
-  const { data: carouselAssetRows } = carouselPostIds.length
-    ? await supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
+  // Which assets already occupy a slot on the Grid, for the always-visible
+  // "already on the Grid" badge on the media library -- scoped to posts
+  // that actually have a grid_slots row (not just any post in the
+  // project), since a post can exist without being placed on the grid yet.
+  const gridPostIds = Array.from(
+    new Set(
+      gridRowsWithPaths.flatMap((row) => row.slots.map((slot) => slot.postId).filter((id): id is string => Boolean(id))),
+    ),
+  );
+  const { data: gridAssetRows } = gridPostIds.length
+    ? await supabase.from("post_assets").select("media_asset_id").in("post_id", gridPostIds)
     : { data: [] };
-  const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+  const usedInGridIds = new Set((gridAssetRows ?? []).map((r) => r.media_asset_id));
 
   const allPaths = new Set<string>();
   for (const asset of mediaAssets ?? []) allPaths.add(asset.storage_path);
@@ -137,7 +136,7 @@ export default async function GridPage({
     // restoreMediaAsset in lib/actions/grid.ts.
     storagePath: asset.storage_path,
     posterStoragePath: asset.poster_storage_path ?? null,
-    usedInCarousel: usedInCarouselIds.has(asset.id),
+    usedInGrid: usedInGridIds.has(asset.id),
     folderId: folderIdByAssetId.get(asset.id) ?? null,
   }));
 

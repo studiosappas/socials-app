@@ -825,8 +825,10 @@ function PostLinks({
   );
 }
 
-// Matches media-library.tsx's own CarouselUsageIcon exactly -- duplicated,
-// not shared, same convention as the scheduled-content badge icons.
+// Same glyph as media-library.tsx's own GridUsageIcon (stacked-frames) --
+// duplicated, not shared, same convention as the scheduled-content badge
+// icons. Kept as its own copy since this badge means something different
+// here (reused across carousels) than Grid's "already on the Grid" one.
 function CarouselUsageIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>

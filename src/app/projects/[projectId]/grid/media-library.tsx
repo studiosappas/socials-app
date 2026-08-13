@@ -20,11 +20,11 @@ import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 export function MediaThumbPreview({
   item,
   className = "",
-  hideCarouselBadge = false,
+  hideGridBadge = false,
 }: {
   item: MediaLibraryItem;
   className?: string;
-  hideCarouselBadge?: boolean;
+  hideGridBadge?: boolean;
 }) {
   return (
     <div className={`relative h-full w-full overflow-hidden ${className}`}>
@@ -35,12 +35,12 @@ export function MediaThumbPreview({
       {item.url && item.mediaType === "video" && (
         <video src={item.url} className="h-full w-full object-cover" muted />
       )}
-      {item.usedInCarousel && !hideCarouselBadge && (
+      {item.usedInGrid && !hideGridBadge && (
         <span
-          title="Already used in a carousel"
+          title="Already on the Grid"
           className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
         >
-          <CarouselUsageIcon className="h-2.5 w-2.5" />
+          <GridUsageIcon className="h-2.5 w-2.5" />
         </span>
       )}
     </div>
@@ -50,7 +50,7 @@ export function MediaThumbPreview({
 // Stacked-frames glyph -- distinct from the scheduled-content calendar icon
 // (grid-board.tsx/story-card.tsx) so the two badge meanings read differently
 // at a glance, same "small bg-black/70 corner chip" visual language.
-export function CarouselUsageIcon({ className }: { className?: string }) {
+export function GridUsageIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
       <rect x="7" y="7" width="14" height="14" rx="2" />
@@ -237,7 +237,7 @@ export function MediaLibrary({
               type="button"
               onClick={() => setActiveFolderId(folder.id)}
               title={folder.name}
-              className="flex aspect-square flex-col items-center justify-center gap-1 border border-border p-1 text-center transition-colors duration-150 hover:border-foreground/30"
+              className="flex aspect-square min-w-0 flex-col items-center justify-center gap-1 border border-border p-1 text-center transition-colors duration-150 hover:border-foreground/30"
             >
               <FolderIcon className="h-5 w-5 text-muted" />
               <span className="w-full truncate text-[10px] text-muted">{folder.name}</span>
@@ -255,7 +255,7 @@ export function MediaLibrary({
           type="button"
           onClick={() => fileInputRef.current?.click()}
           title="Add assets"
-          className="flex aspect-square items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
+          className="flex aspect-square min-w-0 items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
         >
           +
         </button>
@@ -355,12 +355,12 @@ function MediaThumb({
 
   return (
     <div
-      className={`group relative aspect-square touch-none overflow-hidden border border-border transition-[opacity,border-color] duration-150 ${
+      className={`group relative aspect-square min-w-0 touch-none overflow-hidden border border-border transition-[opacity,border-color] duration-150 ${
         isDragging ? "cursor-grabbing opacity-30" : "cursor-grab hover:border-foreground/30"
       }`}
     >
       <div ref={setNodeRef} {...listeners} {...attributes} className="absolute inset-0">
-        <MediaThumbPreview item={item} hideCarouselBadge />
+        <MediaThumbPreview item={item} hideGridBadge />
       </div>
       <button
         type="button"
@@ -388,12 +388,12 @@ function MediaThumb({
           </svg>
         )}
       </button>
-      {item.usedInCarousel && (
+      {item.usedInGrid && (
         <span
-          title="Already used in a carousel"
-          className="pointer-events-none absolute right-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100"
+          title="Already on the Grid"
+          className="pointer-events-none absolute right-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
         >
-          <CarouselUsageIcon className="h-2.5 w-2.5" />
+          <GridUsageIcon className="h-2.5 w-2.5" />
         </span>
       )}
     </div>
