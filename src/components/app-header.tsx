@@ -76,8 +76,29 @@ export function AppHeader({
 
 export function AppFooter() {
   return (
-    <footer className="px-6 py-10 text-center text-xs tracking-wide text-muted uppercase">
-      by ASAP Labs
+    <footer className="grid grid-cols-3 items-center gap-4 px-6 py-10">
+      <FlowMark className="h-9 w-9 shrink-0 text-foreground" />
+      <p className="text-center text-xs tracking-wide text-muted uppercase">by ASAP Labs</p>
+      <p className="justify-self-end text-right text-[10px] leading-tight tracking-wide text-muted uppercase">
+        designed by
+        <br />
+        <span className="text-foreground">Studio Sappas</span>
+      </p>
     </footer>
+  );
+}
+
+// The "Flow" mark on its own -- same glyph as favicon/icon.svg's pinwheel-S
+// shape, just the bare squares with no circle backing, sized for inline use
+// next to text.
+function FlowMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 120 120" fill="currentColor" className={className}>
+      <rect x="29" y="29" width="27" height="27" rx="6" />
+      <rect x="64" y="29" width="27" height="27" rx="6" />
+      <rect x="29" y="64" width="27" height="27" rx="6" />
+      <rect x="64" y="64" width="27" height="27" rx="6" />
+      <rect x="43" y="54.5" width="34" height="11" rx="5.5" transform="rotate(45 60 60)" />
+    </svg>
   );
 }

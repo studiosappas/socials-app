@@ -143,6 +143,23 @@ body {
   }
 }
 
+/* Same motion as .knowledge-orbit-dots (identical keyframes/dot styling),
+   just a shorter revolution -- used for small single-icon orbits (e.g.
+   Brief's Brand Moodboard button) where the faint 60s crawl reads as
+   nearly static at that size; Overview's own panel-sized orbit is
+   untouched. */
+.knowledge-orbit-dots-fast {
+  position: absolute;
+  inset: 0;
+  animation: knowledge-orbit-dot-spin 18s linear infinite;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .knowledge-orbit-dots-fast {
+    animation: none;
+  }
+}
+
 /* iOS Safari auto-zooms the whole page on focus for any text input/textarea/
    select under 16px, which reads as the keyboard "not working properly"
    (the jarring zoom fights the fixed-position modal/keyboard). Most of the

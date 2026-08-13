@@ -28,3 +28,17 @@ export const ORBIT_DOT_LAYOUT: { top: string; left: string }[] = ORBIT_DOT_ANGLE
     top: `${50 + TILE_RADIUS_PCT * Math.sin(radians)}%`,
   };
 });
+
+// A minimal version of the same orbit motion (same CSS animation/dot
+// styling, see .knowledge-orbit-dots/.knowledge-orbit-dot in globals.css),
+// scaled for a small circular icon rather than a full panel -- dots travel
+// directly along the icon's own border (radius 50% of the box) instead of
+// an inset ring line, since there's no separate ring drawn at this size.
+const MINI_ORBIT_DOT_ANGLES = [0, 130, 250];
+export const MINI_ORBIT_DOT_LAYOUT: { top: string; left: string }[] = MINI_ORBIT_DOT_ANGLES.map((angle) => {
+  const radians = (angle * Math.PI) / 180;
+  return {
+    left: `${50 + 50 * Math.cos(radians)}%`,
+    top: `${50 + 50 * Math.sin(radians)}%`,
+  };
+});

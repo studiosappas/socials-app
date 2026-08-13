@@ -28,6 +28,7 @@ import { AnnotationEditor } from "@/components/annotation-editor";
 import { BrandMoodboardDialog } from "@/components/brand-moodboard-dialog";
 import { UndoIcon } from "../grid/grid-board";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
+import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import type { BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskType } from "@/types/database";
 
@@ -141,7 +142,12 @@ export function BriefBoard({
           className="group flex w-full items-center justify-between gap-3 border border-border px-4 py-3 text-left transition-all duration-150 hover:border-foreground/50 hover:bg-black/[.03] hover:shadow-[0_2px_12px_rgba(0,0,0,0.06)] sm:w-fit"
         >
           <div className="flex items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border">
+            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border">
+              <div className="knowledge-orbit-dots-fast" aria-hidden="true">
+                {MINI_ORBIT_DOT_LAYOUT.map((d, i) => (
+                  <span key={i} className="knowledge-orbit-dot" style={{ top: d.top, left: d.left }} />
+                ))}
+              </div>
               <MoodboardIcon className="h-4 w-4" />
             </span>
             <div className="flex flex-col">
