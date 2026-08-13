@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Toolbar, type ViewMode } from "./toolbar";
+import { Toolbar, type ViewMode, type StatusView } from "./toolbar";
 import { ListView } from "./list-view";
 import { BoardView } from "./board-view";
 import { NewTaskDialog } from "./new-task-dialog";
@@ -41,6 +41,7 @@ export function TaskWorkspace({
   const effectiveTasks = overrideTasks ?? tasks;
 
   const [view, setView] = useState<ViewMode>("list");
+  const [statusView, setStatusView] = useState<StatusView>("active");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<TaskFilters>({ assignee: null, source: "all" });
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -73,6 +74,12 @@ export function TaskWorkspace({
   );
 
   const visibleTasks = effectiveTasks.filter((t) => {
+    // Completed tasks are archived out of the day-to-day view by default --
+    // this is the ONE place that distinction is enforced, so both ListView
+    // and BoardView (which just render whatever they're handed) stay
+    // consistent automatically.
+    if (statusView === "active" && t.status === "done") return false;
+    if (statusView === "completed" && t.status !== "done") return false;
     if (search.trim() && !t.title.toLowerCase().includes(search.trim().toLowerCase())) return false;
     if (filters.source !== "all" && t.source !== filters.source) return false;
     if (filters.assignee === "unassigned" && t.assignee) return false;
@@ -85,6 +92,8 @@ export function TaskWorkspace({
       <Toolbar
         view={view}
         onViewChange={setView}
+        statusView={statusView}
+        onStatusViewChange={setStatusView}
         search={search}
         onSearchChange={setSearch}
         filters={filters}

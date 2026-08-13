@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Avatar } from "@/components/ui/avatar";
 import { MentionField } from "@/components/ui/mention-input";
+import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { addTaskComment, deleteTask, fetchTaskComments } from "@/lib/actions/todo";
+import { CalendarIcon } from "./task-row";
 import type { TaskCommentItem, TeamMember } from "@/lib/data/tasks";
 import type { TaskItem } from "@/lib/data/tasks";
 import type { TaskStatus } from "@/types/database";
@@ -28,12 +30,22 @@ export function TaskDetail({
   onStatusChange: (status: TaskStatus) => void;
 }) {
   const router = useRouter();
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const statusRef = useOutsideClick<HTMLDivElement>(statusOpen, () => setStatusOpen(false));
+  const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+
+  const [commentsOpen, setCommentsOpen] = useState(false);
   const [comments, setComments] = useState<TaskCommentItem[] | null>(null);
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // Only fetched once the thread is actually opened -- the collapsed
+  // summary line uses task.commentCount (already known, no fetch needed),
+  // matching "don't permanently display the comment field."
   useEffect(() => {
+    if (!commentsOpen || comments !== null) return;
     let cancelled = false;
     fetchTaskComments(task.id).then((c) => {
       if (!cancelled) setComments(c);
@@ -41,16 +53,17 @@ export function TaskDetail({
     return () => {
       cancelled = true;
     };
-  }, [task.id]);
+  }, [commentsOpen, comments, task.id]);
 
-  function handlePillClick(status: TaskStatus) {
-    if (status === task.status) return;
-    onStatusChange(status);
+  function handleStatusPick(status: TaskStatus) {
+    setStatusOpen(false);
+    if (status !== task.status) onStatusChange(status);
   }
 
   function handleDelete() {
     if (deleting) return;
     if (!confirm("Delete this task? This can't be undone.")) return;
+    setMenuOpen(false);
     setDeleting(true);
     deleteTask(task.id).then(() => router.refresh());
   }
@@ -79,78 +92,141 @@ export function TaskDetail({
     setPosting(false);
   }
 
+  const statusLabel = STATUS_OPTIONS.find((o) => o.value === task.status)?.label ?? "To do";
+  const commentCount = comments !== null ? comments.length : task.commentCount;
+
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="cursor-default rounded-md border border-t-0 border-border px-3 pb-3 pt-1"
+      className="cursor-default rounded-md border border-t-0 border-border px-3 pb-3 pt-2"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 py-2">
-        <div className="flex flex-wrap gap-2">
-          {STATUS_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => handlePillClick(opt.value)}
-              className={`rounded-full border px-3 py-1 text-xs tracking-wide uppercase transition-colors duration-150 ${
-                task.status === opt.value
-                  ? "border-accent bg-accent/10 text-accent"
-                  : "border-border text-muted hover:border-foreground/40"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
+      <div className="flex items-center justify-between gap-2 pb-2">
+        <div ref={statusRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setStatusOpen((v) => !v)}
+            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs transition-colors duration-150 hover:border-foreground/40"
+          >
+            <span className="text-muted">Status</span>
+            <span className="font-medium">{statusLabel}</span>
+            <ChevronDownIcon className="h-3 w-3 text-muted" />
+          </button>
+          {statusOpen && (
+            <div className="absolute left-0 top-8 z-20 w-36 rounded-md border border-border bg-background p-1 shadow-lg">
+              {STATUS_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => handleStatusPick(opt.value)}
+                  className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                    task.status === opt.value ? "font-semibold text-accent" : ""
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={handleDelete}
-          disabled={deleting}
-          className="shrink-0 text-xs text-error transition-colors duration-150 hover:underline disabled:opacity-50"
-        >
-          {deleting ? "Deleting…" : "Delete Task"}
-        </button>
+
+        {/* Secondary actions -- Delete Task no longer sits permanently
+            visible next to Status; Open Linked Content only shows up here
+            when there's actually something to link to. */}
+        <div ref={menuRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            title="More actions"
+            className="rounded p-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+          >
+            ⋯
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-8 z-20 w-44 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-1 shadow-lg">
+              {task.sourceHref && (
+                <Link
+                  href={task.sourceHref}
+                  onClick={() => setMenuOpen(false)}
+                  className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                >
+                  Open Linked Content
+                </Link>
+              )}
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleting}
+                className="block w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-50"
+              >
+                {deleting ? "Deleting…" : "Delete Task"}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {task.sourceRef && task.sourceHref && (
         <Link
           href={task.sourceHref}
-          className="mb-2 block text-xs text-muted underline decoration-border underline-offset-2 hover:text-foreground"
+          onClick={(e) => e.stopPropagation()}
+          className="mb-2 flex w-fit items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs text-muted transition-colors duration-150 hover:border-foreground/40 hover:text-foreground"
         >
-          Linked to: {task.sourceRef.type === "post" ? "a post" : "a story"} on Calendar
+          <CalendarIcon className="h-3 w-3" />
+          Calendar
         </Link>
       )}
 
-      <div className="flex flex-col gap-2">
-        {(comments ?? []).map((c) => (
-          <div key={c.id} className="flex items-start gap-2 text-sm">
-            <Avatar name={c.authorName} avatarUrl={c.authorAvatarUrl} />
-            <div className="min-w-0">
-              <span className="mr-1.5 text-xs font-semibold">{c.authorName}</span>
-              <span className="text-muted">{c.text}</span>
-            </div>
+      <div className="border-t border-border pt-2">
+        <button
+          type="button"
+          onClick={() => setCommentsOpen((v) => !v)}
+          className="text-xs text-muted transition-colors duration-150 hover:text-foreground"
+        >
+          {commentCount > 0 ? `${commentCount} comment${commentCount === 1 ? "" : "s"}` : "No comments"}
+        </button>
+
+        {commentsOpen && (
+          <div className="mt-2 flex flex-col gap-2">
+            {(comments ?? []).map((c) => (
+              <div key={c.id} className="flex items-start gap-2 text-sm">
+                <Avatar name={c.authorName} avatarUrl={c.authorAvatarUrl} />
+                <div className="min-w-0">
+                  <span className="mr-1.5 text-xs font-semibold">{c.authorName}</span>
+                  <span className="text-muted">{c.text}</span>
+                </div>
+              </div>
+            ))}
+            {comments !== null && comments.length === 0 && (
+              <p className="text-xs text-muted">No comments yet.</p>
+            )}
+
+            <form onSubmit={handleSubmitComment} className="mt-1 flex items-center gap-2 border-t border-border pt-2">
+              <MentionField
+                value={text}
+                onChange={setText}
+                members={members}
+                placeholder="Write a comment — @ to mention"
+                className="w-full border-0 border-b border-border bg-transparent py-1 text-sm focus:border-foreground focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!text.trim() || posting}
+                className="shrink-0 text-xs tracking-wide text-muted uppercase transition-colors duration-150 hover:text-foreground disabled:opacity-40"
+              >
+                Send
+              </button>
+            </form>
           </div>
-        ))}
-        {comments !== null && comments.length === 0 && (
-          <p className="text-xs text-muted">No comments yet.</p>
         )}
       </div>
-
-      <form onSubmit={handleSubmitComment} className="mt-2 flex items-center gap-2 border-t border-border pt-2">
-        <MentionField
-          value={text}
-          onChange={setText}
-          members={members}
-          placeholder="Write a comment — @ to mention"
-          className="w-full border-0 border-b border-border bg-transparent py-1 text-sm focus:border-foreground focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={!text.trim() || posting}
-          className="shrink-0 text-xs tracking-wide text-muted uppercase transition-colors duration-150 hover:text-foreground disabled:opacity-40"
-        >
-          Send
-        </button>
-      </form>
     </div>
+  );
+}
+
+function ChevronDownIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <polyline points="6 9 12 15 18 9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }

@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import type { TaskStatus } from "@/types/database";
 
+const SIGNED_URL_TTL_SECONDS = 3600;
+
 export type TaskSource = "manual" | "auto";
 export type TaskSourceRef = { type: "post" | "story"; id: string } | null;
 
@@ -8,6 +10,7 @@ export type TaskItem = {
   id: string;
   projectId: string | null;
   projectName: string | null;
+  projectAvatarUrl: string | null;
   title: string;
   status: TaskStatus;
   dueDate: string | null;
@@ -25,7 +28,7 @@ export type TeamMember = { id: string; name: string; avatarUrl: string | null };
 
 export type TaskWorkspaceData = {
   tasks: TaskItem[];
-  projectsById: Map<string, { id: string; name: string }>;
+  projectsById: Map<string, { id: string; name: string; avatarUrl: string | null }>;
   membersByProject: Map<string, TeamMember[]>;
 };
 
@@ -39,17 +42,38 @@ export async function getTasksForUser(
 ): Promise<TaskWorkspaceData> {
   const { data: memberships } = await supabase
     .from("project_members")
-    .select("project_id, user_id, projects(id, name), profiles(name, avatar_url)")
+    .select("project_id, user_id, projects(id, name, profile_photo_path), profiles(name, avatar_url)")
     .eq("user_id", userId);
 
   const projectIds = Array.from(
     new Set((memberships ?? []).map((m) => m.project_id).filter((id): id is string => Boolean(id))),
   );
 
-  const projectsById = new Map<string, { id: string; name: string }>();
+  // Same profile_photo_path -> signed URL resolution as nav-data.ts's own
+  // project switcher, reused here for the Tasks page's project chip cover.
+  const projectRows = new Map<string, { id: string; name: string; profile_photo_path: string | null }>();
   for (const m of memberships ?? []) {
-    const project = m.projects as { id: string; name: string } | null;
-    if (project) projectsById.set(project.id, project);
+    const project = m.projects as { id: string; name: string; profile_photo_path: string | null } | null;
+    if (project) projectRows.set(project.id, project);
+  }
+  const projectPhotoPaths = Array.from(projectRows.values())
+    .map((p) => p.profile_photo_path)
+    .filter((p): p is string => Boolean(p));
+  const { data: projectSignedUrls } = projectPhotoPaths.length
+    ? await supabase.storage.from("project-media").createSignedUrls(projectPhotoPaths, SIGNED_URL_TTL_SECONDS)
+    : { data: [] };
+  const projectUrlByPath = new Map<string, string>();
+  for (const entry of projectSignedUrls ?? []) {
+    if (entry.signedUrl && entry.path) projectUrlByPath.set(entry.path, entry.signedUrl);
+  }
+
+  const projectsById = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
+  for (const project of projectRows.values()) {
+    projectsById.set(project.id, {
+      id: project.id,
+      name: project.name,
+      avatarUrl: project.profile_photo_path ? projectUrlByPath.get(project.profile_photo_path) ?? null : null,
+    });
   }
 
   // Every member of every project the current user belongs to -- the pool
@@ -112,6 +136,7 @@ export async function getTasksForUser(
       id: t.id,
       projectId: t.project_id,
       projectName: t.project_id ? (projectsById.get(t.project_id)?.name ?? null) : null,
+      projectAvatarUrl: t.project_id ? (projectsById.get(t.project_id)?.avatarUrl ?? null) : null,
       title: t.title,
       status: t.status,
       dueDate: t.due_date,

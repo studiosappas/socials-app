@@ -5,10 +5,13 @@ import { Button } from "@/components/ui/button";
 import { FilterPopover, type TaskFilters } from "./filter-popover";
 
 export type ViewMode = "list" | "board";
+export type StatusView = "active" | "completed";
 
 export function Toolbar({
   view,
   onViewChange,
+  statusView,
+  onStatusViewChange,
   search,
   onSearchChange,
   filters,
@@ -18,6 +21,8 @@ export function Toolbar({
 }: {
   view: ViewMode;
   onViewChange: (v: ViewMode) => void;
+  statusView: StatusView;
+  onStatusViewChange: (v: StatusView) => void;
   search: string;
   onSearchChange: (v: string) => void;
   filters: TaskFilters;
@@ -28,20 +33,41 @@ export function Toolbar({
   const [searchOpen, setSearchOpen] = useState(false);
 
   return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="flex shrink-0 items-center rounded-full border border-border bg-black/[.02] p-0.5">
-        {(["list", "board"] as const).map((v) => (
-          <button
-            key={v}
-            type="button"
-            onClick={() => onViewChange(v)}
-            className={`rounded-full px-3.5 py-1 text-xs tracking-wide uppercase transition-colors duration-150 ${
-              view === v ? "bg-card text-foreground shadow-sm" : "text-muted hover:text-foreground"
-            }`}
-          >
-            {v}
-          </button>
-        ))}
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 items-center rounded-full border border-border bg-black/[.02] p-0.5">
+          {(["list", "board"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onViewChange(v)}
+              className={`rounded-full px-3.5 py-1 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                view === v ? "bg-card text-foreground shadow-sm" : "text-muted hover:text-foreground"
+              }`}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+
+        {/* Completed tasks are archived out of day-to-day view by default --
+            this is the one way back to them, kept as a plain, low-emphasis
+            toggle rather than folded into FilterPopover since it changes the
+            whole dataset (not just narrowing it) the same way List/Board does. */}
+        <div className="flex shrink-0 items-center rounded-full border border-border bg-black/[.02] p-0.5">
+          {(["active", "completed"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onStatusViewChange(v)}
+              className={`rounded-full px-3.5 py-1 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                statusView === v ? "bg-card text-foreground shadow-sm" : "text-muted hover:text-foreground"
+              }`}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex items-center gap-1">
