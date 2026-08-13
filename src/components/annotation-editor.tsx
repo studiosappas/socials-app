@@ -4,6 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
+import {
+  NEUTRAL_ADJUSTMENTS,
+  applyAdjustments,
+  readAdjustments,
+  type AdjustmentValues,
+} from "@/lib/image-adjustments";
 
 const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
@@ -41,7 +47,26 @@ const ALIGN_OPTIONS: { label: string; value: TextAlign }[] = [
   { label: "Right", value: "right" },
 ];
 
-type Tool = "select" | "draw" | "text" | "arrow" | "rect" | "circle" | "crop";
+// Compact list -- label + slider + reset, per control, matching a Canva-
+// style adjustments panel rather than a full Photoshop-style one. Hue is
+// rendered separately below (own -180..180 range and gradient track).
+const ADJUSTMENT_CONTROLS: { key: Exclude<keyof AdjustmentValues, "hue">; label: string; min: number; max: number }[] = [
+  { key: "brightness", label: "Brightness", min: -100, max: 100 },
+  { key: "contrast", label: "Contrast", min: -100, max: 100 },
+  { key: "saturation", label: "Saturation", min: -100, max: 100 },
+  { key: "vibrance", label: "Vibrance", min: -100, max: 100 },
+  { key: "shadows", label: "Shadows", min: -100, max: 100 },
+  { key: "highlights", label: "Highlights", min: -100, max: 100 },
+  { key: "exposure", label: "Exposure", min: -100, max: 100 },
+  { key: "warmth", label: "Warmth", min: -100, max: 100 },
+];
+// A simple color-spectrum track for the Hue slider -- passes through every
+// named direction the spec calls for (Yellow, Orange, Red, Pink, Purple,
+// Blue, Cyan, Green) in order, wrapping back to Yellow.
+const HUE_GRADIENT_CSS =
+  "linear-gradient(to right, #e6b800, #e6821e, #e0483c, #e0459c, #9b59d0, #4a7fe0, #29b6c8, #4caf6b, #e6b800)";
+
+type Tool = "select" | "draw" | "text" | "arrow" | "crop";
 
 // The base photo lives as a regular (tagged, non-selectable) object in the
 // canvas's own object stack rather than the special canvas.backgroundImage
@@ -56,6 +81,14 @@ fabric.FabricObject.customProperties = ["appRole"];
 type TaggableObject = fabric.FabricObject & { appRole?: string };
 function tagAsBasePhoto(obj: fabric.FabricObject) {
   (obj as TaggableObject).appRole = BASE_PHOTO_ROLE;
+}
+// Adjustments (Brightness/Contrast/etc.) always target the base photo
+// specifically, never whatever's currently selected -- the base photo is
+// deliberately selectable:false (see tagAsBasePhoto's own comment above), so
+// it can never be what selectedImage points at.
+function findBasePhoto(canvas: fabric.Canvas): fabric.FabricImage | null {
+  const obj = canvas.getObjects().find((o) => (o as TaggableObject).appRole === BASE_PHOTO_ROLE);
+  return obj instanceof fabric.FabricImage ? obj : null;
 }
 
 export type AnnotationSaveAction = (
@@ -170,6 +203,13 @@ export function AnnotationEditor({
   const [cropZoom, setCropZoom] = useState(1);
   const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
   const [cropFrameSize, setCropFrameSize] = useState<{ width: number; height: number } | null>(null);
+  // Independent of `tool` -- Adjustments is a toggleable panel, not a canvas
+  // interaction mode, so it can stay open alongside Select/Draw/etc. Synced
+  // FROM the base photo's actual filters (not just reset to neutral) inside
+  // finish()/handleUndo/handleRedo below, so it always reflects what's
+  // really on the canvas, including on reopen or after undoing past an edit.
+  const [adjustPanelOpen, setAdjustPanelOpen] = useState(false);
+  const [adjustments, setAdjustments] = useState<AdjustmentValues>(NEUTRAL_ADJUSTMENTS);
 
   // For video: a JPEG data URL of whatever frame the user picked (or, when
   // reopening an already-edited video, one captured silently for canvas-
@@ -351,6 +391,7 @@ export function AnnotationEditor({
       setSelectedText(null);
       setSelectedImage(null);
       setSelectedObject(null);
+      setAdjustPanelOpen(false);
 
       setupCanvas(canvas);
     })();
@@ -400,6 +441,8 @@ export function AnnotationEditor({
       function finish() {
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
+        const basePhoto = findBasePhoto(canvas);
+        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
         setReady(true);
       }
 
@@ -659,33 +702,6 @@ export function AnnotationEditor({
         setTool("select");
         canvas.isDrawingMode = false;
       }
-      if (next === "rect") {
-        const rect = new fabric.Rect({
-          left: canvas.getWidth() / 2 - 60,
-          top: canvas.getHeight() / 2 - 40,
-          width: 120,
-          height: 80,
-          fill: "transparent",
-          stroke: INK,
-          strokeWidth: 3,
-        });
-        canvas.add(rect);
-        canvas.setActiveObject(rect);
-        setTool("select");
-      }
-      if (next === "circle") {
-        const circle = new fabric.Circle({
-          left: canvas.getWidth() / 2 - 40,
-          top: canvas.getHeight() / 2 - 40,
-          radius: 40,
-          fill: "transparent",
-          stroke: INK,
-          strokeWidth: 3,
-        });
-        canvas.add(circle);
-        canvas.setActiveObject(circle);
-        setTool("select");
-      }
       if (next === "arrow") {
         const line = new fabric.Line([0, 20, 100, 20], {
           stroke: INK,
@@ -807,6 +823,8 @@ export function AnnotationEditor({
       canvas.loadFromJSON(JSON.parse(historyRef.current[historyIndexRef.current])).then(() => {
         canvas.requestRenderAll();
         restoringRef.current = false;
+        const basePhoto = findBasePhoto(canvas);
+        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
       });
     });
   }
@@ -819,6 +837,8 @@ export function AnnotationEditor({
       canvas.loadFromJSON(JSON.parse(historyRef.current[historyIndexRef.current])).then(() => {
         canvas.requestRenderAll();
         restoringRef.current = false;
+        const basePhoto = findBasePhoto(canvas);
+        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
       });
     });
   }
@@ -1052,6 +1072,49 @@ export function AnnotationEditor({
     applyTextStyle({ textAlign: align });
   }
 
+  // Live preview only -- does NOT push undo history (a slider drag can fire
+  // this dozens of times), see commitAdjustments below for that.
+  function handleAdjustmentInput(key: keyof AdjustmentValues, value: number) {
+    setAdjustments((prev) => {
+      const next = { ...prev, [key]: value };
+      withCanvas((canvas) => {
+        const basePhoto = findBasePhoto(canvas);
+        if (basePhoto) {
+          applyAdjustments(basePhoto, next);
+          canvas.requestRenderAll();
+        }
+      });
+      return next;
+    });
+  }
+
+  // Fires "object:modified" (the same event a completed drag/resize fires)
+  // once a slider is released -- that's what the history stack listens on,
+  // so one undo step covers the whole gesture instead of every tick.
+  function commitAdjustments() {
+    withCanvas((canvas) => {
+      const basePhoto = findBasePhoto(canvas);
+      if (basePhoto) canvas.fire("object:modified", { target: basePhoto });
+    });
+  }
+
+  function handleResetAdjustment(key: keyof AdjustmentValues) {
+    handleAdjustmentInput(key, 0);
+    commitAdjustments();
+  }
+
+  function handleResetAllAdjustments() {
+    setAdjustments(NEUTRAL_ADJUSTMENTS);
+    withCanvas((canvas) => {
+      const basePhoto = findBasePhoto(canvas);
+      if (basePhoto) {
+        applyAdjustments(basePhoto, NEUTRAL_ADJUSTMENTS);
+        canvas.requestRenderAll();
+      }
+    });
+    commitAdjustments();
+  }
+
   async function handleSave() {
     const canvas = fabricRef.current;
     if (!canvas || !attachmentId) return;
@@ -1150,22 +1213,69 @@ export function AnnotationEditor({
         </div>
       ) : (
         <>
-      <div className="flex flex-wrap items-center justify-center gap-1 px-6 pb-2">
-        <ToolButton active={tool === "select"} onClick={() => activateTool("select")} label="Select" />
-        <ToolButton active={false} onClick={() => activateTool("rect")} label="Rectangle" />
-        <ToolButton active={false} onClick={() => activateTool("circle")} label="Circle" />
-        <span className="mx-1 h-4 w-px bg-border" />
-        <ToolButton active={false} onClick={handleUndo} label="Undo" />
-        <ToolButton active={false} onClick={handleRedo} label="Redo" />
-        <ToolButton active={false} onClick={handleDeleteSelected} label="Delete" />
+      <div className="flex flex-1 overflow-hidden">
+      {/* LEFT: every tool-switching button in one minimal vertical rail
+          (icon + short label) -- replaces what used to be a horizontal row
+          above the canvas plus a second grid-cols-5 row below it, both of
+          which ate into the canvas's available height. Contextual option
+          rows (draw brush picker, align/arrange, text styling, crop
+          apply/cancel) stay as compact horizontal bars in the center
+          column below -- they're per-tool option pickers, not tool
+          switches, so they don't belong in this rail. */}
+      <div className="flex w-16 shrink-0 flex-col items-stretch gap-0.5 overflow-y-auto border-r border-border px-1.5 py-3">
+        <SidebarToolButton active={tool === "select"} onClick={() => activateTool("select")} label="Select">
+          <SelectIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={tool === "crop"} onClick={() => activateTool("crop")} label="Crop" title="Crop Image">
+          <CropIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={tool === "draw"} onClick={() => activateTool("draw")} label="Draw">
+          <DrawIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={false} onClick={() => activateTool("text")} label="Text" title="Add Text">
+          <TextIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={false} onClick={() => activateTool("arrow")} label="Arrow" title="Arrows">
+          <ArrowIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={false} onClick={handleAddLogoClick} label="Logo" title="Add Logo">
+          <LogoIcon />
+        </SidebarToolButton>
+        <span className="my-1 h-px w-full bg-border" />
+        <SidebarToolButton
+          active={adjustPanelOpen}
+          onClick={() => setAdjustPanelOpen((v) => !v)}
+          label="Adjust"
+          title="Adjustments"
+        >
+          <AdjustIcon />
+        </SidebarToolButton>
+        <span className="my-1 h-px w-full bg-border" />
+        <SidebarToolButton active={false} onClick={handleUndo} label="Undo">
+          <UndoIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={false} onClick={handleRedo} label="Redo">
+          <RedoIcon />
+        </SidebarToolButton>
+        <SidebarToolButton active={false} onClick={handleDeleteSelected} label="Delete">
+          <DeleteIcon />
+        </SidebarToolButton>
         {isVideo && ready && (
           <>
-            <span className="mx-1 h-4 w-px bg-border" />
-            <ToolButton active={false} onClick={handleChooseDifferentFrame} label="Select Cover Frame" />
+            <span className="my-1 h-px w-full bg-border" />
+            <SidebarToolButton
+              active={false}
+              onClick={handleChooseDifferentFrame}
+              label="Frame"
+              title="Select Cover Frame"
+            >
+              <FrameIcon />
+            </SidebarToolButton>
           </>
         )}
       </div>
 
+      <div className="flex flex-1 flex-col overflow-hidden">
       {tool === "draw" && (
         <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
           <div className="flex items-center gap-1">
@@ -1460,6 +1570,45 @@ export function AnnotationEditor({
           )}
         </div>
       </div>
+      </div>
+
+      {adjustPanelOpen && ready && (
+        <div className="flex w-44 shrink-0 flex-col gap-3 overflow-y-auto border-l border-border px-3 py-4 sm:w-60 sm:px-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs tracking-wide text-muted uppercase">Adjustments</span>
+            <button
+              type="button"
+              onClick={handleResetAllAdjustments}
+              className="text-xs tracking-wide text-muted uppercase hover:text-foreground"
+            >
+              Reset All
+            </button>
+          </div>
+          {ADJUSTMENT_CONTROLS.map((control) => (
+            <AdjustmentSlider
+              key={control.key}
+              label={control.label}
+              value={adjustments[control.key]}
+              min={control.min}
+              max={control.max}
+              onChange={(value) => handleAdjustmentInput(control.key, value)}
+              onCommit={commitAdjustments}
+              onReset={() => handleResetAdjustment(control.key)}
+            />
+          ))}
+          <AdjustmentSlider
+            label="Hue"
+            value={adjustments.hue}
+            min={-180}
+            max={180}
+            onChange={(value) => handleAdjustmentInput("hue", value)}
+            onCommit={commitAdjustments}
+            onReset={() => handleResetAdjustment("hue")}
+            trackBackground={HUE_GRADIENT_CSS}
+          />
+        </div>
+      )}
+      </div>
 
       <input
         ref={logoInputRef}
@@ -1468,14 +1617,6 @@ export function AnnotationEditor({
         className="hidden"
         onChange={handleLogoFileChange}
       />
-      <div className="grid grid-cols-5 border-t border-border">
-        <PrimaryToolButton active={tool === "crop"} onClick={() => activateTool("crop")} label="Crop Image" />
-        <PrimaryToolButton active={tool === "draw"} onClick={() => activateTool("draw")} label="Draw" />
-        <PrimaryToolButton active={false} onClick={() => activateTool("text")} label="Add Text" />
-        <PrimaryToolButton active={false} onClick={() => activateTool("arrow")} label="Arrows" />
-        <PrimaryToolButton active={false} onClick={handleAddLogoClick} label="Add Logo" />
-      </div>
-
       <div className="flex flex-col items-center gap-2 px-6 py-6">
         {!attachmentId && (
           <p className="text-xs text-error">Annotation storage isn&apos;t set up yet for this image.</p>
@@ -1771,26 +1912,86 @@ function CropCornerHandle({
   );
 }
 
-function ToolButton({
+// A single vertical rail item: icon on top, a short label underneath --
+// deliberately minimal (no borders/pills like the old horizontal toolbar
+// buttons) so a column of ~10 of these doesn't read as noisy.
+function SidebarToolButton({
   active,
   onClick,
   label,
+  title,
+  children,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
+  title?: string;
+  children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
-      className={`rounded px-2 py-1 text-xs ${
-        active ? "bg-foreground text-background" : "hover:bg-black/[.05]"
+      title={title ?? label}
+      className={`flex flex-col items-center gap-1 rounded px-1 py-2 text-[10px] tracking-wide uppercase transition-colors duration-150 ${
+        active ? "bg-foreground text-background" : "text-foreground hover:bg-black/[.05]"
       }`}
     >
+      {children}
       {label}
     </button>
+  );
+}
+
+// Label + native range slider + live value, with double-click-to-reset as a
+// lightweight bonus alongside the panel's own "Reset All" -- keeps to just
+// one control element per row, matching the "compact vertical list" the
+// Adjustments panel spec asked for. onCommit fires only on release (mouse/
+// touch up), not on every drag tick -- see commitAdjustments' own comment.
+function AdjustmentSlider({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+  onCommit,
+  onReset,
+  trackBackground,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+  onCommit: () => void;
+  onReset: () => void;
+  trackBackground?: string;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="flex items-center justify-between">
+        <span className="tracking-wide text-muted uppercase">{label}</span>
+        <span className="tabular-nums text-muted">{value}</span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        onMouseUp={onCommit}
+        onTouchEnd={onCommit}
+        onDoubleClick={onReset}
+        title={`${label} (double-click to reset)`}
+        className="w-full accent-foreground"
+        style={
+          trackBackground
+            ? { background: trackBackground, WebkitAppearance: "none", appearance: "none", height: 6, borderRadius: 9999 }
+            : undefined
+        }
+      />
+    </label>
   );
 }
 
@@ -1814,6 +2015,24 @@ function IconToolButton({
     >
       {children}
     </button>
+  );
+}
+
+// Minimal "equalizer sliders" glyph -- three horizontal tracks with a handle
+// at a different position on each, the standard shorthand for an
+// adjustments/tuning panel (distinct enough from the plain-text toolbar
+// buttons around it that the Adjust button reads as its own thing, not just
+// another Select/Undo/Redo item).
+function AdjustIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+      <line x1="1" y1="3" x2="13" y2="3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="9" cy="3" r="1.6" fill="currentColor" />
+      <line x1="1" y1="7" x2="13" y2="7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="5" cy="7" r="1.6" fill="currentColor" />
+      <line x1="1" y1="11" x2="13" y2="11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="10.5" cy="11" r="1.6" fill="currentColor" />
+    </svg>
   );
 }
 
@@ -1906,24 +2125,95 @@ function LayerIcon({ variant }: { variant: "front" | "forward" | "backward" | "b
   );
 }
 
-function PrimaryToolButton({
-  active,
-  onClick,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-}) {
+// Sidebar rail icons -- all 14x14, stroke-only currentColor glyphs, same
+// minimal convention as AlignIcon/LayerIcon/AdjustIcon above.
+function SelectIcon() {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`py-3 text-xs font-semibold tracking-wide uppercase text-background transition-colors duration-150 ${
-        active ? "bg-black/85" : "bg-foreground hover:bg-black/85"
-      }`}
-    >
-      {label}
-    </button>
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2 1.5L11.5 6.5L7 7.5L5.5 12L2 1.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CropIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M4 1V10H13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M1 4H10V13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DrawIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M9.5 1.5L12.5 4.5L4.5 12.5L1 13L1.5 9.5L9.5 1.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+      <path d="M8 3L11 6" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  );
+}
+
+function TextIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2 2H12M7 2V12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ArrowIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2.5 11.5L11.5 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5.5 2.5H11.5V8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function LogoIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <rect x="1" y="1" width="12" height="9" rx="1" stroke="currentColor" strokeWidth="1.1" />
+      <circle cx="4.5" cy="4.5" r="1.1" stroke="currentColor" strokeWidth="1" />
+      <path d="M1.5 9L5 6L7.5 8L9.5 5.5L12.5 9" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function UndoIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M3 4H9.5C11.5 4 13 5.5 13 7.5C13 9.5 11.5 11 9.5 11H5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5.5 1.5L3 4L5.5 6.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function RedoIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M11 4H4.5C2.5 4 1 5.5 1 7.5C1 9.5 2.5 11 4.5 11H9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M8.5 1.5L11 4L8.5 6.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DeleteIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2.5 3.5H11.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+      <path d="M5 3.5V2C5 1.5 5.4 1 6 1H8C8.6 1 9 1.5 9 2V3.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3.5 3.5L4 12C4 12.5 4.4 13 5 13H9C9.6 13 10 12.5 10 12L10.5 3.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FrameIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <rect x="1" y="2" width="12" height="10" rx="1" stroke="currentColor" strokeWidth="1.1" />
+      <path d="M1 5H13M1 9H13" stroke="currentColor" strokeWidth="1" />
+      <path d="M4 2V5M10 2V5M4 9V12M10 9V12" stroke="currentColor" strokeWidth="1" />
+    </svg>
   );
 }
