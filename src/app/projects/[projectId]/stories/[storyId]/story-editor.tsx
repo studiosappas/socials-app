@@ -29,9 +29,12 @@ import { SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
 import { convertToTask } from "@/lib/actions/todo";
+import { addStoryComment, fetchStoryComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
+import { ItemComments } from "@/components/ui/item-comments";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem, StoryLinkItem } from "@/lib/data/stories";
+import type { ProjectMemberOption } from "@/lib/data/post-comments";
 import type { StoryStatus } from "@/types/database";
 
 type StoryRecord = {
@@ -53,6 +56,8 @@ export function StoryEditor({
   links,
   mediaLibrary,
   canManage,
+  currentUserId,
+  members,
   hideBackLink = false,
 }: {
   projectId: string;
@@ -61,6 +66,8 @@ export function StoryEditor({
   links: StoryLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  currentUserId: string;
+  members: ProjectMemberOption[];
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
@@ -246,6 +253,14 @@ export function StoryEditor({
       )}
 
       <StoryMainForm projectId={projectId} story={story} links={links} canManage={canManage} />
+
+      <ItemComments
+        itemId={story.id}
+        currentUserId={currentUserId}
+        members={members}
+        fetchComments={fetchStoryComments}
+        addComment={(id, text) => addStoryComment(projectId, id, text)}
+      />
     </div>
   );
 }

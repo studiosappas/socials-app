@@ -9,12 +9,9 @@ export type LandingSectionMeta = { id: string; label: string };
 // the sections themselves.
 export const LANDING_SECTIONS: LandingSectionMeta[] = [
   { id: "hero", label: "Hero" },
-  { id: "workflow", label: "Everything flows together" },
-  { id: "demo", label: "Interactive demo" },
-  { id: "brand-intelligence", label: "Brand intelligence" },
-  { id: "assets", label: "Find assets" },
-  { id: "collaborate", label: "Collaborate" },
-  { id: "export", label: "Ready to publish" },
+  { id: "workflow", label: "The workflow" },
+  { id: "why", label: "Why it's different" },
+  { id: "cta", label: "Get started" },
 ];
 
 const ActiveSectionContext = createContext<string>(LANDING_SECTIONS[0].id);
@@ -30,15 +27,23 @@ export function SectionObserverProvider({ children }: { children: React.ReactNod
 
     const observer = new IntersectionObserver(
       (entries) => {
-        // Among sections currently crossing the 50% threshold, pick whichever
-        // is most visible -- avoids the active dot flickering between two
-        // adjacent sections during a fast scroll past both at once.
+        // Picks whichever section has the most VISIBLE PIXELS on screen right
+        // now, not the highest ratio of its own total height -- the workflow
+        // section is a multi-thousand-pixel pinned-scroll wrapper, so it can
+        // never cross a 50%-of-itself ratio threshold the way the older,
+        // viewport-sized sections could. Comparing raw intersectionRect
+        // height instead works correctly regardless of how tall a section is.
         const visible = entries.filter((e) => e.isIntersecting);
         if (visible.length === 0) return;
-        const mostVisible = visible.reduce((a, b) => (b.intersectionRatio > a.intersectionRatio ? b : a));
+        const mostVisible = visible.reduce((a, b) =>
+          b.intersectionRect.height > a.intersectionRect.height ? b : a,
+        );
         setActiveId(mostVisible.target.id);
       },
-      { threshold: 0.5 },
+      // Many small thresholds, not one -- this needs to keep recalculating
+      // throughout a long scroll through the (very tall) workflow section,
+      // not just once when it first/last crosses a single fixed ratio.
+      { threshold: Array.from({ length: 21 }, (_, i) => i / 20) },
     );
 
     elements.forEach((el) => observer.observe(el));

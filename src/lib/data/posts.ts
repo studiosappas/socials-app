@@ -1,7 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
-import type { PostStatus, PostType } from "@/types/database";
+import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
+import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -14,11 +15,14 @@ export type PostPageData = {
     scheduled_date: string | null;
     scheduled_time: string | null;
     status: PostStatus;
+    review_status: ReviewStatus;
   };
   assets: PostAssetItem[];
   links: PostLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  currentUserId: string;
+  members: ProjectMemberOption[];
 };
 
 export async function getPostPageData(
@@ -54,6 +58,15 @@ export async function getPostPageData(
   const { data: timeRow } = await supabase
     .from("posts")
     .select("scheduled_time")
+    .eq("id", postId)
+    .maybeSingle();
+
+  // Isolated the same way -- review_status is what Client Review's
+  // review-link submissions write to, and what the new "Approval Status"
+  // field below reads/writes manually.
+  const { data: reviewStatusRow } = await supabase
+    .from("posts")
+    .select("review_status")
     .eq("id", postId)
     .maybeSingle();
 
@@ -194,11 +207,19 @@ export async function getPostPageData(
     label: l.label,
   }));
 
+  const members = await getProjectMemberOptions(supabase, projectId);
+
   return {
-    post: { ...post, scheduled_time: timeRow?.scheduled_time ?? null },
+    post: {
+      ...post,
+      scheduled_time: timeRow?.scheduled_time ?? null,
+      review_status: reviewStatusRow?.review_status ?? "pending",
+    },
     assets,
     links: postLinks,
     mediaLibrary,
     canManage,
+    currentUserId: user!.id,
+    members,
   };
 }

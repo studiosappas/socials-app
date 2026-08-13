@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { getBrandMoodboard } from "@/lib/data/brand-moodboard";
 import { BriefBoard, type BriefTaskData } from "./brief-board";
 
 export default async function BriefPage({
@@ -92,5 +93,7 @@ export default async function BriefPage({
       })),
   }));
 
-  return <BriefBoard projectId={projectId} tasks={taskData} canManage={canManage} />;
+  const brandMoodboard = await getBrandMoodboard(supabase, projectId);
+
+  return <BriefBoard projectId={projectId} tasks={taskData} canManage={canManage} brandMoodboard={brandMoodboard} />;
 }

@@ -12,6 +12,9 @@ export function StoryCard({
   thumbnailUrl,
   scheduledDate,
   canManage,
+  selectionMode = false,
+  selected = false,
+  onToggleSelect,
 }: {
   projectId: string;
   storyId: string;
@@ -19,6 +22,9 @@ export function StoryCard({
   thumbnailUrl: string | null;
   scheduledDate: string | null;
   canManage: boolean;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (storyId: string) => void;
 }) {
   const [, startTransition] = useTransition();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -38,6 +44,11 @@ export function StoryCard({
       <Link
         href={href}
         title={name}
+        onClick={(e) => {
+          if (!selectionMode) return;
+          e.preventDefault();
+          onToggleSelect?.(storyId);
+        }}
         className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border transition-colors duration-150 ${
           thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
         }`}
@@ -51,17 +62,37 @@ export function StoryCard({
       </Link>
 
       {/* Same corner badge/icon as Grid's own scheduled indicator -- kept
-          top-left, matching the ⋮ menu's top-right so the two never collide. */}
-      {scheduledDate && (
+          top-left, matching the ⋮ menu's top-right so the two never collide.
+          While selecting for Review, the selection circle takes this same
+          corner instead, same reasoning as Grid's own slots. */}
+      {selectionMode ? (
         <span
-          title={`Scheduled for ${scheduledDate}`}
-          className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+          title={selected ? "Deselect" : "Select"}
+          className="pointer-events-none absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full"
         >
-          <ScheduledIcon className="h-2.5 w-2.5" />
+          {selected ? (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" className="fill-accent" stroke="white" strokeWidth="1" />
+              <path d="M4.8 8.2 6.8 10.1 11.2 5.7" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" className="fill-black/30" stroke="white" strokeWidth="1.2" />
+            </svg>
+          )}
         </span>
+      ) : (
+        scheduledDate && (
+          <span
+            title={`Scheduled for ${scheduledDate}`}
+            className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+          >
+            <ScheduledIcon className="h-2.5 w-2.5" />
+          </span>
+        )
       )}
 
-      {canManage && (
+      {canManage && !selectionMode && (
         <div ref={menuRef} className="absolute right-1 top-1 z-10">
           <button
             type="button"

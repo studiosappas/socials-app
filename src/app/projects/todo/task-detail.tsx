@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Avatar } from "@/components/ui/avatar";
-import { addTaskComment, fetchTaskComments } from "@/lib/actions/todo";
-import type { TaskCommentItem } from "@/lib/data/tasks";
+import { MentionField } from "@/components/ui/mention-input";
+import { addTaskComment, deleteTask, fetchTaskComments } from "@/lib/actions/todo";
+import type { TaskCommentItem, TeamMember } from "@/lib/data/tasks";
 import type { TaskItem } from "@/lib/data/tasks";
 import type { TaskStatus } from "@/types/database";
 
@@ -17,15 +19,19 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
 export function TaskDetail({
   task,
   currentUserId,
+  members,
   onStatusChange,
 }: {
   task: TaskItem;
   currentUserId: string;
+  members: TeamMember[];
   onStatusChange: (status: TaskStatus) => void;
 }) {
+  const router = useRouter();
   const [comments, setComments] = useState<TaskCommentItem[] | null>(null);
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,6 +46,13 @@ export function TaskDetail({
   function handlePillClick(status: TaskStatus) {
     if (status === task.status) return;
     onStatusChange(status);
+  }
+
+  function handleDelete() {
+    if (deleting) return;
+    if (!confirm("Delete this task? This can't be undone.")) return;
+    setDeleting(true);
+    deleteTask(task.id).then(() => router.refresh());
   }
 
   async function handleSubmitComment(e: React.FormEvent) {
@@ -71,21 +84,31 @@ export function TaskDetail({
       onClick={(e) => e.stopPropagation()}
       className="cursor-default rounded-md border border-t-0 border-border px-3 pb-3 pt-1"
     >
-      <div className="flex flex-wrap gap-2 py-2">
-        {STATUS_OPTIONS.map((opt) => (
-          <button
-            key={opt.value}
-            type="button"
-            onClick={() => handlePillClick(opt.value)}
-            className={`rounded-full border px-3 py-1 text-xs tracking-wide uppercase transition-colors duration-150 ${
-              task.status === opt.value
-                ? "border-accent bg-accent/10 text-accent"
-                : "border-border text-muted hover:border-foreground/40"
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-2 py-2">
+        <div className="flex flex-wrap gap-2">
+          {STATUS_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => handlePillClick(opt.value)}
+              className={`rounded-full border px-3 py-1 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                task.status === opt.value
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-border text-muted hover:border-foreground/40"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={deleting}
+          className="shrink-0 text-xs text-error transition-colors duration-150 hover:underline disabled:opacity-50"
+        >
+          {deleting ? "Deleting…" : "Delete Task"}
+        </button>
       </div>
 
       {task.sourceRef && task.sourceHref && (
@@ -113,10 +136,11 @@ export function TaskDetail({
       </div>
 
       <form onSubmit={handleSubmitComment} className="mt-2 flex items-center gap-2 border-t border-border pt-2">
-        <input
+        <MentionField
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Write a comment"
+          onChange={setText}
+          members={members}
+          placeholder="Write a comment — @ to mention"
           className="w-full border-0 border-b border-border bg-transparent py-1 text-sm focus:border-foreground focus:outline-none"
         />
         <button

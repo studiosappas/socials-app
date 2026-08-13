@@ -1,10 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { createStory } from "@/lib/actions/stories";
+import { createShareLink } from "@/lib/actions/share-links";
 import { StoryCard } from "./story-card";
 import { ShareMenuButton } from "../share-menu";
-import type { ShareLinkItem, PickerStory } from "@/lib/data/share-links";
+import { Button } from "@/components/ui/button";
+import { Toast } from "@/components/ui/toast";
+import type { ShareLinkItem } from "@/lib/data/share-links";
 
 export type StoryListItem = {
   id: string;
@@ -21,18 +24,58 @@ export function StoriesBoard({
   stories,
   canManage,
   shareLinks,
-  shareStories,
   shareTableMissing,
 }: {
   projectId: string;
   stories: StoryListItem[];
   canManage: boolean;
   shareLinks: ShareLinkItem[];
-  shareStories: PickerStory[];
   shareTableMissing: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
+
+  // Share for Review: selecting stories happens inline on the board itself
+  // (same multi-select-circle pattern as Media Library/Grid) instead of in
+  // a separate picker dialog.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedStoryIds, setSelectedStoryIds] = useState<Set<string>>(new Set());
+  const [sharing, startSharing] = useTransition();
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  function handleToggleSelect(storyId: string) {
+    setSelectedStoryIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(storyId)) next.delete(storyId);
+      else next.add(storyId);
+      return next;
+    });
+  }
+
+  function handleCancelSelection() {
+    setSelectionMode(false);
+    setSelectedStoryIds(new Set());
+  }
+
+  function handleShareForReview() {
+    const ids = Array.from(selectedStoryIds);
+    if (ids.length === 0) return;
+    startSharing(async () => {
+      const formData = new FormData();
+      for (const id of ids) formData.append("story_ids", id);
+      const result = await createShareLink(projectId, undefined, formData);
+      if (result?.success && result.token) {
+        const url = `${window.location.origin}/preview/${result.token}`;
+        await navigator.clipboard.writeText(url);
+        setToastMessage("Review link copied to clipboard");
+        setTimeout(() => setToastMessage(null), 2500);
+        handleCancelSelection();
+      } else {
+        setToastMessage(result?.message ?? "Couldn't create the review link.");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
+    });
+  }
 
   // Client-side filter -- matches against name, notes, and the scheduled
   // date, so "type to search" finds a story by any of the three without a
@@ -78,10 +121,9 @@ export function StoriesBoard({
             <ShareMenuButton
               projectId={projectId}
               links={shareLinks}
-              items={shareStories}
-              contentType="story"
               canManage={canManage}
               tableMissing={shareTableMissing}
+              onEnterSelectionMode={() => setSelectionMode(true)}
             />
           )}
           {canManage && (
@@ -108,6 +150,9 @@ export function StoriesBoard({
             thumbnailUrl={story.thumbnailUrl}
             scheduledDate={story.scheduledDate}
             canManage={canManage}
+            selectionMode={selectionMode}
+            selected={selectedStoryIds.has(story.id)}
+            onToggleSelect={handleToggleSelect}
           />
         ))}
         {hasMore && (
@@ -137,6 +182,25 @@ export function StoriesBoard({
           View More +
         </button>
       )}
+
+      {selectionMode && (
+        <div className="fixed inset-x-0 bottom-0 z-30 flex items-center justify-center gap-3 border-t border-border bg-background px-4 py-3 shadow-[0_-2px_10px_rgba(0,0,0,0.06)]">
+          <span className="text-xs tracking-wide text-muted uppercase">{selectedStoryIds.size} selected</span>
+          <Button type="button" variant="secondary" radius="none" onClick={handleCancelSelection}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            radius="none"
+            onClick={handleShareForReview}
+            disabled={selectedStoryIds.size === 0 || sharing}
+          >
+            {sharing ? "Sharing…" : "Share for Review"}
+          </Button>
+        </div>
+      )}
+      <Toast message={toastMessage} />
     </div>
   );
 }

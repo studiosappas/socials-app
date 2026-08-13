@@ -88,7 +88,6 @@ export default async function StoriesPage({
       stories={storyItems}
       canManage={canManage}
       shareLinks={shareData.links}
-      shareStories={shareData.stories}
       shareTableMissing={shareData.tableMissing}
     />
   );

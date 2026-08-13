@@ -1,32 +1,32 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { motion, useInView } from "framer-motion";
-import { ScrollReveal } from "../motion/scroll-reveal";
-import { BrandOrbit } from "./section-04-orbit";
-import {
-  BRAND_INTELLIGENCE_CONTENT,
-  DEMO_BRAND_DOCUMENTS,
-  DEMO_SPECTRUM,
-  DEMO_BRAND_ACCORDION,
-  DEMO_AI_RECOMMENDATIONS,
-  EASE,
-} from "@/lib/landing";
+import { motion } from "framer-motion";
+import { BrandOrbit } from "../sections/section-04-orbit";
+import { EASE } from "@/lib/landing";
+import { useLandingContent } from "@/lib/landing/content-context";
+import type { WorkflowStageProps } from "./workflow-types";
 
 const labelClass = "text-xs font-semibold tracking-wide uppercase";
 
 type Stage = "idle" | "uploading" | "analyzing" | "spectrum" | "summary" | "recommendations";
 const STAGE_ORDER: Stage[] = ["idle", "uploading", "analyzing", "spectrum", "summary", "recommendations"];
 
-export function BrandIntelligenceSection() {
+// The "Intelligence" stage -- this is almost entirely the same timed
+// sequence the old section-04-brand-intelligence.tsx already built
+// (documents flow into the orb, the spectrum reacts, summaries appear),
+// just triggered by this stage's own `active` prop (scroll progress or
+// mobile inView, see pinned-stages.tsx/sequential-stages.tsx) instead of
+// its own standalone useInView. No explanatory copy -- the animation is
+// the explanation, per the brief.
+export function StageIntelligence({ active }: WorkflowStageProps) {
+  const { DEMO_BRAND_DOCUMENTS, DEMO_SPECTRUM, DEMO_BRAND_ACCORDION, DEMO_AI_RECOMMENDATIONS } = useLandingContent();
   const [stage, setStage] = useState<Stage>("idle");
   const [tileCount, setTileCount] = useState(0);
   const startedRef = useRef(false);
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const inView = useInView(triggerRef, { once: true, margin: "-20%" });
 
-  function runSequence() {
-    if (startedRef.current) return;
+  useEffect(() => {
+    if (!active || startedRef.current) return;
     startedRef.current = true;
 
     let elapsed = 0;
@@ -46,24 +46,15 @@ export function BrandIntelligenceSection() {
     setTimeout(() => setStage("summary"), elapsed);
     elapsed += 900;
     setTimeout(() => setStage("recommendations"), elapsed);
-  }
-
-  useEffect(() => {
-    if (inView) runSequence();
-  }, [inView]);
+  }, [active, DEMO_BRAND_DOCUMENTS]);
 
   const stageIndex = STAGE_ORDER.indexOf(stage);
   const spinning = stage === "analyzing";
   const r = DEMO_AI_RECOMMENDATIONS;
 
   return (
-    <section id="brand-intelligence" className="mx-auto flex max-w-5xl flex-col gap-14 px-4 py-24 sm:px-8">
-      <ScrollReveal className="flex flex-col items-center gap-4 text-center">
-        <h2 className="text-3xl font-light sm:text-4xl">{BRAND_INTELLIGENCE_CONTENT.headline}</h2>
-        <p className="max-w-lg text-sm text-muted">{BRAND_INTELLIGENCE_CONTENT.subhead}</p>
-      </ScrollReveal>
-
-      <div ref={triggerRef} className="h-px w-full" />
+    <div className="flex w-full max-w-sm flex-col items-center gap-3 overflow-y-auto py-2" style={{ maxHeight: "90dvh" }}>
+      <p className="text-xs tracking-wide text-muted uppercase">03 — Intelligence</p>
 
       <BrandOrbit tileCount={tileCount} spinning={spinning} refreshing={stage === "analyzing"} />
 
@@ -72,23 +63,19 @@ export function BrandIntelligenceSection() {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, ease: EASE }}
-          className="mx-auto flex w-full max-w-md flex-col gap-4"
+          className="flex w-full flex-col gap-4"
         >
           <div className="flex items-center justify-between">
             <span className={labelClass}>Brand Spectrum</span>
             <span className={labelClass}>What the AI Learned</span>
           </div>
-          <p className="w-fit text-xs tracking-wide text-muted uppercase">AI Suggest Spectrum</p>
-          <div className="flex flex-col gap-4">
-            {DEMO_SPECTRUM.map((axis) => (
+          <div className="flex flex-col gap-3">
+            {DEMO_SPECTRUM.slice(0, 3).map((axis) => (
               <label key={axis.id} className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-[10px] tracking-wide text-muted uppercase">
                   <span>{axis.leftLabel}</span>
                   <span>{axis.rightLabel}</span>
                 </div>
-                {/* Real native <input type="range">, not a custom dot-on-
-                    track div -- matches SpectrumSlider in overview-panels.tsx
-                    exactly (h-px w-full accent-foreground). */}
                 <input
                   type="range"
                   min={0}
@@ -102,17 +89,10 @@ export function BrandIntelligenceSection() {
           </div>
 
           <div className="flex flex-col">
-            {DEMO_BRAND_ACCORDION.map((field) => (
+            {DEMO_BRAND_ACCORDION.slice(0, 2).map((field) => (
               <ExpandableField key={field.label} label={field.label} value={field.value} />
             ))}
           </div>
-
-          <button
-            type="button"
-            className="w-fit rounded-md border border-border bg-card px-4 py-2 text-sm transition-colors duration-150 hover:border-foreground/30"
-          >
-            Refresh AI Analysis
-          </button>
         </motion.div>
       )}
 
@@ -121,35 +101,14 @@ export function BrandIntelligenceSection() {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, ease: EASE }}
-          className="mx-auto flex w-full max-w-md flex-col gap-5"
+          className="grid w-full grid-cols-3 gap-x-4 text-center"
         >
-          <div className="flex items-center justify-between">
-            <span className={labelClass}>AI Recommendations</span>
-            <span className="text-xs tracking-wide text-muted uppercase">Refresh</span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-x-4 gap-y-5 text-center">
-            <RecommendationTile label="Brand Health" big={`${r.brandHealthPct}%`} small={r.brandHealthWord} />
-            <RecommendationTile label="Today" big={r.todayLabel} bigSmall />
-            <RecommendationTile label="Next Gap" big={r.nextGapLabel} bigSmall />
-            <RecommendationTile label="Tone" big={r.toneLabel} />
-            <RecommendationTile label="Content Mix" big={`${r.contentMixPct}%`} small={r.contentMixLabel} />
-            <RecommendationTile label="CTA Usage" big={`${r.ctaUsagePct}%`} small={r.ctaUsageLabel} />
-          </div>
-
-          <div className="flex flex-col gap-2">
-            <span className={labelClass}>AI Summary</span>
-            <div className="border border-border p-3 text-sm text-muted">
-              <ul className="flex flex-col gap-1.5">
-                {r.summaryNotices.map((notice, i) => (
-                  <li key={i}>{notice}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
+          <RecommendationTile label="Brand Health" big={`${r.brandHealthPct}%`} small={r.brandHealthWord} />
+          <RecommendationTile label="Today" big={r.todayLabel} bigSmall />
+          <RecommendationTile label="Tone" big={r.toneLabel} />
         </motion.div>
       )}
-    </section>
+    </div>
   );
 }
 

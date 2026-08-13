@@ -22,6 +22,8 @@ export default async function InterceptedPostPage({
         links={data.links}
         mediaLibrary={data.mediaLibrary}
         canManage={data.canManage}
+        currentUserId={data.currentUserId}
+        members={data.members}
         hideBackLink
       />
     </Modal>

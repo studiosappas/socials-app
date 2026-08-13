@@ -7,6 +7,3 @@ export const DEMO_EXPORT_FEED: DemoExportSample[] = [
   { id: "e4", image: { src: "export/story-1.jpg", alt: "Exported story 1" }, aspect: "9/16", kind: "story" },
   { id: "e5", image: { src: "export/story-2.jpg", alt: "Exported story 2" }, aspect: "9/16", kind: "story" },
 ];
-
-export const DEMO_PDF_PAGE_COUNT = 4;
-export const DEMO_CLIENT_GALLERY_NAME = "Q3 Launch — Client Review";

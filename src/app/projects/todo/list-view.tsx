@@ -67,7 +67,12 @@ export function ListView({
         tomorrow={tomorrow}
       />
       {expandedTaskId === task.id && (
-        <TaskDetail task={task} currentUserId={currentUserId} onStatusChange={(status) => onStatusChange(task.id, status)} />
+        <TaskDetail
+          task={task}
+          currentUserId={currentUserId}
+          members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
+          onStatusChange={(status) => onStatusChange(task.id, status)}
+        />
       )}
     </div>
   );

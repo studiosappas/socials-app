@@ -5,9 +5,11 @@ import { ScrollReveal } from "../motion/scroll-reveal";
 import { LandingCtaLink } from "../landing-cta-link";
 import { HeroPhraseSequence } from "./section-01-hero-phrase";
 import { HeroPreview } from "./section-01-hero-preview";
-import { HERO_CONTENT, HERO_PHRASES, type HeroPreviewScreen } from "@/lib/landing";
+import type { HeroPreviewScreen } from "@/lib/landing";
+import { useLandingContent } from "@/lib/landing/content-context";
 
 export function HeroSection() {
+  const { HERO_CONTENT, HERO_PHRASES } = useLandingContent();
   const [screen, setScreen] = useState<HeroPreviewScreen>(HERO_PHRASES[0].screens[0]);
 
   return (

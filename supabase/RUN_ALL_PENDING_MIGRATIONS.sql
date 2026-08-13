@@ -659,6 +659,24 @@ begin
       jsonb_build_object(
         'id', sli.id,
         'type', case when sli.post_id is not null then 'post' else 'story' end,
+        -- postId/storyId (the real content row, not just this share-link-item's
+        -- own id) plus caption/notes/reviewStatus -- Client Review needs
+        -- something to write approval/notes back to and something to show
+        -- as the current state, none of which the anonymous read-only
+        -- preview needed before Client Review existed.
+        'postId', sli.post_id,
+        'storyId', sli.story_id,
+        'caption', coalesce((select p.caption from posts p where p.id = sli.post_id), ''),
+        'notes', coalesce(
+          (select p.notes from posts p where p.id = sli.post_id),
+          (select s.notes from stories s where s.id = sli.story_id),
+          ''
+        ),
+        'reviewStatus', coalesce(
+          (select p.review_status from posts p where p.id = sli.post_id),
+          (select s.review_status from stories s where s.id = sli.story_id),
+          'pending'
+        ),
         'media', case
           when sli.post_id is not null then (
             select coalesce(jsonb_agg(jsonb_build_object(
@@ -693,12 +711,162 @@ begin
   return jsonb_build_object(
     'title', v_link.title,
     'projectName', (select name from projects where id = v_link.project_id),
-    'items', v_items
+    'items', v_items,
+    -- Project member id+name, nothing else -- lets the anonymous reviewer's
+    -- Notes field @mention a real team member (see mention-input.tsx),
+    -- bypassing project_members' authenticated-only RLS the same way every
+    -- other field on this response already does.
+    'members', (
+      select coalesce(jsonb_agg(jsonb_build_object('id', pm.user_id, 'name', pr.name)), '[]'::jsonb)
+      from project_members pm
+      join profiles pr on pr.id = pm.user_id
+      where pm.project_id = v_link.project_id
+    )
   );
 end;
 $$;
 
 grant execute on function public.get_shared_preview(text) to anon, authenticated;
+
+-- Client Review write-back (idempotent re-run): see schema.sql's own
+-- comment on this block for the full reasoning -- the token itself is the
+-- credential (no login), each function verifies a share_link_items row
+-- actually connects this token to this post/story before writing.
+create or replace function public.set_post_review_status_by_token(p_token text, p_post_id uuid, p_status text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if p_status not in ('pending', 'approved', 'changes_requested') then
+    raise exception 'Invalid status';
+  end if;
+  if not exists (
+    select 1 from share_link_items sli
+    join share_links sl on sl.id = sli.share_link_id
+    where sl.token = p_token and sli.post_id = p_post_id
+  ) then
+    raise exception 'Not authorized';
+  end if;
+  update public.posts set review_status = p_status where id = p_post_id;
+end;
+$$;
+
+grant execute on function public.set_post_review_status_by_token(text, uuid, text) to anon, authenticated;
+
+create or replace function public.set_story_review_status_by_token(p_token text, p_story_id uuid, p_status text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if p_status not in ('pending', 'approved', 'changes_requested') then
+    raise exception 'Invalid status';
+  end if;
+  if not exists (
+    select 1 from share_link_items sli
+    join share_links sl on sl.id = sli.share_link_id
+    where sl.token = p_token and sli.story_id = p_story_id
+  ) then
+    raise exception 'Not authorized';
+  end if;
+  update public.stories set review_status = p_status where id = p_story_id;
+end;
+$$;
+
+grant execute on function public.set_story_review_status_by_token(text, uuid, text) to anon, authenticated;
+
+create or replace function public.set_post_notes_by_token(p_token text, p_post_id uuid, p_notes text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1 from share_link_items sli
+    join share_links sl on sl.id = sli.share_link_id
+    where sl.token = p_token and sli.post_id = p_post_id
+  ) then
+    raise exception 'Not authorized';
+  end if;
+  update public.posts set notes = p_notes where id = p_post_id;
+end;
+$$;
+
+grant execute on function public.set_post_notes_by_token(text, uuid, text) to anon, authenticated;
+
+create or replace function public.set_story_notes_by_token(p_token text, p_story_id uuid, p_notes text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1 from share_link_items sli
+    join share_links sl on sl.id = sli.share_link_id
+    where sl.token = p_token and sli.story_id = p_story_id
+  ) then
+    raise exception 'Not authorized';
+  end if;
+  update public.stories set notes = p_notes where id = p_story_id;
+end;
+$$;
+
+grant execute on function public.set_story_notes_by_token(text, uuid, text) to anon, authenticated;
+
+-- Purely for targeting the "client left feedback" notification (see
+-- notifyProjectMembers "review_comment" in share-preview-review.ts) -- not
+-- used for the actual status/notes writes above, which already have their
+-- own reachability checks. Same token+item reachability check as those,
+-- since this still hands back project_id to an anonymous caller.
+create or replace function public.get_review_notify_context_by_token(p_token text, p_post_id uuid, p_story_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_project_id uuid;
+  v_title text;
+begin
+  select sl.project_id into v_project_id
+  from share_link_items sli
+  join share_links sl on sl.id = sli.share_link_id
+  where sl.token = p_token
+    and ((p_post_id is not null and sli.post_id = p_post_id) or (p_story_id is not null and sli.story_id = p_story_id))
+  limit 1;
+
+  if v_project_id is null then
+    raise exception 'Not authorized';
+  end if;
+
+  if p_post_id is not null then
+    select left(coalesce(p.caption, ''), 60) into v_title from posts p where p.id = p_post_id;
+  else
+    select s.name into v_title from stories s where s.id = p_story_id;
+  end if;
+
+  return jsonb_build_object(
+    'projectId', v_project_id,
+    'title', nullif(v_title, ''),
+    -- So the server action can resolve @mentions in the client's notes
+    -- text (parseMentions) without a second query that anon RLS would
+    -- just block -- same reasoning as get_shared_preview's own 'members'.
+    'members', (
+      select coalesce(jsonb_agg(jsonb_build_object('id', pm.user_id, 'name', pr.name)), '[]'::jsonb)
+      from project_members pm
+      join profiles pr on pr.id = pm.user_id
+      where pm.project_id = v_project_id
+    )
+  );
+end;
+$$;
+
+grant execute on function public.get_review_notify_context_by_token(text, uuid, uuid) to anon, authenticated;
 
 create or replace function public.is_media_path_shared(p_path text)
 returns boolean
@@ -900,6 +1068,78 @@ end;
 $$;
 
 grant execute on function public.set_story_review_status(uuid, text) to authenticated;
+
+-- ---------- Landing Demo Content Manager ----------
+alter table public.profiles add column if not exists is_admin boolean not null default false;
+
+create table if not exists public.landing_demo_content (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.landing_demo_content enable row level security;
+
+drop policy if exists "Anyone can read landing demo content" on public.landing_demo_content;
+create policy "Anyone can read landing demo content"
+  on public.landing_demo_content for select
+  to anon, authenticated
+  using (true);
+
+drop policy if exists "Admins manage landing demo content" on public.landing_demo_content;
+create policy "Admins manage landing demo content"
+  on public.landing_demo_content for all
+  to authenticated
+  using (exists (select 1 from public.profiles where id = auth.uid() and is_admin))
+  with check (exists (select 1 from public.profiles where id = auth.uid() and is_admin));
+
+insert into storage.buckets (id, name, public)
+values ('landing-media', 'landing-media', true)
+on conflict (id) do nothing;
+
+drop policy if exists "Anyone can read landing media" on storage.objects;
+create policy "Anyone can read landing media"
+  on storage.objects for select
+  to anon, authenticated
+  using (bucket_id = 'landing-media');
+
+drop policy if exists "Admins manage landing media" on storage.objects;
+create policy "Admins manage landing media"
+  on storage.objects for all
+  to authenticated
+  using (bucket_id = 'landing-media' and exists (select 1 from public.profiles where id = auth.uid() and is_admin))
+  with check (bucket_id = 'landing-media' and exists (select 1 from public.profiles where id = auth.uid() and is_admin));
+
+-- AI Design Generation: purely cosmetic badge on a media_assets row created
+-- by Brief's "Generate Design", never gates anything.
+alter table public.media_assets
+  add column if not exists generated_by_ai boolean not null default false;
+
+-- Brand Moodboard: a project's permanent visual knowledge base, shown on the
+-- Brief page and fed as context to "Generate Design". Files live in the
+-- existing project-media bucket -- its storage policies already key on the
+-- projectId path prefix, so no new bucket/storage policy is needed.
+create table if not exists public.brand_moodboard_items (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  category text not null check (
+    category in ('logo', 'font', 'color', 'guideline', 'campaign', 'reference', 'texture', 'illustration', 'marketing', 'other')
+  ),
+  storage_path text not null,
+  label text not null default '',
+  notes text not null default '',
+  created_at timestamptz not null default now()
+);
+
+alter table public.brand_moodboard_items enable row level security;
+
+drop policy if exists "Members can view brand moodboard" on public.brand_moodboard_items;
+create policy "Members can view brand moodboard" on public.brand_moodboard_items for select to authenticated
+  using (public.is_project_member(project_id));
+drop policy if exists "Admins manage brand moodboard" on public.brand_moodboard_items;
+create policy "Admins manage brand moodboard" on public.brand_moodboard_items for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
 
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.

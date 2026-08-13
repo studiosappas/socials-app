@@ -1,5 +1,6 @@
 import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
+import type { ReviewStatus } from "@/types/database";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -13,6 +14,15 @@ export type SharedGalleryMedia = {
 export type SharedGalleryItem = {
   id: string;
   type: "post" | "story";
+  // The real post/story row this item points at -- exactly one of the two
+  // is set, matching item.type. Needed so the gallery has something to call
+  // set_{post,story}_review_status_by_token/set_{post,story}_notes_by_token
+  // with.
+  postId: string | null;
+  storyId: string | null;
+  caption: string;
+  notes: string;
+  reviewStatus: ReviewStatus;
   media: SharedGalleryMedia[];
 };
 
@@ -20,6 +30,7 @@ export type SharedGalleryData = {
   title: string;
   projectName: string;
   items: SharedGalleryItem[];
+  members: { id: string; name: string }[];
 };
 
 // Public, unauthenticated read path -- get_shared_preview is a SECURITY
@@ -60,9 +71,19 @@ export const getSharedPreviewData = cache(async function getSharedPreviewData(
   return {
     title: data.title,
     projectName: data.projectName,
+    // Falls back to [] on a not-yet-migrated database -- the RPC didn't
+    // return `members` before this feature existed, same isolated-query
+    // reasoning as every other "new column might not exist yet" spot in
+    // this codebase, just applied to an RPC response instead of a select.
+    members: data.members ?? [],
     items: data.items.map((item) => ({
       id: item.id,
       type: item.type,
+      postId: item.postId,
+      storyId: item.storyId,
+      caption: item.caption,
+      notes: item.notes,
+      reviewStatus: item.reviewStatus,
       media: item.media.map((m) => ({
         mediaAssetId: m.mediaAssetId,
         // Same "edited preview wins" fallback used everywhere else this

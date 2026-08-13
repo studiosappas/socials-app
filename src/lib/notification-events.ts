@@ -14,4 +14,5 @@ export const NOTIFICATION_EVENTS: { key: string; label: string }[] = [
   { key: "brief_comment", label: "New comment in Brief" },
   { key: "new_uploaded_assets", label: "Someone uploads new assets" },
   { key: "review_comment", label: "A client leaves a review comment" },
+  { key: "mentioned", label: "Someone mentions you" },
 ];

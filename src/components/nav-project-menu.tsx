@@ -12,7 +12,6 @@ const PROJECT_PAGES = [
   { href: "calendar", label: "Calendar" },
   { href: "assets", label: "Assets" },
   { href: "brief", label: "Brief" },
-  { href: "review", label: "Review" },
   { href: "settings", label: "Settings" },
 ];
 

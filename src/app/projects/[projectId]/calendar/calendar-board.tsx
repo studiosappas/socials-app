@@ -24,7 +24,9 @@ import {
 } from "@/lib/actions/calendar";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { MentionField } from "@/components/ui/mention-input";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import type { ProjectMemberOption } from "@/lib/data/post-comments";
 import type { PostStatus, StoryStatus } from "@/types/database";
 
 export type CalendarItem = {
@@ -71,6 +73,7 @@ export function CalendarBoard({
   cells,
   unscheduled,
   canManage,
+  members,
 }: {
   projectId: string;
   monthLabel: string;
@@ -79,6 +82,7 @@ export function CalendarBoard({
   cells: CalendarCell[];
   unscheduled: CalendarItem[];
   canManage: boolean;
+  members: ProjectMemberOption[];
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -288,6 +292,7 @@ export function CalendarBoard({
                       canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
                     }
                     canManage={canManage}
+                    members={members}
                     isEditingNote={editingNoteDate === cell.date}
                     onStartEditNote={() => setEditingNoteDate(cell.date)}
                     onCancelEditNote={() => setEditingNoteDate(null)}
@@ -409,6 +414,7 @@ function DayCell({
   onOpenDetail,
   onContextMenu,
   canManage,
+  members,
   isEditingNote,
   onStartEditNote,
   onCancelEditNote,
@@ -421,11 +427,23 @@ function DayCell({
   onOpenDetail: () => void;
   onContextMenu?: (x: number, y: number) => void;
   canManage: boolean;
+  members: ProjectMemberOption[];
   isEditingNote: boolean;
   onStartEditNote: () => void;
   onCancelEditNote: () => void;
   onSaveNote: (body: string) => void;
 }) {
+  const [noteText, setNoteText] = useState(cell.note ?? "");
+  // Adjust state during render (this codebase's own convention, see
+  // post-editor.tsx's prevAssets) rather than an effect -- only reset on the
+  // false->true transition into edit mode, not on every cell.note change,
+  // which would stomp in-progress typing once revalidatePath refreshes
+  // server data mid-edit.
+  const [prevIsEditingNote, setPrevIsEditingNote] = useState(isEditingNote);
+  if (isEditingNote !== prevIsEditingNote) {
+    setPrevIsEditingNote(isEditingNote);
+    if (isEditingNote) setNoteText(cell.note ?? "");
+  }
   const { isOver, setNodeRef } = useDroppable({
     id: `day-${cell.date}`,
     data: { date: cell.date },
@@ -468,13 +486,17 @@ function DayCell({
     }, DOUBLE_CLICK_WINDOW_MS);
   }
 
-  function handleNoteKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+  function handleNoteKeyDown(e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) {
     e.stopPropagation();
+    // MentionField already consumed this key for its own dropdown
+    // (navigating/selecting a mention, or dismissing it) -- don't also
+    // save/cancel the note on the same keystroke.
+    if (e.defaultPrevented) return;
     if (e.key === "Escape") {
       onCancelEditNote();
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      onSaveNote(e.currentTarget.value);
+      onSaveNote(noteText);
     }
   }
 
@@ -519,14 +541,17 @@ function DayCell({
           the same bordered-frame language as the content chips/tiles below
           it, not a separate emoji indicator. */}
       {isEditingNote ? (
-        <textarea
+        <MentionField
+          multiline
           autoFocus
-          defaultValue={cell.note ?? ""}
+          value={noteText}
+          onChange={setNoteText}
+          members={members}
           rows={2}
-          placeholder="Note..."
+          placeholder="Note... (@ to mention)"
           onClick={(e) => e.stopPropagation()}
           onKeyDown={handleNoteKeyDown}
-          onBlur={(e) => onSaveNote(e.currentTarget.value)}
+          onBlur={() => onSaveNote(noteText)}
           className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] focus:outline-none sm:text-[10px]"
         />
       ) : (
@@ -666,7 +691,7 @@ function ExpandedItemTile({
       <Link
         href={item.href}
         title={contentTypeLabel(item)}
-        className={`relative block aspect-[3/4] w-full overflow-hidden border transition-colors duration-150 ${
+        className={`group relative block aspect-[3/4] w-full overflow-hidden border transition-colors duration-150 ${
           published ? "border-foreground/60 bg-black/[.03]" : "border-border bg-black/[.03] hover:border-foreground/30"
         }`}
       >
@@ -685,6 +710,16 @@ function ExpandedItemTile({
         {published && <div className="absolute inset-0 bg-black/40" />}
         <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">
           {contentTypeLabel(item)}
+        </span>
+        {/* Comments live on the post/story editor itself (see ItemComments
+            there) -- this is just a discoverable affordance pointing at the
+            same destination the whole tile already links to, not a second
+            comment UI. */}
+        <span
+          title="Comments"
+          className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+        >
+          💬
         </span>
         {canManage && (
           // A <span role="button">, not a real <button> -- this already sits

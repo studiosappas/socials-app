@@ -1,10 +1,12 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { format } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
 import { logActivity } from "@/lib/activity-log";
 import { ensureAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
+import { notifyMentions } from "@/lib/notifications";
 
 export type CalendarItemType = "post" | "story";
 
@@ -17,9 +19,20 @@ export async function scheduleItem(
   const supabase = await createClient();
   const table = itemType === "post" ? "posts" : "stories";
 
+  // Reverse of the lazy auto-publish heuristic in calendar/page.tsx: a
+  // Published item dragged onto a future date is no longer "already
+  // published" and should go back to looking like ordinary scheduled
+  // content (white cell) until that date actually arrives again.
+  const { data: current } = await supabase.from(table).select("status").eq("id", itemId).single();
+  const todayStr = format(new Date(), "yyyy-MM-dd");
+  const shouldResetToScheduled = current?.status === "published" && !!date && date > todayStr;
+
   const { error } = await supabase
     .from(table)
-    .update({ scheduled_date: date })
+    .update({
+      scheduled_date: date,
+      ...(shouldResetToScheduled ? { status: "scheduled" } : {}),
+    })
     .eq("id", itemId);
 
   if (error) {
@@ -167,6 +180,19 @@ export async function upsertCalendarNote(
   } else {
     const { error } = await supabase.from("calendar_notes").insert({ project_id: projectId, date, body });
     if (error) return { success: false, message: error.message };
+  }
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    const { data: profile } = await supabase.from("profiles").select("name").eq("id", user.id).single();
+    await notifyMentions(supabase, projectId, body, {
+      notifierName: profile?.name ?? "Someone",
+      itemLabel: "a calendar note",
+      link: `/projects/${projectId}/calendar`,
+      excludeUserId: user.id,
+    });
   }
 
   revalidatePath(`/projects/${projectId}/calendar`);

@@ -1,3 +1,10 @@
+// landing_demo_content.value can hold any JSON-serializable shape (a plain
+// string, an array, or an object, depending on the content key) -- unlike
+// every other jsonb column in this app (annotation_json, cover_transform,
+// etc, all always objects, typed `object | null`), so it needs a real Json
+// union instead of that narrower convention.
+export type Json = string | number | boolean | null | { [key: string]: Json } | Json[];
+
 // "designer" is a legacy value kept for existing rows -- new invites use
 // "editor" instead (Settings > Team & Permissions' 5-role set).
 export type ProjectRole = "owner" | "admin" | "designer" | "editor" | "viewer" | "client";
@@ -35,6 +42,18 @@ export type AssetType =
 export type AssetCollectionAiStatus = "not_configured" | "indexing" | "analyzed" | "error";
 export type BriefItemKind = "link" | "image";
 export type BriefFrameSection = "frames" | "text";
+export type BrandMoodboardCategory =
+  | "logo"
+  | "font"
+  | "color"
+  | "guideline"
+  | "campaign"
+  | "reference"
+  | "texture"
+  | "illustration"
+  | "marketing"
+  | "other";
+export type GeneratedDesignPostType = "post" | "story" | "reel_cover" | "newsletter";
 export type AiInsights = {
   brand_health_pct: number;
   today_label: string;
@@ -51,9 +70,22 @@ export interface Database {
   public: {
     Tables: {
       profiles: {
-        Row: { id: string; name: string; avatar_url: string | null; email: string | null; created_at: string };
-        Insert: { id: string; name: string; avatar_url?: string | null; email?: string | null };
-        Update: { name?: string; avatar_url?: string | null; email?: string | null };
+        Row: {
+          id: string;
+          name: string;
+          avatar_url: string | null;
+          email: string | null;
+          is_admin: boolean;
+          created_at: string;
+        };
+        Insert: { id: string; name: string; avatar_url?: string | null; email?: string | null; is_admin?: boolean };
+        Update: { name?: string; avatar_url?: string | null; email?: string | null; is_admin?: boolean };
+        Relationships: [];
+      };
+      landing_demo_content: {
+        Row: { key: string; value: Json; updated_at: string };
+        Insert: { key: string; value: Json; updated_at?: string };
+        Update: { value?: Json; updated_at?: string };
         Relationships: [];
       };
       projects: {
@@ -208,6 +240,7 @@ export interface Database {
           annotation_json: object | null;
           poster_storage_path: string | null;
           folder_id: string | null;
+          generated_by_ai: boolean;
           created_at: string;
         };
         Insert: {
@@ -217,6 +250,8 @@ export interface Database {
           uploaded_by: string;
           poster_storage_path?: string | null;
           folder_id?: string | null;
+          annotation_json?: object | null;
+          generated_by_ai?: boolean;
         };
         Update: {
           storage_path?: string;
@@ -225,6 +260,7 @@ export interface Database {
           annotation_json?: object | null;
           poster_storage_path?: string | null;
           folder_id?: string | null;
+          generated_by_ai?: boolean;
         };
         Relationships: [];
       };
@@ -451,6 +487,30 @@ export interface Database {
         Update: {
           preview_storage_path?: string | null;
           annotation_json?: object | null;
+        };
+        Relationships: [];
+      };
+      brand_moodboard_items: {
+        Row: {
+          id: string;
+          project_id: string;
+          category: BrandMoodboardCategory;
+          storage_path: string;
+          label: string;
+          notes: string;
+          created_at: string;
+        };
+        Insert: {
+          project_id: string;
+          category: BrandMoodboardCategory;
+          storage_path: string;
+          label?: string;
+          notes?: string;
+        };
+        Update: {
+          category?: BrandMoodboardCategory;
+          label?: string;
+          notes?: string;
         };
         Relationships: [];
       };
@@ -727,13 +787,43 @@ export interface Database {
         Row: { id: string; post_id: string; author_id: string; text: string; created_at: string };
         Insert: { post_id: string; author_id: string; text: string };
         Update: never;
-        Relationships: [];
+        Relationships: [
+          {
+            foreignKeyName: "post_comments_post_id_fkey";
+            columns: ["post_id"];
+            isOneToOne: false;
+            referencedRelation: "posts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "post_comments_author_id_fkey";
+            columns: ["author_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       story_comments: {
         Row: { id: string; story_id: string; author_id: string; text: string; created_at: string };
         Insert: { story_id: string; author_id: string; text: string };
         Update: never;
-        Relationships: [];
+        Relationships: [
+          {
+            foreignKeyName: "story_comments_story_id_fkey";
+            columns: ["story_id"];
+            isOneToOne: false;
+            referencedRelation: "stories";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "story_comments_author_id_fkey";
+            columns: ["author_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       activity_log: {
         Row: { id: string; project_id: string; actor_name: string; action: string; created_at: string };
@@ -860,6 +950,26 @@ export interface Database {
         Args: { p_story_id: string; p_status: ReviewStatus };
         Returns: void;
       };
+      set_post_review_status_by_token: {
+        Args: { p_token: string; p_post_id: string; p_status: ReviewStatus };
+        Returns: void;
+      };
+      set_story_review_status_by_token: {
+        Args: { p_token: string; p_story_id: string; p_status: ReviewStatus };
+        Returns: void;
+      };
+      set_post_notes_by_token: {
+        Args: { p_token: string; p_post_id: string; p_notes: string };
+        Returns: void;
+      };
+      set_story_notes_by_token: {
+        Args: { p_token: string; p_story_id: string; p_notes: string };
+        Returns: void;
+      };
+      get_review_notify_context_by_token: {
+        Args: { p_token: string; p_post_id: string | null; p_story_id: string | null };
+        Returns: ReviewNotifyContext;
+      };
     };
   };
 }
@@ -875,11 +985,25 @@ export type SharedPreviewMediaItem = {
 export type SharedPreviewItem = {
   id: string;
   type: "post" | "story";
+  postId: string | null;
+  storyId: string | null;
+  caption: string;
+  notes: string;
+  reviewStatus: ReviewStatus;
   media: SharedPreviewMediaItem[];
 };
+
+export type SharedPreviewMemberOption = { id: string; name: string };
 
 export type SharedPreviewPayload = {
   title: string;
   projectName: string;
   items: SharedPreviewItem[];
+  members: SharedPreviewMemberOption[];
+};
+
+export type ReviewNotifyContext = {
+  projectId: string;
+  title: string | null;
+  members: SharedPreviewMemberOption[];
 };

@@ -46,35 +46,6 @@ export default async function ProjectLayout({
     );
   }
 
-  // Client Review Mode should read as "the real app, at full size" -- the
-  // same immersive feel as the anonymous /preview/[token] gallery it's
-  // modeled on -- not a page squeezed into the normal max-w-6xl padded
-  // column below a breadcrumb bar. The middleware guard (proxy.ts) already
-  // confines a 'client'-role member to .../review, so skipping this
-  // layout's own chrome specifically for that role is safe: there's
-  // nothing else under this project they can actually reach for it to be
-  // missing from.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const { data: membership } = user
-    ? await supabase
-        .from("project_members")
-        .select("role")
-        .eq("project_id", projectId)
-        .eq("user_id", user.id)
-        .maybeSingle()
-    : { data: null };
-
-  if (membership?.role === "client") {
-    return (
-      <div className="flex flex-1 flex-col">
-        {children}
-        {modal}
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-1 flex-col">
       <header className="px-4 py-4 sm:px-6">

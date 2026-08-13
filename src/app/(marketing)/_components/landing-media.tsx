@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { MediaRef } from "@/lib/landing";
+import { landingMediaUrl } from "@/lib/landing-media-url";
 
 const ASPECT_CLASS: Record<NonNullable<MediaRef["aspect"]>, string> = {
   "4/5": "aspect-[4/5]",
@@ -11,12 +12,21 @@ const ASPECT_CLASS: Record<NonNullable<MediaRef["aspect"]>, string> = {
 };
 
 // Every image on the landing page renders through here rather than a literal
-// <img src="/landing/..."> -- centralizes the /landing/ path prefix (the one
-// convention that makes "replace media later" a file-drop, not a code
-// change) and shows a graceful placeholder (same dashed-border language as
-// Grid/Stories' own "Empty" slots) until a real file exists at that path, so
-// the page still looks intentional before public/landing/** is filled in.
-export function LandingMedia({ media, className = "" }: { media: MediaRef; className?: string }) {
+// <img src="..."> -- centralizes resolving a MediaRef's `src` (a path in the
+// public landing-media Supabase Storage bucket, uploaded via the Demo
+// Content Manager admin UI) and shows a graceful placeholder (same
+// dashed-border language as Grid/Stories' own "Empty" slots) until a real
+// file exists at that path, so the page still looks intentional before an
+// admin has uploaded anything.
+export function LandingMedia({
+  media,
+  className = "",
+  style,
+}: {
+  media: MediaRef;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
   const [failed, setFailed] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
   const aspectClass = media.aspect ? ASPECT_CLASS[media.aspect] : "";
@@ -47,9 +57,10 @@ export function LandingMedia({ media, className = "" }: { media: MediaRef; class
     // eslint-disable-next-line @next/next/no-img-element
     <img
       ref={imgRef}
-      src={`/landing/${media.src}`}
+      src={landingMediaUrl(media.src)}
       alt={media.alt}
       onError={() => setFailed(true)}
+      style={style}
       className={`h-full w-full object-cover ${aspectClass} ${className}`}
     />
   );

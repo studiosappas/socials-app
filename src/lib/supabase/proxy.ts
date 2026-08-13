@@ -52,30 +52,5 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Client Reviewer route gating: once a project member has the 'client'
-  // role, everything in that project outside Review Mode is off-limits
-  // (Media Library, Brand, Team settings, Calendar editing, AI tools,
-  // editor toolbars -- the role's whole "cannot" list). Rather than
-  // threading a permission check through every existing page individually,
-  // this single redirect keeps them inside /projects/[projectId]/review
-  // whenever they try to reach anything else in that project. "/projects/todo"
-  // is Task Management, not a [projectId] route, and is excluded here.
-  const projectMatch = request.nextUrl.pathname.match(/^\/projects\/([^/]+)(\/.*)?$/);
-  if (user && projectMatch && projectMatch[1] !== "todo") {
-    const projectId = projectMatch[1];
-    const { data: membership } = await supabase
-      .from("project_members")
-      .select("role")
-      .eq("project_id", projectId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (membership?.role === "client" && !request.nextUrl.pathname.startsWith(`/projects/${projectId}/review`)) {
-      const url = request.nextUrl.clone();
-      url.pathname = `/projects/${projectId}/review`;
-      return NextResponse.redirect(url);
-    }
-  }
-
   return response;
 }

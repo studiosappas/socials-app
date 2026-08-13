@@ -3,18 +3,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { LandingMedia } from "../landing-media";
 import { BrandOrbit } from "./section-04-orbit";
-import {
-  DEMO_GRID_SLOTS,
-  DEMO_BRIEF_FIELDS,
-  DEMO_AI_CAPTION,
-  DEMO_POST_TITLE,
-  DEMO_TEAM,
-  DEMO_SPECTRUM,
-  DEMO_EXPORT_FEED,
-  DEMO_BRAND_DOCUMENTS,
-  EASE,
-  type HeroPreviewScreen,
-} from "@/lib/landing";
+import { DEMO_BRIEF_FIELDS, DEMO_EXPORT_FEED, EASE, type HeroPreviewScreen } from "@/lib/landing";
+import { useLandingContent } from "@/lib/landing/content-context";
 import { Avatar } from "@/components/ui/avatar";
 
 // Mini reuses of the same real screens built for Sections 03-07, rather
@@ -46,6 +36,7 @@ export function HeroPreview({ screen }: { screen: HeroPreviewScreen }) {
 }
 
 function GridPreview() {
+  const { DEMO_GRID_SLOTS } = useLandingContent();
   return (
     <div className="grid h-full grid-cols-2 gap-[2px]">
       {DEMO_GRID_SLOTS.slice(0, 4).map((slot) => (
@@ -58,6 +49,7 @@ function GridPreview() {
 }
 
 function BriefPreview() {
+  const { DEMO_AI_CAPTION } = useLandingContent();
   return (
     <div className="flex h-full flex-col gap-4">
       {DEMO_BRIEF_FIELDS.map((f) => (
@@ -75,6 +67,7 @@ function BriefPreview() {
 }
 
 function PostPopupPreview() {
+  const { DEMO_POST_TITLE, DEMO_TEAM } = useLandingContent();
   return (
     <div className="flex h-full flex-col gap-4">
       <p className="text-sm font-medium">{DEMO_POST_TITLE}</p>
@@ -91,6 +84,7 @@ function PostPopupPreview() {
 }
 
 function OverviewPreview() {
+  const { DEMO_BRAND_DOCUMENTS, DEMO_SPECTRUM } = useLandingContent();
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4">
       <BrandOrbit tileCount={DEMO_BRAND_DOCUMENTS.length} spinning={false} />

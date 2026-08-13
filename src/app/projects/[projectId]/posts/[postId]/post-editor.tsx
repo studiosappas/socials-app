@@ -30,12 +30,15 @@ import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import { saveAs } from "file-saver";
 import { convertToTask } from "@/lib/actions/todo";
+import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
 import { AnnotationEditor } from "@/components/annotation-editor";
+import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { UndoIcon, type MediaLibraryItem } from "../../grid/grid-board";
-import type { PostStatus, PostType } from "@/types/database";
+import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
+import type { ProjectMemberOption } from "@/lib/data/post-comments";
 
 // Module-level constants (not object literals inline in JSX) so the same
 // reference is passed on every render regardless of which asset is being
@@ -79,6 +82,7 @@ type PostRecord = {
   scheduled_date: string | null;
   scheduled_time: string | null;
   status: PostStatus;
+  review_status: ReviewStatus;
 };
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
@@ -92,6 +96,8 @@ export function PostEditor({
   links,
   mediaLibrary,
   canManage,
+  currentUserId,
+  members,
   hideBackLink = false,
 }: {
   projectId: string;
@@ -100,6 +106,8 @@ export function PostEditor({
   links: PostLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  currentUserId: string;
+  members: ProjectMemberOption[];
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
@@ -349,6 +357,14 @@ export function PostEditor({
         post={post}
         links={links}
         canManage={canManage}
+      />
+
+      <ItemComments
+        itemId={post.id}
+        currentUserId={currentUserId}
+        members={members}
+        fetchComments={fetchPostComments}
+        addComment={(id, text) => addPostComment(projectId, id, text)}
       />
 
       <AnnotationEditor
@@ -645,6 +661,18 @@ function PostMainForm({
               <option value="draft">Draft</option>
               <option value="scheduled">Scheduled</option>
               <option value="published">Published</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Approval Status</span>
+            {/* Same column a client's review-link submission writes to
+                (set_post_review_status_by_token) -- this updates automatically
+                based on their latest review, and can also be changed manually
+                here, same as the workflow Status select next to it. */}
+            <select name="review_status" defaultValue={post.review_status} disabled={!canManage} className={fieldClass}>
+              <option value="pending">Pending Review</option>
+              <option value="approved">Approved</option>
+              <option value="changes_requested">Needs Changes</option>
             </select>
           </label>
           <label className="flex flex-col gap-1.5">

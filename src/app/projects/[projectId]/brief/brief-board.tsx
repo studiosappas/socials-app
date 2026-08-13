@@ -11,6 +11,7 @@ import {
   addBriefTaskLink,
   createBriefTask,
   deleteBriefTask,
+  generateBriefDesign,
   removeBriefTaskFrame,
   removeBriefTaskItem,
   renameBriefTask,
@@ -19,8 +20,17 @@ import {
   setBriefTaskTypes,
   updateBriefTaskFrameBody,
 } from "@/lib/actions/brief";
+import { saveMediaAssetAnnotation } from "@/lib/actions/media";
 import { AnnotationEditor } from "@/components/annotation-editor";
-import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskType } from "@/types/database";
+import { BrandMoodboardDialog } from "@/components/brand-moodboard-dialog";
+import type { BrandMoodboardItem } from "@/lib/data/brand-moodboard";
+import type {
+  BriefFrameSection,
+  BriefItemKind,
+  BriefItemSection,
+  BriefTaskType,
+  GeneratedDesignPostType,
+} from "@/types/database";
 
 export type BriefTaskItem = {
   id: string;
@@ -56,22 +66,27 @@ const pillInputClass =
 const notesInputClass =
   "w-full min-w-0 shrink-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-40";
 
-type EditingImage = { itemId: string; attachmentId: string; imageUrl: string; annotationJson: object | null };
+type EditingImage =
+  | { source: "attachment"; itemId: string; attachmentId: string; imageUrl: string; annotationJson: object | null }
+  | { source: "asset"; mediaAssetId: string; imageUrl: string; annotationJson: object | null };
 
 export function BriefBoard({
   projectId,
   tasks,
   canManage,
+  brandMoodboard,
 }: {
   projectId: string;
   tasks: BriefTaskData[];
   canManage: boolean;
+  brandMoodboard: BrandMoodboardItem[];
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | undefined>();
   const [editingImage, setEditingImage] = useState<EditingImage | null>(null);
+  const [moodboardOpen, setMoodboardOpen] = useState(false);
 
   function handleAddTask() {
     setCreating(true);
@@ -94,6 +109,12 @@ export function BriefBoard({
 
   return (
     <div className="flex flex-col gap-8">
+      <div className="flex items-center justify-between">
+        <Button type="button" variant="secondary" radius="none" onClick={() => setMoodboardOpen(true)} className="w-fit text-xs">
+          🎨 Brand Moodboard
+        </Button>
+      </div>
+
       {tasks.map((task) => (
         <TaskCard
           key={task.id}
@@ -122,19 +143,39 @@ export function BriefBoard({
 
       <AnnotationEditor
         projectId={projectId}
-        attachmentId={editingImage?.attachmentId ?? null}
+        attachmentId={
+          editingImage ? (editingImage.source === "attachment" ? editingImage.attachmentId : editingImage.mediaAssetId) : null
+        }
         open={editingImage !== null}
         imageUrl={editingImage?.imageUrl ?? null}
         initialAnnotationJson={editingImage?.annotationJson ?? null}
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
-        saveAction={saveBriefAnnotation}
+        saveAction={editingImage?.source === "asset" ? saveMediaAssetAnnotation : saveBriefAnnotation}
+      />
+
+      <BrandMoodboardDialog
+        projectId={projectId}
+        items={brandMoodboard}
+        canManage={canManage}
+        open={moodboardOpen}
+        onClose={() => setMoodboardOpen(false)}
       />
     </div>
   );
 }
 
 const TASK_TYPES: BriefTaskType[] = ["story", "newsletter"];
+
+// Defines the generated canvas size (see POST_TYPE_CANVAS in
+// lib/actions/brief.ts) -- a per-generation choice, not persisted on the
+// task, since one Brief task can generate more than one format over time.
+const POST_TYPE_OPTIONS: { value: GeneratedDesignPostType; label: string }[] = [
+  { value: "post", label: "Post" },
+  { value: "story", label: "Story" },
+  { value: "reel_cover", label: "Reel Cover" },
+  { value: "newsletter", label: "Newsletter" },
+];
 
 function TaskCard({
   projectId,
@@ -156,6 +197,29 @@ function TaskCard({
   const containerRef = useRef<HTMLDivElement>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [postType, setPostType] = useState<GeneratedDesignPostType>("post");
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | undefined>();
+
+  function handleGenerateDesign() {
+    setGenerateError(undefined);
+    setGenerating(true);
+    startTransition(async () => {
+      const result = await generateBriefDesign(projectId, task.id, postType);
+      setGenerating(false);
+      if (!result.success || !result.mediaAssetId || !result.imageUrl) {
+        setGenerateError(result.message ?? "Couldn't generate a design.");
+        return;
+      }
+      onEditImage({
+        source: "asset",
+        mediaAssetId: result.mediaAssetId,
+        imageUrl: result.imageUrl,
+        annotationJson: result.annotationJson ?? null,
+      });
+      router.refresh();
+    });
+  }
 
   function handleNameBlur() {
     const value = nameRef.current?.value.trim();
@@ -273,6 +337,39 @@ function TaskCard({
               </button>
             ))}
           </div>
+
+          {canManage && (
+            <div className="flex flex-col gap-2 border border-border p-3">
+              <span className={labelClass}>Post Type</span>
+              <div className="flex flex-wrap gap-2">
+                {POST_TYPE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setPostType(opt.value)}
+                    className={`rounded-full border px-3 py-1.5 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                      postType === opt.value
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-border text-foreground hover:border-foreground/40"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <Button
+                type="button"
+                variant="primary"
+                radius="full"
+                onClick={handleGenerateDesign}
+                disabled={generating}
+                className="mt-1 w-fit"
+              >
+                {generating ? "Generating…" : "✨ Generate Design"}
+              </Button>
+              {generateError && <p className="text-xs text-error">{generateError}</p>}
+            </div>
+          )}
 
           <ItemSection
             title="References"
@@ -415,6 +512,7 @@ function ItemSection({
                     item.attachmentId &&
                     item.originalUrl &&
                     onEditImage({
+                      source: "attachment",
                       itemId: item.id,
                       attachmentId: item.attachmentId,
                       imageUrl: item.originalUrl,

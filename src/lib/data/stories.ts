@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
+import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -25,6 +26,8 @@ export type StoryPageData = {
   links: StoryLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  currentUserId: string;
+  members: ProjectMemberOption[];
 };
 
 export async function getStoryPageData(
@@ -110,5 +113,7 @@ export async function getStoryPageData(
 
   const links: StoryLinkItem[] = (storyLinks ?? []).map((l) => ({ id: l.id, url: l.url, label: l.label }));
 
-  return { story, frames: frameItems, links, mediaLibrary, canManage };
+  const members = await getProjectMemberOptions(supabase, projectId);
+
+  return { story, frames: frameItems, links, mediaLibrary, canManage, currentUserId: user!.id, members };
 }

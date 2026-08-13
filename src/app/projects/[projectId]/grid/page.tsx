@@ -167,7 +167,6 @@ export default async function GridPage({
       mediaFolders={mediaFolders}
       canManage={canManage}
       shareLinks={shareData.links}
-      sharePosts={shareData.posts}
       shareTableMissing={shareData.tableMissing}
     />
   );

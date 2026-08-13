@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { getLandingContentOverrides } from "@/lib/landing-content-data";
 import { LandingPage } from "./landing-page";
 
 export default async function RootPage() {
@@ -10,5 +11,10 @@ export default async function RootPage() {
 
   if (user) redirect("/projects");
 
-  return <LandingPage />;
+  // Anonymous-readable (RLS: "Anyone can read landing demo content") --
+  // only keys an admin has actually edited come back here; anything else
+  // falls back to its shipped default inside LandingContentProvider.
+  const overrides = await getLandingContentOverrides(supabase);
+
+  return <LandingPage overrides={overrides} />;
 }

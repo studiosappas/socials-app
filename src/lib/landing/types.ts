@@ -22,13 +22,6 @@ export type HeroPhrase = {
   durationMs: number;
 };
 
-export type WorkflowStep = {
-  id: string;
-  label: string;
-  blurb: string;
-  screenshot: MediaRef;
-};
-
 export type DemoGridSlot = {
   id: string;
   image: MediaRef;

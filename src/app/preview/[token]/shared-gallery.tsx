@@ -3,6 +3,9 @@
 import { useMemo, useState } from "react";
 import type { SharedGalleryItem } from "@/lib/data/share-preview";
 import { Lightbox, MediaFrame, type FlatMedia } from "@/components/media-gallery";
+import { MentionField } from "@/components/ui/mention-input";
+import { submitReviewStatus, submitReviewNotes } from "@/lib/actions/share-preview-review";
+import type { ReviewStatus } from "@/types/database";
 
 // Every selected post/story renders together in one continuous scroll, and
 // within a single post/story every image or video renders together too --
@@ -12,15 +15,21 @@ import { Lightbox, MediaFrame, type FlatMedia } from "@/components/media-gallery
 // dimensions, so a set of mixed-aspect uploads still reads as one
 // consistent grid. Clicking any image opens it full-size in a lightbox that
 // can slide through every image/video on the page (in the order they
-// appear), for a closer look without leaving the page.
+// appear), for a closer look without leaving the page. Gallery/lightbox
+// itself is unchanged by Client Review -- only the per-item controls below
+// each one (ReviewControls) are new.
 export function SharedGallery({
+  token,
   title,
   projectName,
   items,
+  members,
 }: {
+  token: string;
   title: string;
   projectName: string;
   items: SharedGalleryItem[];
+  members: { id: string; name: string }[];
 }) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
@@ -57,7 +66,7 @@ export function SharedGallery({
       </header>
 
       {items.map((item) => (
-        <section key={item.id} className="animate-settle-in flex w-full flex-col items-center">
+        <section key={item.id} className="animate-settle-in flex w-full flex-col items-center gap-4">
           {item.media.length > 1 ? (
             <div className="flex w-full max-w-6xl flex-wrap items-center justify-center gap-3">
               {item.media.map((m) => (
@@ -83,6 +92,10 @@ export function SharedGallery({
               }}
             />
           )}
+
+          {item.caption && <p className="w-full max-w-md whitespace-pre-wrap text-center text-sm text-muted">{item.caption}</p>}
+
+          <ReviewControls token={token} item={item} members={members} />
         </section>
       ))}
 
@@ -95,6 +108,124 @@ export function SharedGallery({
           onNext={() => setLightboxIndex((i) => (i === null ? i : (i + 1) % flatMedia.length))}
         />
       )}
+    </div>
+  );
+}
+
+const STATUS_LABEL: Record<ReviewStatus, string> = {
+  pending: "Pending Review",
+  approved: "Approved",
+  changes_requested: "Needs Changes",
+};
+
+// The exact template the manager-facing Edit Post popup's Notes field
+// should show -- Notes is the single source of truth for client feedback
+// (no separate comments system), so every write here is a full replace, not
+// an append.
+function formatFeedback(status: ReviewStatus, notes: string): string {
+  const trimmed = notes.trim();
+  if (!trimmed) return `Status: ${STATUS_LABEL[status]}`;
+  return `Status: ${STATUS_LABEL[status]}\n\nClient Feedback:\n"${trimmed}"`;
+}
+
+// Approval (mutually exclusive, writes immediately on click) + one Notes
+// field (pre-filled with whatever's already there -- a re-opened link
+// showing the client's own last submission, or the manager's existing
+// notes if nobody's reviewed yet -- saved on click, not per-keystroke).
+// Both write straight to the real posts/stories row via the token-scoped
+// RPCs (submitReviewStatus/submitReviewNotes) -- no separate comments
+// table, no second copy of this data anywhere.
+function ReviewControls({
+  token,
+  item,
+  members,
+}: {
+  token: string;
+  item: SharedGalleryItem;
+  members: { id: string; name: string }[];
+}) {
+  const itemId = item.type === "post" ? item.postId : item.storyId;
+  const [status, setStatus] = useState<ReviewStatus>(item.reviewStatus);
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [notes, setNotes] = useState(item.notes);
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [notesSaved, setNotesSaved] = useState(false);
+
+  if (!itemId) return null;
+
+  async function handleSetStatus(next: ReviewStatus) {
+    if (next === status || statusSaving) return;
+    const previous = status;
+    setStatus(next);
+    setStatusSaving(true);
+    const result = await submitReviewStatus(token, item.type, itemId!, next);
+    if (!result.success) {
+      setStatus(previous);
+    } else {
+      // Keeps the Notes field's "Status:" line current even on a status-only
+      // click that never touches the textarea below.
+      await submitReviewNotes(token, item.type, itemId!, formatFeedback(next, notes));
+    }
+    setStatusSaving(false);
+  }
+
+  async function handleSaveNotes() {
+    setNotesSaving(true);
+    setNotesSaved(false);
+    const result = await submitReviewNotes(token, item.type, itemId!, formatFeedback(status, notes));
+    setNotesSaving(false);
+    if (result.success) {
+      setNotesSaved(true);
+      setTimeout(() => setNotesSaved(false), 1800);
+    }
+  }
+
+  return (
+    <div className="flex w-full max-w-md flex-col gap-3 border-t border-border pt-4">
+      <div className="flex items-center justify-center gap-2">
+        <button
+          type="button"
+          onClick={() => handleSetStatus("approved")}
+          disabled={statusSaving}
+          className={`rounded-full border px-3 py-1.5 text-xs tracking-wide uppercase transition-colors duration-150 disabled:opacity-50 ${
+            status === "approved" ? "border-success bg-success/10 text-success" : "border-border text-muted hover:border-foreground/40"
+          }`}
+        >
+          ✅ Approved
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSetStatus("changes_requested")}
+          disabled={statusSaving}
+          className={`rounded-full border px-3 py-1.5 text-xs tracking-wide uppercase transition-colors duration-150 disabled:opacity-50 ${
+            status === "changes_requested" ? "border-error bg-error/10 text-error" : "border-border text-muted hover:border-foreground/40"
+          }`}
+        >
+          ❌ Needs Changes
+        </button>
+      </div>
+      <p className="text-center text-[10px] tracking-wide text-muted uppercase">{STATUS_LABEL[status]}</p>
+
+      <label className="flex flex-col gap-1.5">
+        <span className="text-xs tracking-wide text-muted uppercase">Notes</span>
+        <MentionField
+          multiline
+          value={notes}
+          onChange={setNotes}
+          members={members}
+          rows={3}
+          placeholder="Leave a note for the team — @ to mention someone"
+          className="w-full rounded-none border border-border bg-transparent p-2 text-sm focus:border-foreground focus:outline-none"
+        />
+      </label>
+      <button
+        type="button"
+        onClick={handleSaveNotes}
+        disabled={notesSaving}
+        className="w-fit self-end text-xs tracking-wide uppercase text-muted transition-colors duration-150 hover:text-foreground disabled:opacity-50"
+      >
+        {notesSaving ? "Saving…" : notesSaved ? "Saved" : "Save Notes"}
+      </button>
     </div>
   );
 }

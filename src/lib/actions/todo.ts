@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getTaskComments, type TaskCommentItem } from "@/lib/data/tasks";
+import { notifyMentions } from "@/lib/notifications";
 import type { TaskStatus } from "@/types/database";
 
 export type TaskFormState = { message?: string; success?: boolean } | undefined;
@@ -110,6 +111,19 @@ export async function addTaskComment(
     text: trimmed,
   });
   if (error) return { success: false, message: error.message };
+
+  // Mentions only make sense against a real project's member list --
+  // personal (project_id null) tasks have no team to resolve @names against.
+  const { data: task } = await supabase.from("tasks").select("project_id").eq("id", taskId).single();
+  if (task?.project_id) {
+    const { data: profile } = await supabase.from("profiles").select("name").eq("id", user.id).single();
+    await notifyMentions(supabase, task.project_id, trimmed, {
+      notifierName: profile?.name ?? "Someone",
+      itemLabel: "a task",
+      link: "/projects/todo",
+      excludeUserId: user.id,
+    });
+  }
 
   revalidatePath("/projects/todo");
   return { success: true };

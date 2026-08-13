@@ -6,7 +6,7 @@ import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media"
 import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
-import type { MediaType, PostStatus, PostType } from "@/types/database";
+import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
 
@@ -74,6 +74,17 @@ export async function updatePost(
     .from("posts")
     .update({ scheduled_time: scheduledTime ? scheduledTime : null })
     .eq("id", postId);
+
+  // Same isolation reasoning -- review_status is what a client's review-link
+  // submission also writes to (set_post_review_status_by_token), so a
+  // manual edit here uses the exact same column, never a second field.
+  const reviewStatus = formData.get("review_status");
+  if (reviewStatus) {
+    await supabase
+      .from("posts")
+      .update({ review_status: String(reviewStatus) as ReviewStatus })
+      .eq("id", postId);
+  }
 
   // Only the transition INTO "in_review", not every save made while a post
   // already sits in that status -- otherwise this would fire on every

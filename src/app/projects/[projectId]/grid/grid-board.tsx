@@ -34,7 +34,9 @@ import { Button } from "@/components/ui/button";
 import { deleteMedia, uploadMedia } from "@/lib/actions/grid";
 import { generatePosterFromVideoUrl, uploadFilesWithPosters } from "@/lib/video-poster";
 import { ShareMenuButton } from "../share-menu";
-import type { ShareLinkItem, PickerPost } from "@/lib/data/share-links";
+import { createShareLink } from "@/lib/actions/share-links";
+import type { ShareLinkItem } from "@/lib/data/share-links";
+import { Toast } from "@/components/ui/toast";
 import type { MediaType, Platform } from "@/types/database";
 
 const DOUBLE_CLICK_WINDOW_MS = 220;
@@ -137,7 +139,6 @@ export function GridBoard({
   mediaFolders,
   canManage,
   shareLinks,
-  sharePosts,
   shareTableMissing,
 }: {
   projectId: string;
@@ -162,7 +163,6 @@ export function GridBoard({
   mediaFolders: MediaFolder[];
   canManage: boolean;
   shareLinks: ShareLinkItem[];
-  sharePosts: PickerPost[];
   shareTableMissing: boolean;
 }) {
   const router = useRouter();
@@ -180,6 +180,50 @@ export function GridBoard({
 
   const { push: pushCommand, undo, redo, canUndo, canRedo, isBusy: undoRedoBusy } = useUndoStack();
   useUndoRedoShortcuts(undo, redo);
+
+  // Share for Review: selecting posts happens inline on the grid itself
+  // (same multi-select-circle pattern as Media Library) instead of in a
+  // separate picker dialog. selectedPostIds is keyed by post id, not slot
+  // id, since that's what createShareLink actually needs.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedPostIds, setSelectedPostIds] = useState<Set<string>>(new Set());
+  const [sharing, startSharing] = useTransition();
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  function handleToggleSelectPost(postId: string) {
+    setSelectedPostIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(postId)) next.delete(postId);
+      else next.add(postId);
+      return next;
+    });
+  }
+
+  function handleCancelSelection() {
+    setSelectionMode(false);
+    setSelectedPostIds(new Set());
+  }
+
+  function handleShareForReview() {
+    const ids = Array.from(selectedPostIds);
+    if (ids.length === 0) return;
+    startSharing(async () => {
+      const formData = new FormData();
+      for (const id of ids) formData.append("post_ids", id);
+      const result = await createShareLink(projectId, undefined, formData);
+      if (result?.success && result.token) {
+        const url = `${window.location.origin}/preview/${result.token}`;
+        await navigator.clipboard.writeText(url);
+        setToastMessage("Review link copied to clipboard");
+        setTimeout(() => setToastMessage(null), 2500);
+        handleCancelSelection();
+        router.refresh();
+      } else {
+        setToastMessage(result?.message ?? "Couldn't create the review link.");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
+    });
+  }
 
   // Optimistic override so a slot reorder renders immediately instead of
   // waiting for the server round-trip + router.refresh() to land — otherwise
@@ -505,10 +549,9 @@ export function GridBoard({
                   <ShareMenuButton
                     projectId={projectId}
                     links={shareLinks}
-                    items={sharePosts}
-                    contentType="post"
                     canManage={canManage}
                     tableMissing={shareTableMissing}
+                    onEnterSelectionMode={() => setSelectionMode(true)}
                     exportLinks={[
                       { href: `/projects/${projectId}/grid/export`, label: "Export Full Feed" },
                       {
@@ -540,6 +583,9 @@ export function GridBoard({
                 canManage={canManage}
                 onOpenPicker={setPickerSlotId}
                 pushCommand={pushCommand}
+                selectionMode={selectionMode}
+                selectedPostIds={selectedPostIds}
+                onToggleSelectPost={handleToggleSelectPost}
               />
             ))}
           </SortableContext>
@@ -594,6 +640,27 @@ export function GridBoard({
           </div>
         )}
       </DragOverlay>
+
+      {selectionMode && (
+        <div className="fixed inset-x-0 bottom-0 z-30 flex items-center justify-center gap-3 border-t border-border bg-background px-4 py-3 shadow-[0_-2px_10px_rgba(0,0,0,0.06)]">
+          <span className="text-xs tracking-wide text-muted uppercase">
+            {selectedPostIds.size} selected
+          </span>
+          <Button type="button" variant="secondary" radius="none" onClick={handleCancelSelection}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            radius="none"
+            onClick={handleShareForReview}
+            disabled={selectedPostIds.size === 0 || sharing}
+          >
+            {sharing ? "Sharing…" : "Share for Review"}
+          </Button>
+        </div>
+      )}
+      <Toast message={toastMessage} />
     </DndContext>
   );
 }
@@ -604,12 +671,18 @@ function GridRow({
   canManage,
   onOpenPicker,
   pushCommand,
+  selectionMode,
+  selectedPostIds,
+  onToggleSelectPost,
 }: {
   row: GridBoardRow;
   projectId: string;
   canManage: boolean;
   onOpenPicker: (slotId: string) => void;
   pushCommand: (command: UndoableCommand) => void;
+  selectionMode: boolean;
+  selectedPostIds: Set<string>;
+  onToggleSelectPost: (postId: string) => void;
 }) {
   // No dedicated "remove row" bar between rows -- the grid stays tight like
   // desktop, and "Remove Row" lives in each slot's own ⋮ menu instead.
@@ -624,6 +697,9 @@ function GridRow({
           canManage={canManage}
           onOpenPicker={onOpenPicker}
           pushCommand={pushCommand}
+          selectionMode={selectionMode}
+          selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
+          onToggleSelectPost={onToggleSelectPost}
         />
       ))}
     </div>
@@ -637,6 +713,9 @@ function GridSlot({
   canManage,
   onOpenPicker,
   pushCommand,
+  selectionMode,
+  selected,
+  onToggleSelectPost,
 }: {
   slot: GridBoardSlot;
   rowId: string;
@@ -644,6 +723,9 @@ function GridSlot({
   canManage: boolean;
   onOpenPicker: (slotId: string) => void;
   pushCommand: (command: UndoableCommand) => void;
+  selectionMode: boolean;
+  selected: boolean;
+  onToggleSelectPost: (postId: string) => void;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
@@ -652,7 +734,9 @@ function GridSlot({
       data: { type: "slot", slotId: slot.id, slot },
       // Boolean `disabled` disables both drag AND drop in dnd-kit — pass the object
       // form so empty/view-only slots stay valid *drop* targets, just not pick-uppable.
-      disabled: { draggable: !slot.postId || !canManage, droppable: !canManage },
+      // Also disabled while selecting for Review, so a drag gesture never
+      // fights with the tap-to-select interaction.
+      disabled: { draggable: !slot.postId || !canManage || selectionMode, droppable: !canManage || selectionMode },
       transition: SORTABLE_TRANSITION,
     });
 
@@ -708,6 +792,10 @@ function GridSlot({
 
   function handleClick() {
     if (!slot.postId) return;
+    if (selectionMode) {
+      onToggleSelectPost(slot.postId);
+      return;
+    }
     const now = Date.now();
     const isDoubleClick = now - lastClickAtRef.current < DOUBLE_CLICK_WINDOW_MS;
     lastClickAtRef.current = now;
@@ -838,14 +926,36 @@ function GridSlot({
       {/* Top-left is the one corner not already claimed by the video badge
           (bottom-left), asset count (bottom-right), or the ⋮ menu (top-right)
           -- subtle, informational only, never blocks the slot's own click
-          behavior since it's a plain absolutely-positioned span. */}
-      {slot.scheduledDate && (
+          behavior since it's a plain absolutely-positioned span. While
+          selecting for Review, the selection circle takes this same corner
+          instead -- same "one small badge, top-left" language, just a
+          different moment (there's no reason to see the scheduled-date
+          badge and the selection circle at once). */}
+      {selectionMode && slot.postId ? (
         <span
-          title={`Scheduled for ${slot.scheduledDate}`}
-          className="absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+          title={selected ? "Deselect" : "Select"}
+          className="absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full"
         >
-          <ScheduledIcon className="h-2.5 w-2.5" />
+          {selected ? (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" className="fill-accent" stroke="white" strokeWidth="1" />
+              <path d="M4.8 8.2 6.8 10.1 11.2 5.7" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" className="fill-black/30" stroke="white" strokeWidth="1.2" />
+            </svg>
+          )}
         </span>
+      ) : (
+        slot.scheduledDate && (
+          <span
+            title={`Scheduled for ${slot.scheduledDate}`}
+            className="absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+          >
+            <ScheduledIcon className="h-2.5 w-2.5" />
+          </span>
+        )
       )}
       {slot.assetCount > 1 && (
         <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">

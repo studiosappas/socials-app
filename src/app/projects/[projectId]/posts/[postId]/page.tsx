@@ -20,6 +20,8 @@ export default async function PostPage({
       links={data.links}
       mediaLibrary={data.mediaLibrary}
       canManage={data.canManage}
+      currentUserId={data.currentUserId}
+      members={data.members}
     />
   );
 }

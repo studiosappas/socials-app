@@ -30,5 +30,13 @@ export default async function SharedPreviewPage({
     );
   }
 
-  return <SharedGallery title={data.title} projectName={data.projectName} items={data.items} />;
+  return (
+    <SharedGallery
+      token={token}
+      title={data.title}
+      projectName={data.projectName}
+      items={data.items}
+      members={data.members}
+    />
+  );
 }

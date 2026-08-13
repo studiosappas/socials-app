@@ -1,4 +1,4 @@
-import type { DemoAssetFolder } from "./types";
+import type { DemoAssetFolder, MediaRef } from "./types";
 
 export const DEMO_ASSET_FOLDERS: DemoAssetFolder[] = [
   {
@@ -35,7 +35,14 @@ export const DEMO_ASSET_FOLDERS: DemoAssetFolder[] = [
   },
 ];
 
-// Fixed "visually similar" result set shown after the scripted image-search
-// demo (see section-05-assets.tsx) -- not real vision matching, matches how
-// the real Assets page's own image search is presently an honest stub.
+// Fixed match result set shown after the scripted packshot-search demo (see
+// stage-01-find.tsx) -- a tag/keyword match, not real vision matching, since
+// the real Assets page's own image search is presently an honest stub (it
+// tells users "Visual search isn't available yet").
 export const DEMO_IMAGE_SEARCH_RESULT_IDS = ["f1", "f4"];
+
+export const DEMO_PACKSHOT: MediaRef = {
+  src: "assets/packshot.jpg",
+  alt: "Product packshot",
+  aspect: "1/1",
+};

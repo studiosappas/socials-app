@@ -1,4 +1,4 @@
-import type { CtaLink } from "./types";
+import type { CtaLink, MediaRef } from "./types";
 
 export const NAV_CONTENT = {
   logoLabel: "Socials App",
@@ -18,30 +18,30 @@ export const HERO_CONTENT = {
   secondaryCta: { label: "Book a Demo", href: "/book-a-demo" } satisfies CtaLink,
 };
 
-export const WORKFLOW_SECTION_CONTENT = {
-  headline: "Everything flows together.",
+// Section 3 -- deliberately just three short statements, not another
+// feature grid, per the rebuild brief ("extremely minimal... lots of
+// whitespace").
+export const WHY_SECTION_CONTENT = {
+  statements: [
+    "Everything stays connected. Your assets, posts, briefs, approvals and team are always in sync.",
+    "AI that understands your brand. Every project makes your workspace smarter.",
+    "No more switching between tools. Everything happens inside one uninterrupted workflow.",
+  ],
 };
 
-export const DEMO_SECTION_CONTENT = {
-  headline: "Try it yourself.",
-  subhead: "This is the real interface. Drag a post, reposition an image, search a library — no account needed.",
+export const WHY_SECTION_IMAGE: MediaRef = {
+  src: "why/interface.jpg",
+  alt: "The workspace interface",
+  aspect: "4/5",
 };
 
-export const BRAND_INTELLIGENCE_CONTENT = {
-  headline: "AI that learns your brand.",
-  subhead: "Upload what you already have. The workspace turns it into a brand your whole team can write from.",
-};
-
-export const ASSETS_SECTION_CONTENT = {
-  headline: "Never search folder by folder again.",
-};
-
-export const COLLABORATION_SECTION_CONTENT = {
-  headline: "Keep everyone in the same conversation.",
-};
-
-export const EXPORT_SECTION_CONTENT = {
-  headline: "Everything ready when you are.",
+// Section 4 -- the page's own final beat, distinct from LandingFooter's
+// persistent site-wide CTA (which stays generic across every marketing
+// page); this one carries the exact copy the workflow narrative earns.
+export const FINAL_CTA_CONTENT = {
+  headline: "Ready to simplify your content workflow?",
+  subhead: "Invite users to start managing their entire social media workflow from one intelligent workspace.",
+  primaryCta: { label: "Start Free", href: "/register" } satisfies CtaLink,
 };
 
 export const FOOTER_CONTENT = {

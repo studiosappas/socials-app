@@ -20,9 +20,11 @@ import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 export function MediaThumbPreview({
   item,
   className = "",
+  hideCarouselBadge = false,
 }: {
   item: MediaLibraryItem;
   className?: string;
+  hideCarouselBadge?: boolean;
 }) {
   return (
     <div className={`relative h-full w-full overflow-hidden ${className}`}>
@@ -33,7 +35,7 @@ export function MediaThumbPreview({
       {item.url && item.mediaType === "video" && (
         <video src={item.url} className="h-full w-full object-cover" muted />
       )}
-      {item.usedInCarousel && (
+      {item.usedInCarousel && !hideCarouselBadge && (
         <span
           title="Already used in a carousel"
           className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
@@ -48,7 +50,7 @@ export function MediaThumbPreview({
 // Stacked-frames glyph -- distinct from the scheduled-content calendar icon
 // (grid-board.tsx/story-card.tsx) so the two badge meanings read differently
 // at a glance, same "small bg-black/70 corner chip" visual language.
-function CarouselUsageIcon({ className }: { className?: string }) {
+export function CarouselUsageIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
       <rect x="7" y="7" width="14" height="14" rx="2" />
@@ -244,10 +246,7 @@ export function MediaLibrary({
         {visibleItems.map((item) => (
           <MediaThumb
             key={item.id}
-            projectId={projectId}
             item={item}
-            pushCommand={pushCommand}
-            suppressAutoTrackRef={suppressAutoTrackRef}
             selected={selectedIds.has(item.id)}
             onToggleSelect={() => toggleSelected(item.id)}
           />
@@ -341,63 +340,18 @@ function FolderIcon({ className }: { className?: string }) {
 }
 
 function MediaThumb({
-  projectId,
   item,
-  pushCommand,
-  suppressAutoTrackRef,
   selected,
   onToggleSelect,
 }: {
-  projectId: string;
   item: MediaLibraryItem;
-  pushCommand: (command: UndoableCommand) => void;
-  suppressAutoTrackRef: React.MutableRefObject<boolean>;
   selected: boolean;
   onToggleSelect: () => void;
 }) {
-  const router = useRouter();
-  const [, startTransition] = useTransition();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `media-${item.id}`,
     data: { mediaAssetId: item.id, item },
   });
-
-  function handleDelete(e: React.MouseEvent) {
-    e.stopPropagation();
-    if (!confirm("Delete this asset? This removes it from any post or story using it.")) return;
-    // See current(...) in MediaLibrary's "Add media" tracking -- same
-    // mutable-id reasoning: a restored asset comes back under a new id, so
-    // a second delete/redo cycle needs the current one, not this closure's.
-    const storagePath = item.storagePath;
-    const posterStoragePath = item.posterStoragePath ?? null;
-    const current = { id: item.id };
-    startTransition(async () => {
-      suppressAutoTrackRef.current = true;
-      await deleteMedia(projectId, current.id);
-      router.refresh();
-      if (storagePath) {
-        pushCommand({
-          label: "Delete media",
-          undo: async () => {
-            suppressAutoTrackRef.current = true;
-            const result = await restoreMediaAsset(projectId, {
-              storagePath,
-              mediaType: item.mediaType,
-              posterStoragePath,
-            });
-            if ("message" in result) throw new Error(result.message);
-            current.id = result.id;
-            router.refresh();
-          },
-          redo: async () => {
-            suppressAutoTrackRef.current = true;
-            await deleteMedia(projectId, current.id);
-            router.refresh();
-          },
-        });
-      }
-    });
-  }
 
   return (
     <div
@@ -406,7 +360,7 @@ function MediaThumb({
       }`}
     >
       <div ref={setNodeRef} {...listeners} {...attributes} className="absolute inset-0">
-        <MediaThumbPreview item={item} />
+        <MediaThumbPreview item={item} hideCarouselBadge />
       </div>
       <button
         type="button"
@@ -415,7 +369,9 @@ function MediaThumb({
           onToggleSelect();
         }}
         title={selected ? "Deselect" : "Select"}
-        className="absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full"
+        className={`absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 ${
+          selected ? "opacity-100" : "opacity-0"
+        }`}
       >
         {selected ? (
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -428,14 +384,14 @@ function MediaThumb({
           </svg>
         )}
       </button>
-      <button
-        type="button"
-        onClick={handleDelete}
-        title="Delete asset"
-        className="absolute right-1 top-1 z-10 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white opacity-0 transition-opacity duration-150 hover:bg-black/85 group-hover:opacity-100"
-      >
-        ✕
-      </button>
+      {item.usedInCarousel && (
+        <span
+          title="Already used in a carousel"
+          className="pointer-events-none absolute right-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+        >
+          <CarouselUsageIcon className="h-2.5 w-2.5" />
+        </span>
+      )}
     </div>
   );
 }

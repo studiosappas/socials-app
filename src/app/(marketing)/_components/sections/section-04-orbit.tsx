@@ -1,7 +1,7 @@
 "use client";
 
 import { computeTileLayout, MAX_ORBIT_TILES, ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
-import { DEMO_BRAND_DOCUMENTS } from "@/lib/landing";
+import { useLandingContent } from "@/lib/landing/content-context";
 
 const labelClass = "text-xs font-semibold tracking-wide uppercase";
 
@@ -24,6 +24,7 @@ export function BrandOrbit({
   spinning: boolean;
   refreshing?: boolean;
 }) {
+  const { DEMO_BRAND_DOCUMENTS } = useLandingContent();
   const tiles = DEMO_BRAND_DOCUMENTS.slice(0, Math.min(tileCount, MAX_ORBIT_TILES));
   const tileLayout = computeTileLayout(Math.max(tiles.length, 1));
   const fileCount = tiles.filter((t) => t.kind === "file").length;

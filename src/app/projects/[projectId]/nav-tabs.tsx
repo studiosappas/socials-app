@@ -10,7 +10,6 @@ const NAV_ITEMS = [
   { href: "assets", label: "Assets" },
   { href: "brief", label: "Brief" },
   { href: "settings", label: "Settings" },
-  { href: "review", label: "Review" },
 ];
 
 export function CurrentPageLabel({ projectId }: { projectId: string }) {

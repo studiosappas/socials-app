@@ -2,7 +2,6 @@ export * from "./types";
 export * from "./motion";
 export * from "./demo-content";
 export * from "./demo-hero";
-export * from "./demo-workflow";
 export * from "./demo-grid";
 export * from "./demo-brief";
 export * from "./demo-collaboration";

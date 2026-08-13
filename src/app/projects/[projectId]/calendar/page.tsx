@@ -10,6 +10,7 @@ import {
 } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
 import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-board";
+import { getProjectMemberOptions } from "@/lib/data/post-comments";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -242,6 +243,8 @@ export default async function CalendarPage({
     })),
   ];
 
+  const members = await getProjectMemberOptions(supabase, projectId);
+
   return (
     <CalendarBoard
       projectId={projectId}
@@ -251,6 +254,7 @@ export default async function CalendarPage({
       cells={cells}
       unscheduled={unscheduled}
       canManage={canManage}
+      members={members}
     />
   );
 }
