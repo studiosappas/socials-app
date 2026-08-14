@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Flow",
-    short_name: "Flow",
+    name: "Flow:er",
+    short_name: "Flow:er",
     description: "Internal content planning tool for feed grids, calendars, stories, and design tasks.",
     start_url: "/",
     display: "standalone",

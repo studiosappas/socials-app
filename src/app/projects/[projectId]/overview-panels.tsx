@@ -576,7 +576,7 @@ export function WorkplaceInsightsPanel({
         )}
       </div>
       <Link
-        href="/projects/todo"
+        href="/tasks"
         className="mt-2 block rounded-none bg-foreground px-4 py-3 text-center text-xs tracking-wide text-background uppercase transition-colors duration-150 hover:bg-black/85"
       >
         Go to → To Do List
@@ -761,11 +761,12 @@ export function BrandKnowledgePanel({
               // changes, instead of reusing/mismatching DOM nodes by position.
               <div
                 key={doc.id}
+                title={doc.filename}
                 style={{ top: t.top, left: t.left, width: t.size }}
-                className="knowledge-tile absolute aspect-square rounded-[15%] flex flex-col items-center justify-center gap-1 overflow-hidden border border-dashed border-border bg-black/[.02] p-2 text-center text-[10px] tracking-wide text-muted uppercase"
+                className="knowledge-tile absolute aspect-square rounded-[15%] flex flex-col items-center justify-center gap-0.5 overflow-hidden border border-dashed border-border bg-black/[.02] p-2 text-center text-[9px] tracking-wide text-muted uppercase"
               >
-                <span className="text-2xl">{doc.sourceType === "link" ? "🔗" : "📄"}</span>
-                <span className="line-clamp-2 leading-tight">{doc.filename}</span>
+                <span className="text-lg">{doc.sourceType === "link" ? "🔗" : "📄"}</span>
+                <span className="line-clamp-3 break-words leading-tight">{doc.filename}</span>
               </div>
             );
           })}

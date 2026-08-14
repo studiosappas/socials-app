@@ -19,7 +19,7 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "Flow",
+  title: "Flow:er",
   description: "Internal content planning tool for feed grids, calendars, stories, and design tasks.",
 };
 

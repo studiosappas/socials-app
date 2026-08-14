@@ -237,10 +237,12 @@ export function MediaLibrary({
               type="button"
               onClick={() => setActiveFolderId(folder.id)}
               title={folder.name}
-              className="flex aspect-square min-w-0 flex-col items-center justify-center gap-1 border border-border p-1 text-center transition-colors duration-150 hover:border-foreground/30"
+              className="group flex aspect-square min-w-0 flex-col items-center justify-center gap-1.5 rounded-md p-1.5 text-center transition-colors duration-150 hover:bg-black/[.04]"
             >
-              <FolderIcon className="h-5 w-5 text-muted" />
-              <span className="w-full truncate text-[10px] text-muted">{folder.name}</span>
+              <FolderIcon className="h-6 w-6 shrink-0 text-muted/70 transition-colors duration-150 group-hover:text-foreground" />
+              <span className="line-clamp-2 w-full break-words text-[10px] leading-tight text-muted">
+                {folder.name}
+              </span>
             </button>
           ))}
         {visibleItems.map((item) => (
