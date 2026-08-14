@@ -6,6 +6,7 @@ import { Toolbar, type ViewMode, type StatusView } from "./toolbar";
 import { ListView } from "./list-view";
 import { BoardView } from "./board-view";
 import { NewTaskDialog } from "./new-task-dialog";
+import { LinkedContentModal, type LinkedContentTarget } from "./linked-content-modal";
 import type { TaskFilters } from "./filter-popover";
 import { updateTaskAssignee, updateTaskStatus } from "@/lib/actions/todo";
 import type { TaskItem, TeamMember } from "@/lib/data/tasks";
@@ -46,6 +47,16 @@ export function TaskWorkspace({
   const [filters, setFilters] = useState<TaskFilters>({ assignee: null, source: "all" });
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [linkedContentTarget, setLinkedContentTarget] = useState<LinkedContentTarget | null>(null);
+
+  // Opens the linked post/story as a popup right here instead of navigating
+  // away -- /tasks sits outside /projects/[projectId]/..., so there's no
+  // intercepted route (like Grid/Calendar have) available to do this for
+  // free; see linked-content-modal.tsx for the client-side equivalent.
+  function handleOpenLinkedContent(task: TaskItem) {
+    if (!task.projectId || !task.sourceRef) return;
+    setLinkedContentTarget({ projectId: task.projectId, type: task.sourceRef.type, id: task.sourceRef.id });
+  }
 
   function handleStatusChange(taskId: string, status: TaskStatus) {
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, status } : t)));
@@ -111,6 +122,7 @@ export function TaskWorkspace({
           onToggleExpand={handleToggleExpand}
           onStatusChange={handleStatusChange}
           onAssigneeChange={handleAssigneeChange}
+          onOpenLinkedContent={handleOpenLinkedContent}
           today={today}
           tomorrow={tomorrow}
           onAddTask={() => setNewTaskOpen(true)}
@@ -124,6 +136,7 @@ export function TaskWorkspace({
           onToggleExpand={handleToggleExpand}
           onStatusChange={handleStatusChange}
           onAssigneeChange={handleAssigneeChange}
+          onOpenLinkedContent={handleOpenLinkedContent}
           today={today}
           tomorrow={tomorrow}
         />
@@ -135,6 +148,10 @@ export function TaskWorkspace({
         projects={projects}
         membersByProject={membersByProject}
       />
+
+      {linkedContentTarget && (
+        <LinkedContentModal target={linkedContentTarget} onClose={() => setLinkedContentTarget(null)} />
+      )}
     </div>
   );
 }

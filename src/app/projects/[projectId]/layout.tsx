@@ -3,6 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 import { Button } from "@/components/ui/button";
 import { CurrentPageLabel } from "./nav-tabs";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default async function ProjectLayout({
   children,
   modal,
@@ -13,6 +15,19 @@ export default async function ProjectLayout({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
+
+  // projects.id is a uuid column -- a non-uuid-shaped value here can never
+  // be a real project. This used to be reachable in practice: /projects/todo
+  // (a static route once nested here as a sibling of this dynamic segment)
+  // shared this segment's exact path depth/prefix, and this segment also
+  // owns parallel/intercepting routes (@modal) -- Next's client router
+  // treated the two as related enough to occasionally resolve THIS layout
+  // for the literal projectId "todo", corrupting real navigations right
+  // after. That route has since moved to /tasks (see app-header.tsx), which
+  // structurally can't collide with this segment at all; this guard just
+  // stays on as cheap defense against any other malformed value.
+  if (!UUID_RE.test(projectId)) return null;
+
   const supabase = await createClient();
 
   const { data: project } = await supabase

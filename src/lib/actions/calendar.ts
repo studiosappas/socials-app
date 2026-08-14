@@ -54,7 +54,7 @@ export async function scheduleItem(
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
 }
 
 // Manual override of the Calendar's auto-publish heuristic (see the
@@ -110,7 +110,7 @@ export async function createPostForDate(projectId: string, date: string): Promis
 
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/grid`);
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
   return post.id;
 }
 

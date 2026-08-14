@@ -4,7 +4,15 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
+import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
 import type { MediaType } from "@/types/database";
+
+// Same reasoning as fetchPostForModal in lib/actions/posts.ts -- lets the
+// Tasks page open a story in a client-side popup without needing a real
+// navigation into /projects/[projectId]/....
+export async function fetchStoryForModal(projectId: string, storyId: string): Promise<StoryPageData | null> {
+  return getStoryPageData(projectId, storyId);
+}
 
 export async function createStory(projectId: string) {
   const supabase = await createClient();

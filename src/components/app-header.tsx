@@ -20,13 +20,10 @@ export function AppHeader({
 }) {
   const pathname = usePathname();
   const onAccount = pathname.startsWith("/account");
-  const onTodo = pathname.startsWith("/projects/todo");
+  const onTodo = pathname.startsWith("/tasks");
 
-  // "/projects/todo" and "/projects/[projectId]/..." share the same first
-  // path segment -- "todo" is the one literal value there that's never a
-  // real projectId, so it's excluded explicitly rather than assumed away.
   const match = pathname.match(/^\/projects\/([^/]+)(?:\/|$)/);
-  const currentProjectId = match && match[1] !== "todo" ? match[1] : null;
+  const currentProjectId = match ? match[1] : null;
   const currentProject = projects.find((p) => p.id === currentProjectId) ?? null;
 
   return (
@@ -36,7 +33,7 @@ export function AppHeader({
           href="/projects"
           className="shrink-0 whitespace-nowrap text-xl font-semibold font-[family-name:var(--font-fraunces)] tracking-wide"
         >
-          Flow
+          Flow:er
         </Link>
         <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-full bg-foreground/[0.04] px-4 py-2 text-xs tracking-wide uppercase sm:gap-6">
           <NavNotificationBell items={notificationItems} unreadCount={unreadCount} />
@@ -44,8 +41,16 @@ export function AppHeader({
             {currentProject && <NavProjectSwitcher projects={projects} currentProject={currentProject} />}
             <NavProjectMenu projectId={currentProjectId} />
           </div>
+          {/* /tasks, not /projects/todo -- a static route sharing the same
+              path depth/prefix as the dynamic /projects/[projectId] segment
+              (which has its own @modal parallel/intercepting routes) caused
+              Next's client router to intermittently resolve THIS link's
+              destination using [projectId]'s parallel-route state, corrupting
+              real project navigations that happened right after. Moving this
+              page fully outside /projects/* removes the structural ambiguity
+              entirely, rather than working around its symptoms. */}
           <Link
-            href="/projects/todo"
+            href="/tasks"
             className={`whitespace-nowrap transition-colors duration-150 hover:text-foreground ${
               onTodo ? "font-semibold text-foreground" : "text-muted"
             }`}

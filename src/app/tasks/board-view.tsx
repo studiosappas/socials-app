@@ -32,6 +32,7 @@ type SharedProps = {
   onToggleExpand: (id: string) => void;
   onStatusChange: (id: string, status: TaskStatus) => void;
   onAssigneeChange: (id: string, assigneeId: string | null) => void;
+  onOpenLinkedContent: (task: TaskItem) => void;
   today: string;
   tomorrow: string;
 };
@@ -53,6 +54,7 @@ function DesktopBoard({
   onToggleExpand,
   onStatusChange,
   onAssigneeChange,
+  onOpenLinkedContent,
   today,
   tomorrow,
 }: SharedProps) {
@@ -102,6 +104,7 @@ function DesktopBoard({
                         currentUserId={currentUserId}
                         members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
                         onStatusChange={(status) => onStatusChange(task.id, status)}
+                        onOpenLinkedContent={() => onOpenLinkedContent(task)}
                       />
                     )}
                   </DraggableTaskCard>
@@ -161,6 +164,7 @@ function MobileBoard({
   onToggleExpand,
   onStatusChange,
   onAssigneeChange,
+  onOpenLinkedContent,
   today,
   tomorrow,
 }: SharedProps) {
@@ -228,6 +232,7 @@ function MobileBoard({
                         currentUserId={currentUserId}
                         members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
                         onStatusChange={(status) => onStatusChange(task.id, status)}
+                        onOpenLinkedContent={() => onOpenLinkedContent(task)}
                       />
                     )}
                   </div>

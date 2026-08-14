@@ -46,7 +46,7 @@ export async function createTask(
   });
 
   if (error) return { message: error.message };
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
   return { success: true };
 }
 
@@ -70,26 +70,26 @@ export async function updateTask(
     .eq("id", taskId);
 
   if (error) return { message: error.message };
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
   return { success: true };
 }
 
 export async function updateTaskStatus(taskId: string, status: TaskStatus) {
   const supabase = await createClient();
   await supabase.from("tasks").update({ status, updated_at: new Date().toISOString() }).eq("id", taskId);
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
 }
 
 export async function updateTaskAssignee(taskId: string, assigneeId: string | null) {
   const supabase = await createClient();
   await supabase.from("tasks").update({ assignee_id: assigneeId, updated_at: new Date().toISOString() }).eq("id", taskId);
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
 }
 
 export async function deleteTask(taskId: string) {
   const supabase = await createClient();
   await supabase.from("tasks").delete().eq("id", taskId);
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
 }
 
 export async function addTaskComment(
@@ -120,12 +120,12 @@ export async function addTaskComment(
     await notifyMentions(supabase, task.project_id, trimmed, {
       notifierName: profile?.name ?? "Someone",
       itemLabel: "a task",
-      link: "/projects/todo",
+      link: "/tasks",
       excludeUserId: user.id,
     });
   }
 
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
   return { success: true };
 }
 
@@ -169,7 +169,7 @@ export async function convertToTask(
     return { success: false, message: error.message };
   }
 
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
   revalidatePath(`/projects/${projectId}/calendar`);
   return { success: true };
 }

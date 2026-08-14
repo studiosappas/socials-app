@@ -16,7 +16,6 @@ export type TaskItem = {
   dueDate: string | null;
   source: TaskSource;
   sourceRef: TaskSourceRef;
-  sourceHref: string | null;
   assignee: { id: string; name: string; avatarUrl: string | null } | null;
   createdBy: string;
   createdAt: string;
@@ -142,9 +141,6 @@ export async function getTasksForUser(
       dueDate: t.due_date,
       source: t.source_type === "manual" ? "manual" : "auto",
       sourceRef,
-      sourceHref: sourceRef
-        ? `/projects/${t.project_id}/${sourceRef.type === "post" ? "posts" : "stories"}/${sourceRef.id}`
-        : null,
       assignee: t.assignee_id ? (assigneeById.get(t.assignee_id) ?? null) : null,
       createdBy: t.user_id,
       createdAt: t.created_at,

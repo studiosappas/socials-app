@@ -79,6 +79,7 @@ export function TaskRow({
           <Link
             href={`/projects/${task.projectId}`}
             onClick={(e) => e.stopPropagation()}
+            prefetch={false}
             className="mt-0.5 flex w-fit max-w-full items-center gap-1 text-[11px] text-muted transition-colors duration-150 hover:text-foreground"
           >
             <span className="block h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full border border-border">

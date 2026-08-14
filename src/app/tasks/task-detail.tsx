@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import { Avatar } from "@/components/ui/avatar";
 import { MentionField } from "@/components/ui/mention-input";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
@@ -23,11 +22,13 @@ export function TaskDetail({
   currentUserId,
   members,
   onStatusChange,
+  onOpenLinkedContent,
 }: {
   task: TaskItem;
   currentUserId: string;
   members: TeamMember[];
   onStatusChange: (status: TaskStatus) => void;
+  onOpenLinkedContent: () => void;
 }) {
   const router = useRouter();
   const [statusOpen, setStatusOpen] = useState(false);
@@ -143,14 +144,17 @@ export function TaskDetail({
           </button>
           {menuOpen && (
             <div className="absolute right-0 top-8 z-20 w-44 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-1 shadow-lg">
-              {task.sourceHref && (
-                <Link
-                  href={task.sourceHref}
-                  onClick={() => setMenuOpen(false)}
+              {task.sourceRef && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onOpenLinkedContent();
+                  }}
                   className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Open Linked Content
-                </Link>
+                </button>
               )}
               <button
                 type="button"
@@ -165,15 +169,18 @@ export function TaskDetail({
         </div>
       </div>
 
-      {task.sourceRef && task.sourceHref && (
-        <Link
-          href={task.sourceHref}
-          onClick={(e) => e.stopPropagation()}
+      {task.sourceRef && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenLinkedContent();
+          }}
           className="mb-2 flex w-fit items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs text-muted transition-colors duration-150 hover:border-foreground/40 hover:text-foreground"
         >
           <CalendarIcon className="h-3 w-3" />
-          Calendar
-        </Link>
+          View Content
+        </button>
       )}
 
       <div className="border-t border-border pt-2">

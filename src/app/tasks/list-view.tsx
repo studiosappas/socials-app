@@ -21,6 +21,7 @@ export function ListView({
   onToggleExpand,
   onStatusChange,
   onAssigneeChange,
+  onOpenLinkedContent,
   today,
   tomorrow,
   onAddTask,
@@ -32,6 +33,7 @@ export function ListView({
   onToggleExpand: (id: string) => void;
   onStatusChange: (id: string, status: TaskStatus) => void;
   onAssigneeChange: (id: string, assigneeId: string | null) => void;
+  onOpenLinkedContent: (task: TaskItem) => void;
   today: string;
   tomorrow: string;
   onAddTask: () => void;
@@ -72,6 +74,7 @@ export function ListView({
           currentUserId={currentUserId}
           members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
           onStatusChange={(status) => onStatusChange(task.id, status)}
+          onOpenLinkedContent={() => onOpenLinkedContent(task)}
         />
       )}
     </div>

@@ -6,9 +6,20 @@ import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media"
 import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
+import { getPostPageData, type PostPageData } from "@/lib/data/posts";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
+
+// Lets the Tasks page (src/app/tasks/*) open a post in a client-side popup
+// instead of navigating away -- it lives outside /projects/[projectId]/...
+// entirely (see that layout's own comment for why), so it can't reach
+// getPostPageData directly (that needs the server-only Supabase client) or
+// rely on the intercepted-route modal Grid/Calendar use, which only
+// activates for soft navigations already inside that route tree.
+export async function fetchPostForModal(projectId: string, postId: string): Promise<PostPageData | null> {
+  return getPostPageData(projectId, postId);
+}
 
 export async function deletePost(projectId: string, postId: string) {
   const supabase = await createClient();
@@ -101,7 +112,7 @@ export async function updatePost(
 
   revalidatePath(`/projects/${projectId}/posts/${postId}`);
   revalidatePath(`/projects/${projectId}/grid`);
-  revalidatePath("/projects/todo");
+  revalidatePath("/tasks");
   return undefined;
 }
 
