@@ -65,6 +65,7 @@ export function MediaLibrary({
   folders,
   pushCommand,
   demoMode = false,
+  onSelectionChange,
 }: {
   projectId: string;
   items: MediaLibraryItem[];
@@ -77,6 +78,12 @@ export function MediaLibrary({
   // anonymous visitor, while leaving folder navigation/hover/selection/drag
   // (all pure local state) fully real and interactive.
   demoMode?: boolean;
+  // Additive, optional -- lets a caller (the landing page's Chapter 01)
+  // react to a real visitor selecting a thumbnail, so picking an asset can
+  // visibly do something elsewhere on the page instead of selection being a
+  // dead end. Fires with the current selection every time it changes; no
+  // effect on the real app, which doesn't pass this.
+  onSelectionChange?: (ids: string[]) => void;
 }) {
   const router = useRouter();
   const [state, action, pending] = useActionState(
@@ -103,6 +110,12 @@ export function MediaLibrary({
       return next;
     });
   }
+
+  useEffect(() => {
+    onSelectionChange?.(Array.from(selectedIds));
+    // Only meant to fire when the selection itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds]);
 
   const [bulkDeleting, startBulkDelete] = useTransition();
   function handleBulkDelete() {

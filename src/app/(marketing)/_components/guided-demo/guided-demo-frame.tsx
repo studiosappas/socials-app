@@ -33,11 +33,19 @@ export function GuidedDemoFrame({
   const fallbackProgress = useMotionValue(0.5);
   const progress = scrollYProgress ?? fallbackProgress;
   const [start, end] = range ?? [0, 1];
-  const mid = start + (end - start) / 2;
-  const scale = useTransform(progress, [start, mid, end], [0.94, 1, 0.94]);
+  // Settles in over the first ~15% of the window, then HOLDS at full
+  // scale/position for the rest of it -- deliberately asymmetric (no
+  // matching scale-down as the window ends) so the workspace reads as
+  // staying present throughout the chapter, like a camera arriving and
+  // then holding steady, rather than a feature popping in and back out.
+  // StagePanel's own opacity cross-fade is what signals the chapter
+  // ending; this transform never fights it with a second "leaving" cue.
+  const enterEnd = start + (end - start) * 0.15;
+  const scale = useTransform(progress, [start, enterEnd, end], [0.975, 1, 1]);
+  const y = useTransform(progress, [start, enterEnd, end], [14, 0, 0]);
 
   return (
-    <motion.div style={scrollYProgress ? { scale } : undefined} className={`relative ${className}`}>
+    <motion.div style={scrollYProgress ? { scale, y } : undefined} className={`relative ${className}`}>
       {children}
       {phase === "interactive" && <IdleHint />}
     </motion.div>
