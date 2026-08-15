@@ -59,6 +59,20 @@ export async function generateWithImages(
   return { text: textBlock && "text" in textBlock ? textBlock.text : "" };
 }
 
+// Every JSON-shaped AI action (overview.ts's brand section/insights/spectrum
+// generators, and brand-writer.ts) asks the model for "ONLY a JSON object,
+// no other text" but still has to tolerate it wrapping that in prose or
+// markdown fences -- this is the one shared "find the {...} block and parse
+// it" implementation instead of another copy-pasted try/catch.
+export function parseAiJson<T>(text: string): T | null {
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return JSON.parse(jsonMatch ? jsonMatch[0] : text) as T;
+  } catch {
+    return null;
+  }
+}
+
 export async function analyzeDocument(
   prompt: string,
   fileBase64: string,

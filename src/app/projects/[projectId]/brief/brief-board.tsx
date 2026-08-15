@@ -26,6 +26,7 @@ import {
 import { saveMediaAssetAnnotation } from "@/lib/actions/media";
 import { AnnotationEditor } from "@/components/annotation-editor";
 import { BrandMoodboardDialog } from "@/components/brand-moodboard-dialog";
+import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon } from "../grid/grid-board";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
@@ -1007,32 +1008,15 @@ function FrameSection({
       <span className={labelClass}>{title}</span>
       <div className="flex flex-col gap-2">
         {frames.map((frame) => (
-          <div key={frame.id} className="flex items-center gap-2">
-            <input
-              key={`${frame.id}-label`}
-              defaultValue={frame.label}
-              disabled={!canManage}
-              onBlur={(e) => handleLabelBlur(frame.id, e.target.value, frame.label)}
-              className="w-24 shrink-0 truncate border border-border bg-transparent px-1.5 py-2 text-center text-[9px] tracking-normal uppercase text-muted focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:w-28 sm:px-2 sm:text-[10px]"
-            />
-            <input
-              key={`${frame.id}-body`}
-              defaultValue={frame.body}
-              disabled={!canManage}
-              placeholder="Live text"
-              onBlur={(e) => handleBodyBlur(frame.id, e.target.value, frame.body)}
-              className="min-w-0 flex-1 rounded-none border border-border bg-transparent px-3 py-2 text-sm focus:border-foreground focus:outline-none disabled:opacity-60"
-            />
-            {canManage && (
-              <button
-                type="button"
-                onClick={() => handleRemoveFrame(frame.id)}
-                className="shrink-0 rounded-full px-1.5 text-muted transition-all duration-150 hover:bg-error/10 hover:text-error active:scale-90"
-              >
-                ×
-              </button>
-            )}
-          </div>
+          <FrameRow
+            key={frame.id}
+            frame={frame}
+            projectId={projectId}
+            canManage={canManage}
+            onLabelBlur={handleLabelBlur}
+            onBodyBlur={handleBodyBlur}
+            onRemove={handleRemoveFrame}
+          />
         ))}
       </div>
       {canManage && (
@@ -1046,6 +1030,57 @@ function FrameSection({
         >
           {adding ? "Adding..." : section === "frames" ? "+ Add Frame Box" : "+ Add Text Box"}
         </Button>
+      )}
+    </div>
+  );
+}
+
+// Its own component (rather than inline in FrameSection's .map()) so each
+// row gets its own `useState` for the body input's DOM node -- a stable,
+// per-instance setter, unlike a shared ref-keyed-by-id Map read during
+// render, which the react-hooks/refs rule disallows.
+function FrameRow({
+  frame,
+  projectId,
+  canManage,
+  onLabelBlur,
+  onBodyBlur,
+  onRemove,
+}: {
+  frame: BriefTaskFrame;
+  projectId: string;
+  canManage: boolean;
+  onLabelBlur: (frameId: string, value: string, original: string) => void;
+  onBodyBlur: (frameId: string, value: string, original: string) => void;
+  onRemove: (frameId: string) => void;
+}) {
+  const [bodyEl, setBodyEl] = useState<HTMLInputElement | null>(null);
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        defaultValue={frame.label}
+        disabled={!canManage}
+        onBlur={(e) => onLabelBlur(frame.id, e.target.value, frame.label)}
+        className="w-24 shrink-0 truncate border border-border bg-transparent px-1.5 py-2 text-center text-[9px] tracking-normal uppercase text-muted focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:w-28 sm:px-2 sm:text-[10px]"
+      />
+      <input
+        ref={setBodyEl}
+        defaultValue={frame.body}
+        disabled={!canManage}
+        placeholder="Live text"
+        onBlur={(e) => onBodyBlur(frame.id, e.target.value, frame.body)}
+        className="min-w-0 flex-1 rounded-none border border-border bg-transparent px-3 py-2 text-sm focus:border-foreground focus:outline-none disabled:opacity-60"
+      />
+      <BrandWriterField projectId={projectId} field={bodyEl} disabled={!canManage} />
+      {canManage && (
+        <button
+          type="button"
+          onClick={() => onRemove(frame.id)}
+          className="shrink-0 rounded-full px-1.5 text-muted transition-all duration-150 hover:bg-error/10 hover:text-error active:scale-90"
+        >
+          ×
+        </button>
       )}
     </div>
   );

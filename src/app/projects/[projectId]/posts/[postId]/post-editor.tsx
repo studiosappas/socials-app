@@ -36,6 +36,7 @@ import { AnnotationEditor } from "@/components/annotation-editor";
 import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
+import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon, type MediaLibraryItem } from "../../grid/grid-board";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
@@ -578,6 +579,7 @@ function PostMainForm({
   const [addedToTodo, setAddedToTodo] = useState(false);
   const [todoError, setTodoError] = useState<string | undefined>();
   const [, startTransition] = useTransition();
+  const [captionEl, setCaptionEl] = useState<HTMLTextAreaElement | null>(null);
 
   function handleAddToTodo() {
     setTodoError(undefined);
@@ -614,8 +616,12 @@ function PostMainForm({
       </div>
 
       <label className="flex flex-col gap-1.5">
-        <span className={labelClass}>Caption</span>
+        <span className="flex items-center justify-between">
+          <span className={labelClass}>Caption</span>
+          <BrandWriterField projectId={projectId} field={captionEl} disabled={!canManage} />
+        </span>
         <textarea
+          ref={setCaptionEl}
           name="caption"
           defaultValue={post.caption}
           disabled={!canManage}
