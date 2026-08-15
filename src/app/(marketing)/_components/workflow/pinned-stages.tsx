@@ -35,7 +35,14 @@ export function PinnedStages() {
   });
 
   const stages = [
-    <StageFind key="find" active={activeIndex === 0} />,
+    // scrollYProgress is passed only here (StageFind's own extra prop, not
+    // part of the shared WorkflowStageProps contract) so it can derive the
+    // "app scales into focus while scrolling" effect (see
+    // guided-demo/guided-demo-frame.tsx) from the same progress value this
+    // component already computes, rather than each stage re-deriving its
+    // own -- a pinned/sticky element's own position never moves on screen,
+    // so a stage can't derive an equivalent value by tracking itself.
+    <StageFind key="find" active={activeIndex === 0} scrollYProgress={scrollYProgress} />,
     <StageCreate key="create" active={activeIndex === 1} />,
     <StageIntelligence key="intelligence" active={activeIndex === 2} />,
     <StageCollaborate key="collaborate" active={activeIndex === 3} />,

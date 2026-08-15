@@ -64,11 +64,19 @@ export function MediaLibrary({
   items,
   folders,
   pushCommand,
+  demoMode = false,
 }: {
   projectId: string;
   items: MediaLibraryItem[];
   folders: MediaFolder[];
   pushCommand: (command: UndoableCommand) => void;
+  // Additive, default false -- the real app is byte-for-byte unaffected.
+  // Used to embed this real component on the public landing page: hides
+  // every control that fires a real mutating server action (upload, move,
+  // delete) against what would otherwise be a fake demo projectId from an
+  // anonymous visitor, while leaving folder navigation/hover/selection/drag
+  // (all pure local state) fully real and interactive.
+  demoMode?: boolean;
 }) {
   const router = useRouter();
   const [state, action, pending] = useActionState(
@@ -143,6 +151,7 @@ export function MediaLibrary({
   const prevItemIdsRef = useRef(new Set(items.map((i) => i.id)));
   const suppressAutoTrackRef = useRef(false);
   useEffect(() => {
+    if (demoMode) return;
     const prevIds = prevItemIdsRef.current;
     const newItems = items.filter((item) => !prevIds.has(item.id));
     prevItemIdsRef.current = new Set(items.map((i) => i.id));
@@ -187,33 +196,35 @@ export function MediaLibrary({
 
   return (
     <div className="flex flex-col gap-3">
-      <form ref={formRef} action={action} className="flex flex-col gap-2" key={items.length}>
-        <input
-          ref={fileInputRef}
-          type="file"
-          name="file"
-          accept="image/*,video/*"
-          multiple
-          required
-          className="hidden"
-          onChange={(e) => {
-            const files = Array.from(e.target.files ?? []);
-            e.target.value = "";
-            if (files.length > 0) uploadFilesWithPosters(action, files);
-          }}
-        />
-        <Button
-          type="button"
-          variant="primary"
-          radius="none"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={pending}
-          className="w-full py-3 text-xs tracking-wide uppercase"
-        >
-          {pending ? "Uploading..." : "Upload Assets"}
-        </Button>
-        {state?.message && <p className="text-xs text-error">{state.message}</p>}
-      </form>
+      {!demoMode && (
+        <form ref={formRef} action={action} className="flex flex-col gap-2" key={items.length}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            name="file"
+            accept="image/*,video/*"
+            multiple
+            required
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (files.length > 0) uploadFilesWithPosters(action, files);
+            }}
+          />
+          <Button
+            type="button"
+            variant="primary"
+            radius="none"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={pending}
+            className="w-full py-3 text-xs tracking-wide uppercase"
+          >
+            {pending ? "Uploading..." : "Upload Assets"}
+          </Button>
+          {state?.message && <p className="text-xs text-error">{state.message}</p>}
+        </form>
+      )}
 
       {activeFolder ? (
         <button
@@ -228,8 +239,11 @@ export function MediaLibrary({
       {/* Capped to roughly 9 rows (grid-cols-3, ~82px square cells at this
           sidebar's w-64 width, plus gaps) so a project with hundreds of
           uploads doesn't grow the sidebar unboundedly -- scrolls internally
-          for anything past that instead. */}
-      <div className="grid max-h-[620px] grid-cols-3 gap-1 overflow-y-auto">
+          for anything past that instead. Uncapped in demoMode: the landing
+          page's demo library is small and deliberately rendered much wider
+          than the real sidebar, where this cap would just crop the hero
+          panel oddly. */}
+      <div className={`grid grid-cols-3 gap-1 ${demoMode ? "" : "max-h-[620px] overflow-y-auto"}`}>
         {!activeFolderId &&
           folders.map((folder) => (
             <button
@@ -253,17 +267,19 @@ export function MediaLibrary({
             onToggleSelect={() => toggleSelected(item.id)}
           />
         ))}
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          title="Add assets"
-          className="flex aspect-square min-w-0 items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
-        >
-          +
-        </button>
+        {!demoMode && (
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Add assets"
+            className="flex aspect-square min-w-0 items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
+          >
+            +
+          </button>
+        )}
       </div>
 
-      {selectedIds.size > 0 && (
+      {!demoMode && selectedIds.size > 0 && (
         <div className="sticky bottom-0 z-10 flex items-center justify-between gap-2 border border-border bg-card px-3 py-2 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
           <span className="text-xs tracking-wide text-muted uppercase">{selectedIds.size} selected</span>
           <div className="flex items-center gap-1.5">

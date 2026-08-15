@@ -6,5 +6,5 @@ export * from "./demo-grid";
 export * from "./demo-brief";
 export * from "./demo-collaboration";
 export * from "./demo-brand";
-export * from "./demo-assets";
+export * from "./demo-media-library";
 export * from "./demo-export";
