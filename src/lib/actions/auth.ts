@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import * as z from "zod";
 import { createClient } from "@/lib/supabase/server";
+import { resolveLandingPath } from "@/lib/account-settings";
 
 export type AuthFormState = { message?: string } | undefined;
 
@@ -28,13 +29,13 @@ export async function login(_state: AuthFormState, formData: FormData): Promise<
   }
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword(parsed.data);
+  const { data, error } = await supabase.auth.signInWithPassword(parsed.data);
 
   if (error) {
     return { message: error.message };
   }
 
-  redirect("/projects");
+  redirect(await resolveLandingPath(supabase, data.user.id));
 }
 
 export async function signup(_state: AuthFormState, formData: FormData): Promise<AuthFormState> {

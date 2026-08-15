@@ -23,12 +23,14 @@ export function TaskDetail({
   members,
   onStatusChange,
   onOpenLinkedContent,
+  autoExpandComments,
 }: {
   task: TaskItem;
   currentUserId: string;
   members: TeamMember[];
   onStatusChange: (status: TaskStatus) => void;
   onOpenLinkedContent: () => void;
+  autoExpandComments: boolean;
 }) {
   const router = useRouter();
   const [statusOpen, setStatusOpen] = useState(false);
@@ -36,7 +38,7 @@ export function TaskDetail({
   const statusRef = useOutsideClick<HTMLDivElement>(statusOpen, () => setStatusOpen(false));
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
 
-  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(autoExpandComments);
   const [comments, setComments] = useState<TaskCommentItem[] | null>(null);
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);

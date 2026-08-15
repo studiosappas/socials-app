@@ -2,12 +2,24 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { logActivity } from "@/lib/activity-log";
 import { NOTIFICATION_EVENTS } from "@/lib/notification-events";
+import {
+  DATE_FORMAT_OPTIONS,
+  LANDING_PAGE_OPTIONS,
+  type UserPreferences,
+  type WorkspaceSettings,
+} from "@/lib/account-settings";
 
 export type SettingsActionState = { message?: string; success?: boolean } | undefined;
 
+// One action for the whole Profile card (name, avatar, email) behind a
+// single "Save Changes" button -- previously three separate forms/buttons.
+// Avatar removal and a new upload are mutually exclusive from the client
+// (see account-panel.tsx), so only one of remove_avatar/avatar is ever
+// actually acted on here.
 export async function updateAccountProfile(
   _state: SettingsActionState,
   formData: FormData,
@@ -21,7 +33,7 @@ export async function updateAccountProfile(
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { message: "Name is required." };
 
-  const update: { name: string; avatar_url?: string } = { name };
+  const update: { name: string; avatar_url?: string | null } = { name };
 
   const photo = formData.get("avatar");
   if (photo instanceof File && photo.size > 0) {
@@ -35,27 +47,28 @@ export async function updateAccountProfile(
 
     const { data } = supabase.storage.from("avatars").getPublicUrl(storagePath);
     update.avatar_url = data.publicUrl;
+  } else if (formData.get("remove_avatar") === "true") {
+    update.avatar_url = null;
   }
 
   const { error } = await supabase.from("profiles").update(update).eq("id", user.id);
   if (error) return { message: error.message };
 
-  revalidatePath("/", "layout");
-  return { success: true };
-}
-
-export async function updateAccountEmail(
-  _state: SettingsActionState,
-  formData: FormData,
-): Promise<SettingsActionState> {
+  // Email changes don't take effect immediately (Supabase emails a
+  // confirmation link to both the old and new address) -- only fire this
+  // when it's actually different from the current one, so re-saving the
+  // Profile card for an unrelated name/avatar change doesn't re-trigger a
+  // confirmation email every time.
+  let message: string | undefined;
   const email = String(formData.get("email") ?? "").trim();
-  if (!email) return { message: "Email is required." };
+  if (email && email !== user.email) {
+    const { error: emailError } = await supabase.auth.updateUser({ email });
+    if (emailError) return { message: emailError.message };
+    message = "Profile updated. Check your inbox to confirm your new email address.";
+  }
 
-  const supabase = await createClient();
-  const { error } = await supabase.auth.updateUser({ email });
-  if (error) return { message: error.message };
-
-  return { success: true, message: "Check your inbox to confirm the new email address." };
+  revalidatePath("/", "layout");
+  return { success: true, message };
 }
 
 export async function updateAccountPassword(
@@ -72,6 +85,100 @@ export async function updateAccountPassword(
   const { error } = await supabase.auth.updateUser({ password });
   if (error) return { message: error.message };
 
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// Account > Workspace & Preferences -- see src/lib/account-settings.ts for
+// the shared types/defaults/option lists both these actions and the UI
+// (account-panel.tsx) read from, so they can't drift apart.
+// ---------------------------------------------------------------------------
+
+export async function updateWorkspaceSettings(
+  _state: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { message: "Not signed in." };
+
+  const dateFormat = String(formData.get("date_format") ?? "");
+  if (!DATE_FORMAT_OPTIONS.some((o) => o.value === dateFormat)) {
+    return { message: "Invalid date format." };
+  }
+  const landingPage = String(formData.get("default_landing_page") ?? "");
+  if (!LANDING_PAGE_OPTIONS.some((o) => o.value === landingPage)) {
+    return { message: "Invalid default landing page." };
+  }
+  const weekStartsOn = formData.get("week_starts_on") === "1" ? 1 : 0;
+
+  const settings: WorkspaceSettings = {
+    language: String(formData.get("language") ?? "en"),
+    timezone: String(formData.get("timezone") ?? "UTC").trim() || "UTC",
+    date_format: dateFormat as WorkspaceSettings["date_format"],
+    week_starts_on: weekStartsOn,
+    default_landing_page: landingPage as WorkspaceSettings["default_landing_page"],
+  };
+
+  const { error } = await supabase.from("profiles").update({ workspace_settings: settings }).eq("id", user.id);
+  if (error) return { message: error.message };
+
+  revalidatePath("/", "layout");
+  return { success: true };
+}
+
+export async function updatePreferences(
+  _state: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { message: "Not signed in." };
+
+  const themeValue: UserPreferences["theme"] = formData.get("theme") === "dark" ? "dark" : "light";
+  const checked = (key: string) => formData.get(key) === "on";
+
+  const preferences: UserPreferences = {
+    theme: themeValue,
+    notifications: {
+      email: checked("notif_email"),
+      in_app: checked("notif_in_app"),
+      task_assignments: checked("notif_task_assignments"),
+      client_review: checked("notif_client_review"),
+      ai_generation: checked("notif_ai_generation"),
+      daily_summary: checked("notif_daily_summary"),
+    },
+    calendar: {
+      default_view: "month",
+      show_weekends: checked("calendar_show_weekends"),
+    },
+    interface: {
+      compact_mode: checked("interface_compact_mode"),
+      reduce_motion: checked("interface_reduce_motion"),
+      show_ai_tips: checked("interface_show_ai_tips"),
+      auto_expand_comments: checked("interface_auto_expand_comments"),
+    },
+  };
+
+  const { error } = await supabase.from("profiles").update({ preferences }).eq("id", user.id);
+  if (error) return { message: error.message };
+
+  // Read on the very next request by layout.tsx's <html data-theme>/
+  // data-reduce-motion -- keeps the change visible immediately without
+  // waiting on anything else. 1 year: this is a preference, not a session,
+  // and re-saving already refreshes it every time the user changes it.
+  const cookieStore = await cookies();
+  cookieStore.set(
+    "theme_prefs",
+    JSON.stringify({ theme: preferences.theme, reduce_motion: preferences.interface.reduce_motion }),
+    { maxAge: 60 * 60 * 24 * 365, path: "/", sameSite: "lax" },
+  );
+
+  revalidatePath("/", "layout");
   return { success: true };
 }
 

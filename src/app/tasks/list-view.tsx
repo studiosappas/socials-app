@@ -25,6 +25,7 @@ export function ListView({
   today,
   tomorrow,
   onAddTask,
+  autoExpandComments,
 }: {
   tasks: TaskItem[];
   membersByProject: Record<string, TeamMember[]>;
@@ -37,6 +38,7 @@ export function ListView({
   today: string;
   tomorrow: string;
   onAddTask: () => void;
+  autoExpandComments: boolean;
 }) {
   if (tasks.length === 0) {
     return (
@@ -75,6 +77,7 @@ export function ListView({
           members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
           onStatusChange={(status) => onStatusChange(task.id, status)}
           onOpenLinkedContent={() => onOpenLinkedContent(task)}
+          autoExpandComments={autoExpandComments}
         />
       )}
     </div>

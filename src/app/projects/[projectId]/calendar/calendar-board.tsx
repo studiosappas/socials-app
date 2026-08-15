@@ -74,6 +74,7 @@ export function CalendarBoard({
   unscheduled,
   canManage,
   members,
+  weekStartsOn = 0,
 }: {
   projectId: string;
   monthLabel: string;
@@ -83,7 +84,19 @@ export function CalendarBoard({
   unscheduled: CalendarItem[];
   canManage: boolean;
   members: ProjectMemberOption[];
+  // Account > Workspace's Week Starts On (0=Sunday, 1=Monday) -- rotates the
+  // header row to match; `cells` itself is already built starting from the
+  // matching day server-side (calendar/page.tsx passes the same value into
+  // date-fns' startOfWeek/endOfWeek), so only the label row needs rotating
+  // here. showWeekends isn't wired into an actual column-hide yet -- doing
+  // that safely means also updating the row-expand math a few lines down
+  // (Math.floor(index / 7), hardcoded to a 7-wide week) and drag-and-drop's
+  // own per-row grouping, not just the grid's column count -- left as a
+  // saved-but-not-yet-applied preference rather than risk that regressing
+  // without being able to test drag-and-drop interactively.
+  weekStartsOn?: 0 | 1;
 }) {
+  const weekdayLabels = [...WEEKDAY_LABELS.slice(weekStartsOn), ...WEEKDAY_LABELS.slice(0, weekStartsOn)];
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [libraryDialog, setLibraryDialog] = useState<LibraryDialogState>(null);
@@ -268,7 +281,7 @@ export function CalendarBoard({
                 the grid down. */}
             <div>
               <div className="grid grid-cols-7 text-center text-[10px] font-semibold tracking-wide uppercase sm:text-xs">
-                {WEEKDAY_LABELS.map((d) => (
+                {weekdayLabels.map((d) => (
                   <div key={d} className="py-2">
                     {d.slice(0, 3)}
                   </div>

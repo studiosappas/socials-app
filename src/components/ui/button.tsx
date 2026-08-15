@@ -4,7 +4,12 @@ type Variant = "primary" | "secondary" | "ghost";
 type Radius = "md" | "none" | "full";
 
 const VARIANT_CLASSES: Record<Variant, string> = {
-  primary: "bg-accent text-white hover:bg-black/85",
+  // text-accent-foreground (not a hardcoded text-white) -- accent flips to a
+  // light color in dark mode (see globals.css), so the text needs to flip
+  // with it. hover:opacity-85 works either direction, unlike the old
+  // hover:bg-black/85 (which only ever darkened, wrong once accent itself
+  // is already light).
+  primary: "bg-accent text-accent-foreground hover:opacity-85",
   secondary: "bg-card border border-border text-foreground hover:border-foreground/30",
   ghost: "text-foreground hover:bg-black/[0.03]",
 };

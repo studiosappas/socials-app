@@ -19,6 +19,7 @@ export function TaskWorkspace({
   membersByProject,
   today,
   tomorrow,
+  autoExpandComments,
 }: {
   currentUserId: string;
   tasks: TaskItem[];
@@ -26,6 +27,7 @@ export function TaskWorkspace({
   membersByProject: Record<string, TeamMember[]>;
   today: string;
   tomorrow: string;
+  autoExpandComments: boolean;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -126,6 +128,7 @@ export function TaskWorkspace({
           today={today}
           tomorrow={tomorrow}
           onAddTask={() => setNewTaskOpen(true)}
+          autoExpandComments={autoExpandComments}
         />
       ) : (
         <BoardView
@@ -139,6 +142,7 @@ export function TaskWorkspace({
           onOpenLinkedContent={handleOpenLinkedContent}
           today={today}
           tomorrow={tomorrow}
+          autoExpandComments={autoExpandComments}
         />
       )}
 

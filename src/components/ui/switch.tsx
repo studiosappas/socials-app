@@ -23,7 +23,7 @@ export function Switch({
         className="peer sr-only"
       />
       <span className="absolute inset-0 rounded-full bg-border transition-colors peer-checked:bg-accent peer-disabled:opacity-50" />
-      <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4" />
+      <span className="absolute left-0.5 h-4 w-4 rounded-full bg-card shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform peer-checked:translate-x-4" />
     </label>
   );
 }

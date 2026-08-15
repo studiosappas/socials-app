@@ -8,7 +8,7 @@ type Radius = "md" | "none" | "full";
 // in new tab, no-JS navigation), so this mirrors Button's exact class
 // tables rather than nesting a Link inside a button element.
 const VARIANT_CLASSES: Record<Variant, string> = {
-  primary: "bg-accent text-white hover:bg-black/85",
+  primary: "bg-accent text-accent-foreground hover:opacity-85",
   secondary: "bg-card border border-border text-foreground hover:border-foreground/30",
   ghost: "text-foreground hover:bg-black/[0.03]",
 };

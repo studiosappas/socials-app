@@ -1149,6 +1149,14 @@ create policy "Admins manage brand moodboard" on public.brand_moodboard_items fo
   using (public.project_role(project_id) in ('owner', 'admin'))
   with check (public.project_role(project_id) in ('owner', 'admin'));
 
+-- ---------- Account: Workspace & Preferences settings ----------
+-- Two jsonb columns rather than one column per setting -- both sections are
+-- explicitly meant to grow (new Workspace/Preferences fields later) without
+-- another migration each time, same reasoning as project_members'
+-- notification_prefs jsonb column.
+alter table public.profiles add column if not exists workspace_settings jsonb not null default '{}'::jsonb;
+alter table public.profiles add column if not exists preferences jsonb not null default '{}'::jsonb;
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

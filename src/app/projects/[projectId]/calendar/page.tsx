@@ -11,6 +11,7 @@ import {
 import { createClient } from "@/lib/supabase/server";
 import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-board";
 import { getProjectMemberOptions } from "@/lib/data/post-comments";
+import { mergeWorkspaceSettings } from "@/lib/account-settings";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -24,22 +25,32 @@ export default async function CalendarPage({
   const { projectId } = await params;
   const { month: monthParam } = await searchParams;
 
-  const anchor = monthParam ? new Date(`${monthParam}-01T00:00:00`) : new Date();
-  const monthStart = startOfMonth(anchor);
-  const monthEnd = endOfMonth(anchor);
-  const gridStart = startOfWeek(monthStart);
-  const gridEnd = endOfWeek(monthEnd);
-
-  const monthStartStr = format(monthStart, "yyyy-MM-dd");
-  const monthEndStr = format(monthEnd, "yyyy-MM-dd");
-  const gridStartStr = format(gridStart, "yyyy-MM-dd");
-  const gridEndStr = format(gridEnd, "yyyy-MM-dd");
-
   const supabase = await createClient();
 
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  // Account > Workspace's Week Starts On + Preferences > Calendar's Show
+  // Weekends -- fetched here (not just at Account) since this is the one
+  // place they actually change anything.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("workspace_settings")
+    .eq("id", user!.id)
+    .single();
+  const { week_starts_on: weekStartsOn } = mergeWorkspaceSettings(profile?.workspace_settings);
+
+  const anchor = monthParam ? new Date(`${monthParam}-01T00:00:00`) : new Date();
+  const monthStart = startOfMonth(anchor);
+  const monthEnd = endOfMonth(anchor);
+  const gridStart = startOfWeek(monthStart, { weekStartsOn });
+  const gridEnd = endOfWeek(monthEnd, { weekStartsOn });
+
+  const monthStartStr = format(monthStart, "yyyy-MM-dd");
+  const monthEndStr = format(monthEnd, "yyyy-MM-dd");
+  const gridStartStr = format(gridStart, "yyyy-MM-dd");
+  const gridEndStr = format(gridEnd, "yyyy-MM-dd");
 
   const { data: membership } = await supabase
     .from("project_members")
@@ -255,6 +266,7 @@ export default async function CalendarPage({
       unscheduled={unscheduled}
       canManage={canManage}
       members={members}
+      weekStartsOn={weekStartsOn}
     />
   );
 }

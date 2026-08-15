@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
-import { AccountPanel } from "@/app/projects/[projectId]/settings/settings-panels";
+import { mergePreferences, mergeWorkspaceSettings } from "@/lib/account-settings";
+import { AccountPanel } from "./account-panel";
 
 export default async function AccountPage() {
   const supabase = await createClient();
@@ -9,7 +10,7 @@ export default async function AccountPage() {
 
   const { data: profile } = await supabase
     .from("profiles")
-    .select("name, avatar_url")
+    .select("name, avatar_url, workspace_settings, preferences")
     .eq("id", user!.id)
     .single();
 
@@ -23,6 +24,8 @@ export default async function AccountPage() {
         name={profile?.name ?? ""}
         email={user?.email ?? ""}
         avatarUrl={profile?.avatar_url ?? null}
+        workspaceSettings={mergeWorkspaceSettings(profile?.workspace_settings)}
+        preferences={mergePreferences(profile?.preferences)}
       />
     </div>
   );

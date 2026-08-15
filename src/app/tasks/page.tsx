@@ -1,6 +1,7 @@
 import { addDays, format } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
 import { getTasksForUser, type TeamMember } from "@/lib/data/tasks";
+import { mergePreferences } from "@/lib/account-settings";
 import { TaskWorkspace } from "./task-workspace";
 
 export default async function TodoPage() {
@@ -13,6 +14,9 @@ export default async function TodoPage() {
   const tomorrow = format(addDays(new Date(), 1), "yyyy-MM-dd");
 
   const { tasks, projectsById, membersByProject } = await getTasksForUser(supabase, user!.id);
+
+  const { data: profile } = await supabase.from("profiles").select("preferences").eq("id", user!.id).single();
+  const { interface: interfacePrefs } = mergePreferences(profile?.preferences);
 
   // Maps aren't serializable across the server/client component boundary --
   // flatten to a plain array + a plain object keyed by project id.
@@ -36,6 +40,7 @@ export default async function TodoPage() {
         membersByProject={membersByProjectPlain}
         today={today}
         tomorrow={tomorrow}
+        autoExpandComments={interfacePrefs.auto_expand_comments}
       />
     </main>
   );

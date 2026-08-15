@@ -83,9 +83,18 @@ export interface Database {
           email: string | null;
           is_admin: boolean;
           created_at: string;
+          workspace_settings: Json;
+          preferences: Json;
         };
         Insert: { id: string; name: string; avatar_url?: string | null; email?: string | null; is_admin?: boolean };
-        Update: { name?: string; avatar_url?: string | null; email?: string | null; is_admin?: boolean };
+        Update: {
+          name?: string;
+          avatar_url?: string | null;
+          email?: string | null;
+          is_admin?: boolean;
+          workspace_settings?: Json;
+          preferences?: Json;
+        };
         Relationships: [];
       };
       landing_demo_content: {

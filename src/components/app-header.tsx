@@ -13,10 +13,16 @@ export function AppHeader({
   projects = [],
   notificationItems = [],
   unreadCount = 0,
+  homeHref = "/projects",
 }: {
   projects?: NavProject[];
   notificationItems?: NotificationItem[];
   unreadCount?: number;
+  // Where the logo links -- resolved server-side from the signed-in user's
+  // Account > Workspace "Default Home Page" setting (see
+  // account-settings.ts's resolveLandingPath, shared with the post-login
+  // redirect). Defaults to /projects for logged-out renders.
+  homeHref?: string;
 }) {
   const pathname = usePathname();
   const onAccount = pathname.startsWith("/account");
@@ -30,7 +36,7 @@ export function AppHeader({
     <header className="px-4 py-4 sm:px-6">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <Link
-          href="/projects"
+          href={homeHref}
           className="shrink-0 whitespace-nowrap text-xl font-semibold font-[family-name:var(--font-fraunces)] tracking-wide"
         >
           Flow:er

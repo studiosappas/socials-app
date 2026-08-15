@@ -1445,3 +1445,11 @@ create policy "Admins manage landing media"
   to authenticated
   using (bucket_id = 'landing-media' and exists (select 1 from public.profiles where id = auth.uid() and is_admin))
   with check (bucket_id = 'landing-media' and exists (select 1 from public.profiles where id = auth.uid() and is_admin));
+
+-- ---------- Account: Workspace & Preferences settings ----------
+-- Two jsonb columns rather than one column per setting -- both sections are
+-- explicitly meant to grow (new Workspace/Preferences fields later) without
+-- another migration each time, same reasoning as project_members'
+-- notification_prefs jsonb column.
+alter table public.profiles add column if not exists workspace_settings jsonb not null default '{}'::jsonb;
+alter table public.profiles add column if not exists preferences jsonb not null default '{}'::jsonb;

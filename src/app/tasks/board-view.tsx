@@ -35,6 +35,7 @@ type SharedProps = {
   onOpenLinkedContent: (task: TaskItem) => void;
   today: string;
   tomorrow: string;
+  autoExpandComments: boolean;
 };
 
 export function BoardView(props: SharedProps) {
@@ -57,6 +58,7 @@ function DesktopBoard({
   onOpenLinkedContent,
   today,
   tomorrow,
+  autoExpandComments,
 }: SharedProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
@@ -105,6 +107,7 @@ function DesktopBoard({
                         members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
                         onStatusChange={(status) => onStatusChange(task.id, status)}
                         onOpenLinkedContent={() => onOpenLinkedContent(task)}
+                        autoExpandComments={autoExpandComments}
                       />
                     )}
                   </DraggableTaskCard>
@@ -167,6 +170,7 @@ function MobileBoard({
   onOpenLinkedContent,
   today,
   tomorrow,
+  autoExpandComments,
 }: SharedProps) {
   const [activeTab, setActiveTab] = useState<TaskStatus>("todo");
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -233,6 +237,7 @@ function MobileBoard({
                         members={task.projectId ? (membersByProject[task.projectId] ?? []) : []}
                         onStatusChange={(status) => onStatusChange(task.id, status)}
                         onOpenLinkedContent={() => onOpenLinkedContent(task)}
+                        autoExpandComments={autoExpandComments}
                       />
                     )}
                   </div>

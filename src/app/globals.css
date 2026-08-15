@@ -1,15 +1,42 @@
 @import "tailwindcss";
 
 :root {
+  /* Tells the browser which palette to draw its OWN native UI in --
+     select/date/time popups, scrollbars, autofill highlight -- so a native
+     <select>'s dropdown list renders with a dark background + light text
+     instead of white-on-white-with-light-text-on-top (our custom
+     text-foreground color inherits into the popup, but the popup's
+     background does not; without this, that mismatch makes every <select>
+     unreadable in dark mode). */
+  color-scheme: light;
   --background: #faf9f6;
   --card: #ffffff;
   --foreground: #171412;
   --muted: #6b6a68;
   --border: #e7e4de;
   --accent: #000000;
+  --accent-foreground: #ffffff;
   --success: #6b8e6b;
   --warning: #b08a4e;
   --error: #b25450;
+}
+
+/* Explicit only -- no OS/"system" following. Set server-side in layout.tsx
+   from the theme_prefs cookie (see AccountPanel's Preferences card); no
+   cookie yet (never saved) means no attribute, which falls through to
+   :root's light values above, matching the Light/Dark switch's own default. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #171412;
+  --card: #211e1a;
+  --foreground: #f5f4f1;
+  --muted: #9c9a95;
+  --border: #332f2a;
+  --accent: #f5f4f1;
+  --accent-foreground: #171412;
+  --success: #7fa87f;
+  --warning: #c9a066;
+  --error: #c96b65;
 }
 
 @theme inline {
@@ -19,10 +46,21 @@
   --color-muted: var(--muted);
   --color-border: var(--border);
   --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-error: var(--error);
   --font-sans: var(--font-poppins);
+}
+
+/* Set on <html> server-side (layout.tsx) from the saved Interface >
+   Reduce Motion preference -- same attribute-on-<html> mechanism as theme,
+   just a plain global override rather than a token swap. */
+[data-reduce-motion="true"] * {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
 }
 
 body {
@@ -32,8 +70,35 @@ body {
   font-weight: 400;
 }
 
+/* color-scheme (above) steers a <select>'s native chrome (border, arrow,
+   scrollbar), but Chrome/Firefox/Edge render each dropdown ROW using the
+   CSS set directly on <option> -- without this, the popup falls back to
+   opaque white with our (light, in dark mode) text color inherited on top,
+   unreadable. Setting it explicitly here is what actually fixes it.
+   :checked/:hover also replaces the browser's default blue row-highlight
+   with the app's own foreground/background pair. */
+select {
+  background-color: var(--card);
+  color: var(--foreground);
+}
+
+select option {
+  background-color: var(--card);
+  color: var(--foreground);
+}
+
+select option:checked,
+select option:hover {
+  background-color: var(--foreground);
+  color: var(--background);
+}
+
 ::selection {
   background: rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="dark"] ::selection {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 @keyframes settle-in {

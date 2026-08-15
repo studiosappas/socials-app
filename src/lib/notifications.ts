@@ -1,5 +1,6 @@
 import type { createClient } from "@/lib/supabase/server";
 import { parseMentions } from "@/lib/mentions";
+import { mergePreferences } from "@/lib/account-settings";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
@@ -37,8 +38,24 @@ export async function notifyProjectMembers(
 
     if (recipients.length === 0) return;
 
+    // Account > Preferences' notification toggles apply on top of the
+    // per-project gate above -- in-app is a master switch, client_review and
+    // ai_generation gate their one matching event key each. Same
+    // default-to-notified reasoning as the per-project gate: a user who has
+    // never saved a preference must still get notified.
+    const { data: profiles } = await supabase.from("profiles").select("id, preferences").in("id", recipients);
+    const finalRecipients = recipients.filter((userId) => {
+      const { notifications } = mergePreferences(profiles?.find((p) => p.id === userId)?.preferences);
+      if (!notifications.in_app) return false;
+      if (eventKey === "review_comment" && !notifications.client_review) return false;
+      if (eventKey === "ai_analysis_complete" && !notifications.ai_generation) return false;
+      return true;
+    });
+
+    if (finalRecipients.length === 0) return;
+
     await supabase.from("notifications").insert(
-      recipients.map((userId) => ({
+      finalRecipients.map((userId) => ({
         user_id: userId,
         project_id: projectId,
         event_key: eventKey,
