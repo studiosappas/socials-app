@@ -65,7 +65,7 @@ export default async function ProjectsPage() {
           <li key={project.id} className="border-b border-border">
             <Link
               href={`/projects/${project.id}/grid`}
-              className="flex items-center justify-between px-1 py-4 hover:bg-black/[0.02]"
+              className="flex items-center justify-between px-1 py-4 transition-[transform,background-color] duration-100 hover:bg-black/[0.02] active:scale-[0.98] active:bg-black/[0.04]"
             >
               <span className="text-sm">{project.name}</span>
               <span className="text-xs tracking-wide text-muted uppercase">{project.role}</span>

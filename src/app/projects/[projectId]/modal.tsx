@@ -29,7 +29,7 @@ export function Modal({ children, onClose }: { children: React.ReactNode; onClos
         onClick={close}
         className="fixed inset-0 -z-10 cursor-default"
       />
-      <div className="relative w-full max-w-3xl rounded-none border border-border bg-card p-4 sm:p-6">
+      <div className="relative w-full max-w-3xl overflow-x-hidden rounded-none border border-border bg-card p-4 sm:p-6">
         <button
           type="button"
           onClick={close}

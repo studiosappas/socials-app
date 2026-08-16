@@ -270,16 +270,12 @@ export function CalendarBoard({
               </h2>
             </div>
 
-            {/* No forced min-width/horizontal scroll here -- the grid sizes
-                itself to whatever width is available so a whole week is
-                always visible on mobile without needing to scroll on two
-                axes at once (the real usability problem with a fixed-width
-                calendar on a phone, more than any single element being too
-                small). Cell content is compact enough to work at any width;
-                tapping a day always opens the same DayDetailDialog with the
-                full item list and actions, so nothing is lost by shrinking
-                the grid down. */}
-            <div>
+            {/* Below sm:, a 7-column grid caps every cell at viewport/7 wide
+                no matter what, which can't show a post at a usable size on a
+                phone -- that's a structural ceiling, not something more CSS
+                tuning fixes, so mobile gets its own agenda-list presentation
+                instead of a shrunk copy of this grid. */}
+            <div className="hidden sm:block">
               <div className="grid grid-cols-7 text-center text-[10px] font-semibold tracking-wide uppercase sm:text-xs">
                 {weekdayLabels.map((d) => (
                   <div key={d} className="py-2">
@@ -313,6 +309,27 @@ export function CalendarBoard({
                   />
                 ))}
               </div>
+            </div>
+
+            <div className="sm:hidden">
+              {effectiveCells
+                .filter((cell) => cell.isCurrentMonth)
+                .map((cell) => (
+                  <MobileDayRow
+                    key={cell.date}
+                    projectId={projectId}
+                    cell={cell}
+                    canManage={canManage}
+                    members={members}
+                    onContextMenu={
+                      canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
+                    }
+                    isEditingNote={editingNoteDate === cell.date}
+                    onStartEditNote={() => setEditingNoteDate(cell.date)}
+                    onCancelEditNote={() => setEditingNoteDate(null)}
+                    onSaveNote={(body) => handleSaveNote(cell.date, body)}
+                  />
+                ))}
             </div>
           </div>
 
@@ -650,6 +667,130 @@ function DayCell({
   );
 }
 
+// Mobile's own presentation, swapped in below sm: instead of a shrunk copy
+// of the 7-column grid above (see the "structural ceiling" comment at its
+// call site) -- one row per day, date on the left, a horizontally
+// scrollable strip of real-sized ExpandedItemTiles on the right (no
+// expand/collapse state needed, unlike the grid: a horizontal strip already
+// holds any number of items without a week-toggle or "+N" cap). Reuses
+// ExpandedItemTile itself (not a rebuilt lookalike) so the visual language
+// -- image, content-type badge, publish-toggle circle -- stays identical to
+// desktop, and reuses the same ⋮ day-options menu DayCell already wires up
+// for touch, so no new server actions or menu component were needed.
+function MobileDayRow({
+  projectId,
+  cell,
+  canManage,
+  members,
+  onContextMenu,
+  isEditingNote,
+  onStartEditNote,
+  onCancelEditNote,
+  onSaveNote,
+}: {
+  projectId: string;
+  cell: CalendarCell;
+  canManage: boolean;
+  members: ProjectMemberOption[];
+  onContextMenu?: (x: number, y: number) => void;
+  isEditingNote: boolean;
+  onStartEditNote: () => void;
+  onCancelEditNote: () => void;
+  onSaveNote: (body: string) => void;
+}) {
+  const [noteText, setNoteText] = useState(cell.note ?? "");
+  const [prevIsEditingNote, setPrevIsEditingNote] = useState(isEditingNote);
+  if (isEditingNote !== prevIsEditingNote) {
+    setPrevIsEditingNote(isEditingNote);
+    if (isEditingNote) setNoteText(cell.note ?? "");
+  }
+  const weekdayLabel = new Date(`${cell.date}T00:00:00`).toLocaleDateString("en-US", { weekday: "short" });
+
+  function handleNoteKeyDown(e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) {
+    if (e.defaultPrevented) return;
+    if (e.key === "Escape") {
+      onCancelEditNote();
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      onSaveNote(noteText);
+    }
+  }
+
+  return (
+    <div className={`flex gap-3 border-b border-border py-3 first:pt-0 ${cell.isToday ? "bg-black/[.02]" : ""}`}>
+      <div className="flex w-9 shrink-0 flex-col items-center pt-0.5">
+        <span
+          className={`flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold ${
+            cell.isToday ? "bg-foreground text-background" : ""
+          }`}
+        >
+          {cell.dayNumber}
+        </span>
+        <span className="mt-0.5 text-[9px] tracking-wide text-muted uppercase">{weekdayLabel}</span>
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        {isEditingNote ? (
+          <MentionField
+            multiline
+            autoFocus
+            value={noteText}
+            onChange={setNoteText}
+            members={members}
+            rows={2}
+            placeholder="Note... (@ to mention)"
+            onKeyDown={handleNoteKeyDown}
+            onBlur={() => onSaveNote(noteText)}
+            className="w-full resize-none rounded-none border border-foreground bg-background px-2 py-1 text-xs focus:outline-none"
+          />
+        ) : (
+          cell.note && (
+            <div
+              role={canManage ? "button" : undefined}
+              tabIndex={canManage ? 0 : undefined}
+              onClick={() => canManage && onStartEditNote()}
+              className="w-full rounded-none border border-border bg-black/[.02] px-2 py-1 text-left text-xs text-muted"
+            >
+              {cell.note}
+            </div>
+          )
+        )}
+
+        {cell.items.length > 0 ? (
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {cell.items.map((item) => (
+              <ExpandedItemTile
+                key={`${item.itemType}-${item.itemId}`}
+                projectId={projectId}
+                item={item}
+                canManage={canManage}
+                widthClassName="w-28 shrink-0"
+                draggable={false}
+              />
+            ))}
+          </div>
+        ) : (
+          !cell.note && <span className="text-xs text-muted/50">—</span>
+        )}
+      </div>
+
+      {canManage && onContextMenu && (
+        <button
+          type="button"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            onContextMenu(rect.right, rect.bottom);
+          }}
+          title="Day options"
+          className="h-7 w-7 shrink-0 self-start rounded text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+        >
+          ⋮
+        </button>
+      )}
+    </div>
+  );
+}
+
 // Matches Brief's image-chip language (rounded-full pill, small circular
 // thumbnail, label text) -- draggable so an already-scheduled item can be
 // picked up and dropped on a different day, same as items dragged in from
@@ -698,10 +839,20 @@ function ExpandedItemTile({
   projectId,
   item,
   canManage,
+  widthClassName = "w-full",
+  draggable = true,
 }: {
   projectId: string;
   item: CalendarItem;
   canManage: boolean;
+  // "w-full" for the desktop expanded-row stack (unchanged default); the
+  // mobile agenda's horizontal day strip passes a fixed width instead.
+  widthClassName?: string;
+  // Off for the mobile agenda -- a horizontal-scroll strip of draggable
+  // tiles would reintroduce the same touch/scroll conflict the Grid mobile
+  // pass fixes, and drag-to-reschedule isn't essential there since tapping
+  // into the post/story to change its date already works.
+  draggable?: boolean;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
@@ -727,10 +878,9 @@ function ExpandedItemTile({
   return (
     <div
       ref={setNodeRef}
-      {...listeners}
-      {...attributes}
+      {...(draggable ? { ...listeners, ...attributes } : {})}
       onClick={(e) => e.stopPropagation()}
-      className={`w-full touch-none transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
+      className={`${widthClassName} transition-opacity duration-150 ${draggable ? "touch-none" : ""} ${isDragging ? "opacity-30" : ""}`}
     >
       <Link
         href={item.href}
@@ -758,13 +908,13 @@ function ExpandedItemTile({
         {/* Comments live on the post/story editor itself (see ItemComments
             there) -- this is just a discoverable affordance pointing at the
             same destination the whole tile already links to, not a second
-            comment UI. */}
+            comment UI. Hover-only: it doesn't indicate an actual comment
+            count, so forcing it always-on for touch (no hover state) just
+            put an unclear icon over every tile with no way to dismiss it --
+            tapping the tile already reaches the same place. */}
         <span
           title="Comments"
-          // pointer-coarse: touch has no hover state to reveal this with, so
-          // it's always shown there -- desktop keeps the existing
-          // hover-only reveal unchanged.
-          className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100"
+          className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
         >
           💬
         </span>

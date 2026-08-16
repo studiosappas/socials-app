@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useActionState, useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -146,6 +146,7 @@ export function GridBoard({
   canManage,
   shareLinks,
   shareTableMissing,
+  demoMode = false,
 }: {
   projectId: string;
   projectName: string;
@@ -170,6 +171,14 @@ export function GridBoard({
   canManage: boolean;
   shareLinks: ShareLinkItem[];
   shareTableMissing: boolean;
+  // Additive, default false -- the real app is byte-for-byte unaffected.
+  // Same pattern as media-library.tsx's own demoMode: no-ops every control
+  // wired to a real mutating server action (add/remove row, persist a
+  // reorder/assign/crop, delete post/media, share links, opening the real
+  // Post Editor route) while leaving drag-and-drop's optimistic
+  // `overrideRows` visual feedback, folder browsing, and the crop overlay's
+  // own pan/zoom fully real and interactive.
+  demoMode?: boolean;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -180,8 +189,36 @@ export function GridBoard({
   // work), so tapping an empty slot opens this picker instead -- the
   // touch-friendly equivalent of dragging from the sidebar.
   const [pickerSlotId, setPickerSlotId] = useState<string | null>(null);
+
+  // Touch devices get an explicit "Edit Grid" mode instead of always-on
+  // drag -- a bare touch-action:none on every tile (needed so dnd-kit can
+  // tell a drag from a scroll) otherwise blocks native vertical scrolling
+  // the instant a finger lands on any populated tile. Desktop (fine
+  // pointer) never sets isTouchDevice, so dragEnabled is always true there
+  // and this whole mode is invisible/unused -- mouse drag behaves exactly
+  // as before. useSyncExternalStore (not state+effect) since this reads
+  // external browser state -- getServerSnapshot returns false so SSR/first
+  // paint assumes non-touch, then syncs to the real value on the client.
+  const isTouchDevice = useSyncExternalStore(
+    (onChange) => {
+      const mq = window.matchMedia("(pointer: coarse)");
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia("(pointer: coarse)").matches,
+    () => false,
+  );
+  const [reorderMode, setReorderMode] = useState(false);
+  const dragEnabled = !isTouchDevice || reorderMode;
+
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(PointerSensor, {
+      // Long-press to start a drag on touch, same as iOS/Google Photos
+      // reorder gestures -- lets a quick swipe still scroll even while
+      // Edit Grid mode is on, only a deliberate press-and-hold picks up a
+      // tile. Desktop keeps the original short distance threshold.
+      activationConstraint: isTouchDevice ? { delay: 200, tolerance: 8 } : { distance: 4 },
+    }),
   );
 
   const { push: pushCommand, undo, redo, canUndo, canRedo, isBusy: undoRedoBusy } = useUndoStack();
@@ -325,6 +362,10 @@ export function GridBoard({
         }),
       }));
       setOverrideRows(afterRows);
+      // The visual reorder above is real and final either way -- everything
+      // past this point is persistence + undo/redo, which demoMode skips
+      // entirely (nothing real to persist against a fake project).
+      if (demoMode) return;
 
       // Lossless round-trip: the inverse mapping is just each changed
       // slot's OLD postId at the same index, so undo/redo can replay either
@@ -416,6 +457,9 @@ export function GridBoard({
     const beforeSlot = effectiveRows.flatMap((row) => row.slots).find((s) => s.id === slotId) ?? null;
 
     applyAssignOptimistic(slotId, mediaAssetId, mediaItem);
+    // The visual assignment above is real and final either way -- demoMode
+    // skips persistence + undo/redo, same reasoning as the reorder branch.
+    if (demoMode) return;
 
     startTransition(async () => {
       try {
@@ -528,7 +572,7 @@ export function GridBoard({
         </div>
 
         <div className="flex flex-1 flex-col" style={{ gap: "2px" }}>
-          {canManage && (
+          {canManage && !demoMode && (
             <div className="mb-2 flex items-center justify-between gap-1">
               <div className="flex items-center gap-1">
                 <button
@@ -551,6 +595,19 @@ export function GridBoard({
                 </button>
               </div>
               <div className="flex items-center gap-1">
+                {isTouchDevice && effectiveRows.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setReorderMode((v) => !v)}
+                    className={`rounded-full border px-3 py-1.5 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                      reorderMode
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-border text-foreground hover:border-foreground/40"
+                    }`}
+                  >
+                    {reorderMode ? "Done" : "Edit Grid"}
+                  </button>
+                )}
                 {effectiveRows.length > 0 && (
                   <ShareMenuButton
                     projectId={projectId}
@@ -592,6 +649,9 @@ export function GridBoard({
                 selectionMode={selectionMode}
                 selectedPostIds={selectedPostIds}
                 onToggleSelectPost={handleToggleSelectPost}
+                demoMode={demoMode}
+                dragEnabled={dragEnabled}
+                reorderMode={reorderMode}
               />
             ))}
           </SortableContext>
@@ -607,7 +667,13 @@ export function GridBoard({
           // opens MediaPickerDialog instead (also has its own upload entry
           // point, so nothing is lost on mobile).
           <div className="hidden lg:block lg:w-64 lg:shrink-0">
-            <MediaLibrary projectId={projectId} items={mediaLibrary} folders={mediaFolders} pushCommand={pushCommand} />
+            <MediaLibrary
+              projectId={projectId}
+              items={mediaLibrary}
+              folders={mediaFolders}
+              pushCommand={pushCommand}
+              demoMode={demoMode}
+            />
           </div>
         )}
       </div>
@@ -619,6 +685,7 @@ export function GridBoard({
           onClose={() => setPickerSlotId(null)}
           items={mediaLibrary}
           onSelect={handlePickMedia}
+          demoMode={demoMode}
         />
       )}
 
@@ -666,6 +733,14 @@ export function GridBoard({
           </Button>
         </div>
       )}
+      {reorderMode && (
+        <div className="fixed inset-x-0 bottom-0 z-30 flex items-center justify-center gap-3 border-t border-border bg-background px-4 py-3 shadow-[0_-2px_10px_rgba(0,0,0,0.06)]">
+          <span className="text-xs tracking-wide text-muted uppercase">Press and hold a post to drag it</span>
+          <Button type="button" variant="primary" radius="none" onClick={() => setReorderMode(false)}>
+            Done
+          </Button>
+        </div>
+      )}
       <Toast message={toastMessage} />
     </DndContext>
   );
@@ -680,6 +755,9 @@ function GridRow({
   selectionMode,
   selectedPostIds,
   onToggleSelectPost,
+  demoMode = false,
+  dragEnabled = true,
+  reorderMode = false,
 }: {
   row: GridBoardRow;
   projectId: string;
@@ -689,6 +767,9 @@ function GridRow({
   selectionMode: boolean;
   selectedPostIds: Set<string>;
   onToggleSelectPost: (postId: string) => void;
+  demoMode?: boolean;
+  dragEnabled?: boolean;
+  reorderMode?: boolean;
 }) {
   // No dedicated "remove row" bar between rows -- the grid stays tight like
   // desktop, and "Remove Row" lives in each slot's own ⋮ menu instead.
@@ -706,6 +787,9 @@ function GridRow({
           selectionMode={selectionMode}
           selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
           onToggleSelectPost={onToggleSelectPost}
+          demoMode={demoMode}
+          dragEnabled={dragEnabled}
+          reorderMode={reorderMode}
         />
       ))}
     </div>
@@ -722,6 +806,9 @@ function GridSlot({
   selectionMode,
   selected,
   onToggleSelectPost,
+  demoMode = false,
+  dragEnabled = true,
+  reorderMode = false,
 }: {
   slot: GridBoardSlot;
   rowId: string;
@@ -732,6 +819,9 @@ function GridSlot({
   selectionMode: boolean;
   selected: boolean;
   onToggleSelectPost: (postId: string) => void;
+  demoMode?: boolean;
+  dragEnabled?: boolean;
+  reorderMode?: boolean;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
@@ -741,8 +831,13 @@ function GridSlot({
       // Boolean `disabled` disables both drag AND drop in dnd-kit — pass the object
       // form so empty/view-only slots stay valid *drop* targets, just not pick-uppable.
       // Also disabled while selecting for Review, so a drag gesture never
-      // fights with the tap-to-select interaction.
-      disabled: { draggable: !slot.postId || !canManage || selectionMode, droppable: !canManage || selectionMode },
+      // fights with the tap-to-select interaction. And disabled on touch
+      // until "Edit Grid" mode is on (dragEnabled), so an ordinary scroll
+      // touch is never mistaken for a drag pickup.
+      disabled: {
+        draggable: !slot.postId || !canManage || selectionMode || !dragEnabled,
+        droppable: !canManage || selectionMode || !dragEnabled,
+      },
       transition: SORTABLE_TRANSITION,
     });
 
@@ -773,7 +868,7 @@ function GridSlot({
   // re-firing on every re-render while the async capture is in flight.
   const autoHealAttemptedRef = useRef(false);
   useEffect(() => {
-    if (!canManage) return;
+    if (!canManage || demoMode) return;
     if (slot.thumbnailUrl || slot.coverMediaType !== "video") return;
     if (!slot.coverMediaAssetId || !slot.coverOriginalUrl) return;
     if (autoHealAttemptedRef.current) return;
@@ -787,7 +882,7 @@ function GridSlot({
       const result = await saveRegeneratedPoster(projectId, slot.coverMediaAssetId!, formData);
       if (!result.message) router.refresh();
     })();
-  }, [canManage, projectId, router, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
+  }, [canManage, demoMode, projectId, router, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
 
   // dnd-kit's PointerSensor listens on this same element, and its pointerdown
   // handling suppresses the browser's native "dblclick" synthesis -- so
@@ -802,6 +897,9 @@ function GridSlot({
       onToggleSelectPost(slot.postId);
       return;
     }
+    // While actively rearranging, a stray tap shouldn't navigate away or
+    // open crop mode -- the only thing this mode does is let you drag.
+    if (reorderMode) return;
     const now = Date.now();
     const isDoubleClick = now - lastClickAtRef.current < DOUBLE_CLICK_WINDOW_MS;
     lastClickAtRef.current = now;
@@ -817,6 +915,10 @@ function GridSlot({
 
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
+      // No real Post Editor route exists for a fake demo project -- a plain
+      // single click has nothing to do in demoMode (double-click's crop
+      // overlay, below, is the one editing interaction that stays real).
+      if (demoMode) return;
       router.push(`/projects/${projectId}/posts/${slot.postId}`);
     }, DOUBLE_CLICK_WINDOW_MS);
   }
@@ -827,6 +929,9 @@ function GridSlot({
     const previousTransform = effectiveTransform;
     setOverrideTransform(next);
     setCropMode(false);
+    // The crop itself is applied above (real, visible) -- demoMode skips
+    // persisting/undo-redo, same reasoning as the drag-and-drop branches.
+    if (demoMode) return;
     try {
       await updatePostCoverTransform(projectId, postId, next);
       pushCommand({
@@ -870,12 +975,12 @@ function GridSlot({
     <div
       ref={setNodeRef}
       style={style}
-      {...(slot.postId && canManage ? { ...attributes, ...listeners } : {})}
+      {...(slot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
       role={slot.postId || canManage ? "button" : undefined}
       tabIndex={slot.postId || canManage ? 0 : undefined}
       onClick={slot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
       className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 ${
-        slot.postId && canManage ? "cursor-grab touch-none" : slot.postId || canManage ? "cursor-pointer" : ""
+        slot.postId && canManage && dragEnabled ? "cursor-grab touch-none" : slot.postId || canManage ? "cursor-pointer" : ""
       } ${
         slot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
       } ${
@@ -986,7 +1091,7 @@ function GridSlot({
               onClick={(e) => e.stopPropagation()}
               className="absolute right-0 top-7 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
-              {slot.postId && (
+              {slot.postId && !demoMode && (
                 <button
                   type="button"
                   onClick={() => {
@@ -1010,7 +1115,7 @@ function GridSlot({
                   Crop Image
                 </button>
               )}
-              {slot.postId && (
+              {slot.postId && !demoMode && (
                 <button
                   type="button"
                   onClick={handleDeletePost}
@@ -1019,13 +1124,15 @@ function GridSlot({
                   Delete Content
                 </button>
               )}
-              <button
-                type="button"
-                onClick={handleRemoveRow}
-                className="w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
-              >
-                Remove Row
-              </button>
+              {!demoMode && (
+                <button
+                  type="button"
+                  onClick={handleRemoveRow}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
+                >
+                  Remove Row
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1052,12 +1159,14 @@ function MediaPickerDialog({
   onClose,
   items,
   onSelect,
+  demoMode = false,
 }: {
   projectId: string;
   open: boolean;
   onClose: () => void;
   items: MediaLibraryItem[];
   onSelect: (item: MediaLibraryItem) => void;
+  demoMode?: boolean;
 }) {
   const [state, action, pending] = useActionState(uploadMedia.bind(null, projectId), undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1077,33 +1186,35 @@ function MediaPickerDialog({
   return (
     <Dialog open={open} onClose={onClose} title="Choose from library" radius="none">
       <div className="flex flex-col gap-4">
-        <form ref={formRef} action={action} key={items.length}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            name="file"
-            accept="image/*,video/*"
-            multiple
-            required
-            className="hidden"
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? []);
-              e.target.value = "";
-              if (files.length > 0) uploadFilesWithPosters(action, files);
-            }}
-          />
-          <Button
-            type="button"
-            variant="primary"
-            radius="none"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={pending}
-            className="w-full py-3 text-xs tracking-wide uppercase"
-          >
-            {pending ? "Uploading..." : "Upload New Asset"}
-          </Button>
-          {state?.message && <p className="mt-2 text-xs text-error">{state.message}</p>}
-        </form>
+        {!demoMode && (
+          <form ref={formRef} action={action} key={items.length}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              name="file"
+              accept="image/*,video/*"
+              multiple
+              required
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                if (files.length > 0) uploadFilesWithPosters(action, files);
+              }}
+            />
+            <Button
+              type="button"
+              variant="primary"
+              radius="none"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={pending}
+              className="w-full py-3 text-xs tracking-wide uppercase"
+            >
+              {pending ? "Uploading..." : "Upload New Asset"}
+            </Button>
+            {state?.message && <p className="mt-2 text-xs text-error">{state.message}</p>}
+          </form>
+        )}
 
         {/* Capped to roughly 9 rows (grid-cols-3, ~155px square cells at
             this dialog's max-w-lg width) but also bounded by 70% of the
@@ -1123,14 +1234,16 @@ function MediaPickerDialog({
               </button>
               {/* Always visible (not hover-revealed) -- this dialog is the
                   touch-friendly picker, and touch has no hover state. */}
-              <button
-                type="button"
-                onClick={(e) => handleDelete(e, item.id)}
-                title="Delete asset"
-                className="absolute right-1 top-1 z-10 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white transition-colors duration-150 hover:bg-black/85"
-              >
-                ✕
-              </button>
+              {!demoMode && (
+                <button
+                  type="button"
+                  onClick={(e) => handleDelete(e, item.id)}
+                  title="Delete asset"
+                  className="absolute right-1 top-1 z-10 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white transition-colors duration-150 hover:bg-black/85"
+                >
+                  ✕
+                </button>
+              )}
             </div>
           ))}
         </div>

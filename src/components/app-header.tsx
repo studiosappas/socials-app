@@ -41,7 +41,7 @@ export function AppHeader({
         >
           Flow:er
         </Link>
-        <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-full bg-foreground/[0.04] px-4 py-2 text-xs tracking-wide uppercase sm:gap-6">
+        <nav className="flex flex-nowrap items-center gap-x-2 rounded-full bg-foreground/[0.04] px-2.5 py-1.5 text-xs tracking-wide uppercase sm:gap-x-4 sm:gap-6 sm:px-4 sm:py-2">
           <NavNotificationBell items={notificationItems} unreadCount={unreadCount} />
           <div className="flex items-center gap-2">
             {currentProject && <NavProjectSwitcher projects={projects} currentProject={currentProject} />}
@@ -61,7 +61,8 @@ export function AppHeader({
               onTodo ? "font-semibold text-foreground" : "text-muted"
             }`}
           >
-            To Do List
+            <span className="sm:hidden">Tasks</span>
+            <span className="hidden sm:inline">To Do List</span>
           </Link>
           <Link
             href="/account"

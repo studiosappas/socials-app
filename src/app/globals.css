@@ -225,6 +225,48 @@ select option:hover {
   }
 }
 
+/* SpectrumSlider (overview-panels.tsx) and its marketing-page clone both
+   render a bare <input type="range" className="accent-foreground">, relying
+   on the browser's own native thumb -- which desktop renders as a solid
+   circle but mobile browsers (iOS Safari especially) don't, and don't honor
+   accent-color the same way either, so the identical markup looked like two
+   different treatments. Styling the thumb explicitly replaces both native
+   renderings with one, so it's pixel-identical everywhere. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 1px;
+  background: var(--border);
+}
+input[type="range"]::-moz-range-track {
+  height: 1px;
+  background: var(--border);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -8.5px; /* vertically centers the 18px thumb on the 1px track */
+  border-radius: 9999px;
+  background: var(--foreground);
+  border: 2px solid var(--background);
+  box-shadow: 0 0 0 1px var(--border);
+  cursor: pointer;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--foreground);
+  border: 2px solid var(--background);
+  box-shadow: 0 0 0 1px var(--border);
+  cursor: pointer;
+}
+
 /* iOS Safari auto-zooms the whole page on focus for any text input/textarea/
    select under 16px, which reads as the keyboard "not working properly"
    (the jarring zoom fights the fixed-position modal/keyboard). Most of the
