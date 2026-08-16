@@ -43,6 +43,18 @@ export async function deleteStory(projectId: string, storyId: string) {
   redirect(`/projects/${projectId}/stories`);
 }
 
+// Same delete as above, minus the redirect -- used by Calendar's Drafts
+// panel bulk-delete, which stays on the Calendar page and may delete several
+// mixed posts/stories in one loop (a mid-loop redirect() would both navigate
+// away unexpectedly and abort every delete queued after it, since redirect()
+// works by throwing).
+export async function deleteStoryFromCalendar(projectId: string, storyId: string) {
+  const supabase = await createClient();
+  await supabase.from("stories").delete().eq("id", storyId);
+  revalidatePath(`/projects/${projectId}/stories`);
+  revalidatePath(`/projects/${projectId}/calendar`);
+}
+
 export type UpdateStoryState = { message?: string; success?: boolean } | undefined;
 
 export async function updateStory(

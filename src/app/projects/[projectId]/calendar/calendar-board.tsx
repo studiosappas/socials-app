@@ -22,6 +22,8 @@ import {
   upsertCalendarNote,
   type CalendarItemType,
 } from "@/lib/actions/calendar";
+import { deletePost } from "@/lib/actions/posts";
+import { deleteStoryFromCalendar } from "@/lib/actions/stories";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { MentionField } from "@/components/ui/mention-input";
@@ -116,6 +118,24 @@ export function CalendarBoard({
   // Which cell (if any) is showing its inline note editor -- notes no
   // longer open a popup; the textarea lives directly in the cell instead.
   const [editingNoteDate, setEditingNoteDate] = useState<string | null>(null);
+  // Mobile only (see the mini calendar below the month nav) -- which day's
+  // strip is currently highlighted/scrolled-to. Not used on desktop at all.
+  const [selectedMobileDate, setSelectedMobileDate] = useState<string | null>(null);
+  // Measured, not a fixed offset -- the sticky panel's real height varies
+  // (a 5-week vs. 6-week month changes the mini calendar's row count), so a
+  // plain scrollIntoView({block:"start"}) lands the target's top edge at
+  // y=0, exactly where the sticky panel sits -- it scrolls to the right
+  // place, but the sticky panel then covers it, which is what actually
+  // looked like "the wrong date."
+  const stickyRef = useRef<HTMLDivElement>(null);
+  function handleSelectMobileDate(date: string) {
+    setSelectedMobileDate(date);
+    const target = document.getElementById(`cal-day-${date}`);
+    if (!target) return;
+    const stickyHeight = stickyRef.current?.getBoundingClientRect().height ?? 0;
+    const targetTop = target.getBoundingClientRect().top + window.scrollY;
+    window.scrollTo({ top: targetTop - stickyHeight - 8, behavior: "smooth" });
+  }
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
@@ -247,27 +267,53 @@ export function CalendarBoard({
       >
         <div className="flex flex-col gap-10 lg:flex-row">
           <div className="flex-1">
-            <div className="relative mb-6 flex items-center gap-4 sm:gap-8">
-              <Link
-                href={`?month=${prevMonthParam}`}
-                className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
-              >
-                ‹ Prev
-              </Link>
-              <div className="hidden flex-1 items-center justify-center gap-10 text-border sm:flex">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <span key={i} className="h-1 w-1 shrink-0 rounded-full bg-current" />
-                ))}
+            {/* Sticky on mobile only -- the month nav + mini calendar act as
+                a fixed "screen" that never moves, with the day-strip list
+                below scrolling underneath it like a separate pane (Asana's
+                mobile calendar does the same split). Desktop is untouched
+                (sm:static cancels the sticky positioning entirely there). */}
+            <div
+              ref={stickyRef}
+              className="sticky top-0 z-20 bg-background pb-4 sm:static sm:z-auto sm:bg-transparent sm:pb-0"
+            >
+              <div className="relative flex items-center gap-4 sm:mb-6 sm:gap-8">
+                <Link
+                  href={`?month=${prevMonthParam}`}
+                  className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
+                >
+                  ‹ Prev
+                </Link>
+                <div className="hidden flex-1 items-center justify-center gap-10 text-border sm:flex">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <span key={i} className="h-1 w-1 shrink-0 rounded-full bg-current" />
+                  ))}
+                </div>
+                <Link
+                  href={`?month=${nextMonthParam}`}
+                  className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
+                >
+                  Next ›
+                </Link>
+                <h2 className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-xs font-semibold tracking-wide uppercase sm:text-sm">
+                  {monthLabel}
+                </h2>
               </div>
-              <Link
-                href={`?month=${nextMonthParam}`}
-                className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
-              >
-                Next ›
-              </Link>
-              <h2 className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-xs font-semibold tracking-wide uppercase sm:text-sm">
-                {monthLabel}
-              </h2>
+
+              <div className="sm:hidden">
+                {/* Asana-style mobile layout: a compact month grid up top
+                    (date numbers + a content dot, not full tiles -- a
+                    7-column grid can't show a post at a usable size, same
+                    reasoning as the agenda list below it), and tapping a
+                    date scrolls straight to that day's already-expanded
+                    strip rather than opening a separate popup -- the strip
+                    IS the "detail view" here. */}
+                <MiniCalendarGrid
+                  weekdayLabels={weekdayLabels}
+                  cells={effectiveCells}
+                  selectedDate={selectedMobileDate}
+                  onSelectDate={handleSelectMobileDate}
+                />
+              </div>
             </div>
 
             {/* Below sm:, a 7-column grid caps every cell at viewport/7 wide
@@ -311,7 +357,7 @@ export function CalendarBoard({
               </div>
             </div>
 
-            <div className="sm:hidden">
+            <div className="sm:hidden border-t border-border">
               {effectiveCells
                 .filter((cell) => cell.isCurrentMonth)
                 .map((cell) => (
@@ -321,6 +367,7 @@ export function CalendarBoard({
                     cell={cell}
                     canManage={canManage}
                     members={members}
+                    highlighted={selectedMobileDate === cell.date}
                     onContextMenu={
                       canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
                     }
@@ -667,6 +714,66 @@ function DayCell({
   );
 }
 
+// The compact month grid at the top of the mobile layout -- date numbers and
+// a small content dot only, never tiles/thumbnails (a 7-column grid caps
+// each cell at viewport/7 wide, the same structural ceiling that ruled out
+// reusing the desktop DayCell for mobile in the first place). Purely a date
+// picker/wayfinder for the day-strip list below it -- tapping a date doesn't
+// show content here, it scrolls to that day's already-real strip.
+function MiniCalendarGrid({
+  weekdayLabels,
+  cells,
+  selectedDate,
+  onSelectDate,
+}: {
+  weekdayLabels: string[];
+  cells: CalendarCell[];
+  selectedDate: string | null;
+  onSelectDate: (date: string) => void;
+}) {
+  return (
+    <div>
+      <div className="grid grid-cols-7 text-center text-[9px] font-semibold tracking-wide uppercase text-muted">
+        {weekdayLabels.map((d) => (
+          <div key={d} className="py-1">
+            {d.slice(0, 1)}
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7 gap-y-1">
+        {cells.map((cell) => {
+          const hasContent = cell.items.length > 0;
+          const isSelected = cell.date === selectedDate;
+          return (
+            <button
+              key={cell.date}
+              type="button"
+              disabled={!cell.isCurrentMonth}
+              onClick={() => onSelectDate(cell.date)}
+              className={`mx-auto flex aspect-square w-8 flex-col items-center justify-center gap-0.5 rounded-full text-xs transition-colors duration-150 ${
+                !cell.isCurrentMonth
+                  ? "text-muted/30"
+                  : isSelected
+                    ? "bg-foreground text-background"
+                    : cell.isToday
+                      ? "outline outline-1 outline-offset-[-1px] outline-foreground"
+                      : "hover:bg-black/[.04]"
+              }`}
+            >
+              <span>{cell.dayNumber}</span>
+              <span
+                className={`h-1 w-1 rounded-full ${
+                  hasContent ? (isSelected ? "bg-background" : "bg-foreground") : "bg-transparent"
+                }`}
+              />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Mobile's own presentation, swapped in below sm: instead of a shrunk copy
 // of the 7-column grid above (see the "structural ceiling" comment at its
 // call site) -- one row per day, date on the left, a horizontally
@@ -682,6 +789,7 @@ function MobileDayRow({
   cell,
   canManage,
   members,
+  highlighted = false,
   onContextMenu,
   isEditingNote,
   onStartEditNote,
@@ -692,6 +800,10 @@ function MobileDayRow({
   cell: CalendarCell;
   canManage: boolean;
   members: ProjectMemberOption[];
+  // Set when this row's date was just tapped in the mini calendar above --
+  // scrollIntoView already gets the viewport there, this is just the visual
+  // confirmation that it landed on the right day.
+  highlighted?: boolean;
   onContextMenu?: (x: number, y: number) => void;
   isEditingNote: boolean;
   onStartEditNote: () => void;
@@ -717,7 +829,12 @@ function MobileDayRow({
   }
 
   return (
-    <div className={`flex gap-3 border-b border-border py-3 first:pt-0 ${cell.isToday ? "bg-black/[.02]" : ""}`}>
+    <div
+      id={`cal-day-${cell.date}`}
+      className={`flex gap-3 border-b border-border px-1 py-3 transition-colors duration-500 first:pt-0 ${
+        highlighted ? "bg-black/[.05]" : cell.isToday ? "bg-black/[.02]" : ""
+      }`}
+    >
       <div className="flex w-9 shrink-0 flex-col items-center pt-0.5">
         <span
           className={`flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold ${
@@ -1160,6 +1277,7 @@ function DayDetailDialog({
 
 
 function UnscheduledPanel({ projectId, items }: { projectId: string; items: CalendarItem[] }) {
+  const router = useRouter();
   const { isOver, setNodeRef } = useDroppable({
     id: "unscheduled-panel",
     data: { date: null },
@@ -1168,6 +1286,38 @@ function UnscheduledPanel({ projectId, items }: { projectId: string; items: Cale
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createMenuRef = useOutsideClick<HTMLDivElement>(createMenuOpen, () => setCreateMenuOpen(false));
   const visibleItems = items.slice(0, visibleCount);
+
+  // Same hover-to-reveal-a-circle multi-select + bulk-delete interaction as
+  // Grid's Media Library (media-library.tsx's MediaThumb/selectedIds), keyed
+  // by "type-id" since Drafts mixes posts and stories in one list.
+  const itemKey = (item: CalendarItem) => `${item.itemType}-${item.itemId}`;
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  function toggleSelected(key: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  const [bulkDeleting, startBulkDelete] = useTransition();
+  function handleBulkDelete() {
+    const selected = items.filter((item) => selectedKeys.has(itemKey(item)));
+    if (selected.length === 0) return;
+    if (!confirm(`Delete ${selected.length} item${selected.length === 1 ? "" : "s"}? This can't be undone.`)) return;
+    startBulkDelete(async () => {
+      await Promise.all(
+        selected.map((item) =>
+          item.itemType === "story"
+            ? deleteStoryFromCalendar(projectId, item.itemId)
+            : deletePost(projectId, item.itemId),
+        ),
+      );
+      setSelectedKeys(new Set());
+      router.refresh();
+    });
+  }
 
   return (
     <div
@@ -1180,7 +1330,13 @@ function UnscheduledPanel({ projectId, items }: { projectId: string; items: Cale
 
       <div className="grid grid-cols-2 gap-2">
         {visibleItems.map((item) => (
-          <ItemChip key={`${item.itemType}-${item.itemId}`} item={item} size="square" />
+          <ItemChip
+            key={itemKey(item)}
+            item={item}
+            size="square"
+            selected={selectedKeys.has(itemKey(item))}
+            onToggleSelect={() => toggleSelected(itemKey(item))}
+          />
         ))}
         <div ref={createMenuRef} className="relative">
           <button
@@ -1210,6 +1366,22 @@ function UnscheduledPanel({ projectId, items }: { projectId: string; items: Cale
         >
           View More +
         </button>
+      )}
+
+      {selectedKeys.size > 0 && (
+        <div className="sticky bottom-0 z-10 flex items-center justify-between gap-2 border border-border bg-card px-3 py-2 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+          <span className="text-xs tracking-wide text-muted uppercase">{selectedKeys.size} selected</span>
+          <Button
+            type="button"
+            variant="primary"
+            radius="none"
+            onClick={handleBulkDelete}
+            disabled={bulkDeleting}
+            className="px-2 py-1 text-xs"
+          >
+            {bulkDeleting ? "Deleting…" : "Delete"}
+          </Button>
+        </div>
       )}
 
       <ScheduleContentButton projectId={projectId} />
@@ -1264,7 +1436,20 @@ function CreateContentMenu({ projectId, onClose }: { projectId: string; onClose:
   );
 }
 
-function ItemChip({ item, size = "pill" }: { item: CalendarItem; size?: "pill" | "square" }) {
+function ItemChip({
+  item,
+  size = "pill",
+  selected = false,
+  onToggleSelect,
+}: {
+  item: CalendarItem;
+  size?: "pill" | "square";
+  // Only meaningful for size="square" (the Drafts panel) -- same hover-reveal
+  // multi-select circle as Grid's MediaThumb, so bulk-deleting several draft
+  // posts/stories at once works the same way it does for media assets there.
+  selected?: boolean;
+  onToggleSelect?: () => void;
+}) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `item-${item.itemType}-${item.itemId}`,
     data: { itemType: item.itemType, itemId: item.itemId, item },
@@ -1277,10 +1462,10 @@ function ItemChip({ item, size = "pill" }: { item: CalendarItem; size?: "pill" |
         {...listeners}
         {...attributes}
         onClick={(e) => e.stopPropagation()}
-        className={`touch-none transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
+        className={`group relative touch-none transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
       >
         <Link href={item.href} className="flex flex-col gap-0.5">
-          <div className="aspect-square overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30">
+          <div className="relative aspect-square overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30">
             {item.thumbnailUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
@@ -1292,6 +1477,34 @@ function ItemChip({ item, size = "pill" }: { item: CalendarItem; size?: "pill" |
           </div>
           <span className="truncate text-[10px] text-muted">{item.label}</span>
         </Link>
+        {onToggleSelect && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleSelect();
+            }}
+            title={selected ? "Deselect" : "Select"}
+            // pointer-coarse: touch has no hover state to reveal this with,
+            // so it's always shown there -- desktop keeps the hover-only
+            // reveal, same as Grid's MediaThumb.
+            className={`absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100 ${
+              selected ? "opacity-100" : "opacity-0"
+            }`}
+          >
+            {selected ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="7" className="fill-accent" stroke="white" strokeWidth="1" />
+                <path d="M4.8 8.2 6.8 10.1 11.2 5.7" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="7" className="fill-black/30" stroke="white" strokeWidth="1.2" />
+              </svg>
+            )}
+          </button>
+        )}
       </div>
     );
   }
