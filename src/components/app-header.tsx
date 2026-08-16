@@ -61,8 +61,7 @@ export function AppHeader({
               onTodo ? "font-semibold text-foreground" : "text-muted"
             }`}
           >
-            <span className="sm:hidden">Tasks</span>
-            <span className="hidden sm:inline">To Do List</span>
+            To Do
           </Link>
           <Link
             href="/account"
