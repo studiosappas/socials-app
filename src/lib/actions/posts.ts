@@ -7,6 +7,7 @@ import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
 import { getPostPageData, type PostPageData } from "@/lib/data/posts";
+import { syncPostType } from "@/lib/post-type";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
@@ -42,10 +43,15 @@ export async function updatePost(
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
   const scheduledTime = String(formData.get("scheduled_time") ?? "").trim();
   const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
-  const postType = String(formData.get("post_type") ?? "post") as PostType;
   const caption = String(formData.get("caption") ?? "");
 
-  const { data: before } = await supabase.from("posts").select("status").eq("id", postId).single();
+  const { data: before } = await supabase.from("posts").select("status, post_type").eq("id", postId).single();
+
+  // post_type: adding/replacing/removing media auto-suggests the right
+  // value (lib/post-type.ts's syncPostType, called from those actions), but
+  // the user can still override it by hand here -- an explicit pick always
+  // wins over the auto-suggestion until the next media change re-derives it.
+  const postType = String(formData.get("post_type") ?? before?.post_type ?? "post") as PostType;
 
   const { error } = await supabase
     .from("posts")
@@ -136,6 +142,8 @@ export async function addPostAsset(
     throw new Error(error.message);
   }
 
+  await syncPostType(supabase, postId);
+
   revalidatePath(`/projects/${projectId}/posts/${postId}`);
   revalidatePath(`/projects/${projectId}/grid`);
 }
@@ -209,6 +217,8 @@ export async function uploadPostAsset(
     position += 1;
   }
 
+  await syncPostType(supabase, postId);
+
   revalidatePath(`/projects/${projectId}/posts/${postId}`);
   revalidatePath(`/projects/${projectId}/grid`);
   return { success: true };
@@ -221,8 +231,87 @@ export async function removePostAsset(
 ) {
   const supabase = await createClient();
   await supabase.from("post_assets").delete().eq("id", postAssetId);
+  await syncPostType(supabase, postId);
   revalidatePath(`/projects/${projectId}/posts/${postId}`);
   revalidatePath(`/projects/${projectId}/grid`);
+}
+
+export type ReplacePostAssetState = { message?: string; success?: boolean } | undefined;
+
+// Swaps an existing post_asset's media in place -- unlike delete-then-add,
+// `position` (carousel order) never changes. `formData` carries either a
+// "media_asset_id" (pick from library) or a "file" (upload a new one,
+// mirroring uploadPostAsset's own upload handling). If this is the post's
+// cover (position 0), also resets posts.cover_transform to null: the new
+// image may be framed completely differently, so the old pan/zoom fraction
+// shouldn't silently keep applying to it.
+export async function replacePostAsset(
+  projectId: string,
+  postId: string,
+  postAssetId: string,
+  _state: ReplacePostAssetState,
+  formData: FormData,
+): Promise<ReplacePostAssetState> {
+  const supabase = await createClient();
+
+  const existingMediaAssetId = String(formData.get("media_asset_id") ?? "").trim();
+  const file = formData.get("file");
+
+  let newMediaAssetId: string;
+
+  if (existingMediaAssetId) {
+    newMediaAssetId = existingMediaAssetId;
+  } else if (file instanceof File && file.size > 0) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return { message: "You must be logged in." };
+
+    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
+    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
+    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("project-media")
+      .upload(storagePath, file, { contentType: file.type });
+    if (uploadError) return { message: uploadError.message };
+
+    const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
+
+    const { data: mediaAsset, error: insertError } = await supabase
+      .from("media_assets")
+      .insert({ project_id: projectId, storage_path: storagePath, media_type: mediaType, uploaded_by: user.id })
+      .select("id")
+      .single();
+    if (insertError || !mediaAsset) return { message: insertError?.message ?? "Failed to save media." };
+
+    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
+    newMediaAssetId = mediaAsset.id;
+  } else {
+    return { message: "Choose a file or select from the library." };
+  }
+
+  const { data: existingRow } = await supabase
+    .from("post_assets")
+    .select("position")
+    .eq("id", postAssetId)
+    .single();
+
+  const { error: updateError } = await supabase
+    .from("post_assets")
+    .update({ media_asset_id: newMediaAssetId })
+    .eq("id", postAssetId);
+  if (updateError) return { message: updateError.message };
+
+  if (existingRow?.position === 0) {
+    await supabase.from("posts").update({ cover_transform: null }).eq("id", postId);
+  }
+
+  await syncPostType(supabase, postId);
+
+  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  revalidatePath(`/projects/${projectId}/grid`);
+  return { success: true };
 }
 
 export async function reorderPostAssets(

@@ -1,5 +1,6 @@
 import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
+import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 import type { ReviewStatus } from "@/types/database";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
@@ -23,6 +24,11 @@ export type SharedGalleryItem = {
   caption: string;
   notes: string;
   reviewStatus: ReviewStatus;
+  // The one canonical crop for a post's cover asset -- null for stories (no
+  // cover_transform concept there) and for a post never manually cropped.
+  // Only ever meaningful for media[0]; every other item's own crop is
+  // already baked into its own previewStoragePath image.
+  coverTransform: GridCoverTransform | null;
   media: SharedGalleryMedia[];
 };
 
@@ -84,6 +90,7 @@ export const getSharedPreviewData = cache(async function getSharedPreviewData(
       caption: item.caption,
       notes: item.notes,
       reviewStatus: item.reviewStatus,
+      coverTransform: item.coverTransform ?? null,
       media: item.media.map((m) => ({
         mediaAssetId: m.mediaAssetId,
         // Same "edited preview wins" fallback used everywhere else this

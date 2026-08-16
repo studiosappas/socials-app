@@ -1157,6 +1157,106 @@ create policy "Admins manage brand moodboard" on public.brand_moodboard_items fo
 alter table public.profiles add column if not exists workspace_settings jsonb not null default '{}'::jsonb;
 alter table public.profiles add column if not exists preferences jsonb not null default '{}'::jsonb;
 
+-- ---------- Grid/Edit Post: one canonical media & crop system ----------
+-- Media Library "Delete" no longer cascade-destroys a post's own content --
+-- an asset still referenced by any post_assets/story_frames row gets
+-- archived (hidden from the library picker) instead of hard-deleted; only a
+-- truly unused asset (zero references) is still actually deleted. See
+-- deleteMedia/bulkDeleteMedia in lib/actions/grid.ts.
+alter table public.media_assets add column if not exists archived boolean not null default false;
+
+-- Lets the anonymous Shared Client Preview apply the same cover crop Grid
+-- already shows on-screen, instead of ignoring it -- posts.cover_transform
+-- is the one canonical crop for a post's cover asset (position 0); every
+-- other carousel slide's crop is already baked into its own
+-- preview_storage_path image, so only the cover needs this threaded through.
+create or replace function public.get_shared_preview(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_link record;
+  v_items jsonb;
+begin
+  select id, project_id, title into v_link
+  from share_links
+  where token = p_token;
+
+  if v_link.id is null then
+    return null;
+  end if;
+
+  select coalesce(jsonb_agg(entry.data order by entry.position), '[]'::jsonb)
+  into v_items
+  from (
+    select
+      sli.position,
+      jsonb_build_object(
+        'id', sli.id,
+        'type', case when sli.post_id is not null then 'post' else 'story' end,
+        'postId', sli.post_id,
+        'storyId', sli.story_id,
+        'caption', coalesce((select p.caption from posts p where p.id = sli.post_id), ''),
+        'notes', coalesce(
+          (select p.notes from posts p where p.id = sli.post_id),
+          (select s.notes from stories s where s.id = sli.story_id),
+          ''
+        ),
+        'reviewStatus', coalesce(
+          (select p.review_status from posts p where p.id = sli.post_id),
+          (select s.review_status from stories s where s.id = sli.story_id),
+          'pending'
+        ),
+        'coverTransform', (select p.cover_transform from posts p where p.id = sli.post_id),
+        'media', case
+          when sli.post_id is not null then (
+            select coalesce(jsonb_agg(jsonb_build_object(
+              'mediaAssetId', ma.id,
+              'storagePath', ma.storage_path,
+              'previewStoragePath', ma.preview_storage_path,
+              'posterStoragePath', ma.poster_storage_path,
+              'mediaType', ma.media_type
+            ) order by pa.position), '[]'::jsonb)
+            from post_assets pa
+            join media_assets ma on ma.id = pa.media_asset_id
+            where pa.post_id = sli.post_id
+          )
+          else (
+            select coalesce(jsonb_agg(jsonb_build_object(
+              'mediaAssetId', ma.id,
+              'storagePath', ma.storage_path,
+              'previewStoragePath', ma.preview_storage_path,
+              'posterStoragePath', ma.poster_storage_path,
+              'mediaType', ma.media_type
+            ) order by sf.position), '[]'::jsonb)
+            from story_frames sf
+            join media_assets ma on ma.id = sf.media_asset_id
+            where sf.story_id = sli.story_id
+          )
+        end
+      ) as data
+    from share_link_items sli
+    where sli.share_link_id = v_link.id
+  ) entry;
+
+  return jsonb_build_object(
+    'title', v_link.title,
+    'projectName', (select name from projects where id = v_link.project_id),
+    'items', v_items,
+    'members', (
+      select coalesce(jsonb_agg(jsonb_build_object('id', pm.user_id, 'name', pr.name)), '[]'::jsonb)
+      from project_members pm
+      join profiles pr on pr.id = pm.user_id
+      where pm.project_id = v_link.project_id
+    )
+  );
+end;
+$$;
+
+grant execute on function public.get_shared_preview(text) to anon, authenticated;
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

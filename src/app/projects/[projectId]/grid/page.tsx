@@ -53,7 +53,7 @@ export default async function GridPage({
 
   const gridRowsWithPaths = await getGridRowsWithCoverPaths(supabase, projectId);
 
-  const { data: mediaAssets } = await supabase
+  const { data: allMediaAssets } = await supabase
     .from("media_assets")
     .select("id, storage_path, media_type, poster_storage_path, created_at")
     .eq("project_id", projectId)
@@ -71,11 +71,24 @@ export default async function GridPage({
     .order("created_at", { ascending: true });
   const mediaFolders: MediaFolder[] = (mediaFolderRows ?? []).map((f) => ({ id: f.id, name: f.name }));
 
-  const assetIds = (mediaAssets ?? []).map((a) => a.id);
+  const assetIds = (allMediaAssets ?? []).map((a) => a.id);
   const { data: folderAssignmentRows } = assetIds.length
     ? await supabase.from("media_assets").select("id, folder_id").in("id", assetIds)
     : { data: [] };
   const folderIdByAssetId = new Map((folderAssignmentRows ?? []).map((r) => [r.id, r.folder_id as string | null]));
+
+  // Isolated the same way as folder_id above -- archived is an even newer
+  // column, and a plain .eq("archived", false) filter on the MAIN select
+  // above would fail (and silently return nothing, since only `data` is
+  // read) the instant it doesn't exist yet on a not-yet-migrated database,
+  // wiping out the entire library rather than just not filtering archived
+  // assets out yet. A failed/empty lookup here means nothing gets excluded,
+  // not that everything disappears.
+  const { data: archivedRows } = assetIds.length
+    ? await supabase.from("media_assets").select("id, archived").in("id", assetIds)
+    : { data: [] };
+  const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
+  const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
   // Which assets already occupy a slot on the Grid, for the always-visible
   // "already on the Grid" badge on the media library -- scoped to posts

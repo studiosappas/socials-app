@@ -256,6 +256,7 @@ export interface Database {
           poster_storage_path: string | null;
           folder_id: string | null;
           generated_by_ai: boolean;
+          archived: boolean;
           created_at: string;
         };
         Insert: {
@@ -267,6 +268,7 @@ export interface Database {
           folder_id?: string | null;
           annotation_json?: object | null;
           generated_by_ai?: boolean;
+          archived?: boolean;
         };
         Update: {
           storage_path?: string;
@@ -276,6 +278,7 @@ export interface Database {
           poster_storage_path?: string | null;
           folder_id?: string | null;
           generated_by_ai?: boolean;
+          archived?: boolean;
         };
         Relationships: [];
       };
@@ -354,7 +357,7 @@ export interface Database {
       post_assets: {
         Row: { id: string; post_id: string; media_asset_id: string; position: number };
         Insert: { post_id: string; media_asset_id: string; position?: number };
-        Update: { position?: number };
+        Update: { media_asset_id?: string; position?: number };
         Relationships: [
           {
             foreignKeyName: "post_assets_media_asset_id_fkey";
@@ -1009,6 +1012,9 @@ export type SharedPreviewItem = {
   caption: string;
   notes: string;
   reviewStatus: ReviewStatus;
+  // The one canonical crop for a post's cover -- null for stories and for a
+  // post never manually cropped. See get_shared_preview's own comment.
+  coverTransform: { scale: number; x: number; y: number } | null;
   media: SharedPreviewMediaItem[];
 };
 

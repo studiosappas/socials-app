@@ -1,7 +1,7 @@
-import sharp from "sharp";
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
+import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 
 const PAGE_W = 612; // US Letter, points
 const PAGE_H = 792;
@@ -94,6 +94,15 @@ export async function GET(
     .in("id", orderedPostIds);
   const postById = new Map((postRows ?? []).map((p) => [p.id, p]));
 
+  // Isolated from the select above, same reasoning as preview_storage_path/
+  // poster_storage_path below -- cover_transform is the one canonical crop
+  // for a post's cover (position 0), same value Grid's own on-screen tiles
+  // and its PNG export already apply; this is what was missing here.
+  const { data: transformRows } = await supabase.from("posts").select("id, cover_transform").in("id", orderedPostIds);
+  const coverTransformByPostId = new Map(
+    (transformRows ?? []).map((r) => [r.id, (r as { cover_transform: CoverTransform | null }).cover_transform]),
+  );
+
   // All of every post's assets, in carousel order -- a single-image/reel
   // post only ever uses the first one, but a carousel needs every one of
   // them, so this fetches the full set up front rather than the single
@@ -163,24 +172,29 @@ export async function GET(
     return page;
   }
 
+  // Cache key includes the transform -- the SAME path can legitimately need
+  // two different renders (a carousel's own slides reuse this same cache,
+  // and only the cover position ever gets a non-null transform).
   const imageCache = new Map<string, Uint8Array | null>();
-  async function embedThumb(path: string | undefined) {
+  async function embedThumb(path: string | undefined, transform: CoverTransform | null) {
     if (!path) return null;
-    if (!imageCache.has(path)) {
+    const cacheKey = `${path}:${transform ? JSON.stringify(transform) : "none"}`;
+    if (!imageCache.has(cacheKey)) {
       try {
         const { data, error } = await supabase.storage.from("project-media").download(path);
         if (error || !data) {
-          imageCache.set(path, null);
+          imageCache.set(cacheKey, null);
         } else {
           const buf = Buffer.from(await data.arrayBuffer());
-          const jpegBuf = await sharp(buf).resize(360, 450, { fit: "cover" }).jpeg({ quality: 90 }).toBuffer();
-          imageCache.set(path, jpegBuf);
+          const pipeline = await applyCoverTransform(buf, transform, 360, 450);
+          const jpegBuf = await pipeline.jpeg({ quality: 90 }).toBuffer();
+          imageCache.set(cacheKey, jpegBuf);
         }
       } catch {
-        imageCache.set(path, null);
+        imageCache.set(cacheKey, null);
       }
     }
-    const bytes = imageCache.get(path);
+    const bytes = imageCache.get(cacheKey);
     return bytes ? pdfDoc.embedJpg(bytes) : null;
   }
 
@@ -218,7 +232,10 @@ export async function GET(
     } else {
       for (let i = 0; i < paths.length; i++) {
         const x = MARGIN + i * (thumbW + THUMB_GAP);
-        const image = await embedThumb(paths[i]);
+        // Only the cover (index 0) has a meaningful cover_transform -- every
+        // other carousel slide's own crop is already baked into its own
+        // preview_storage_path image (see imagePathsByPostId above).
+        const image = await embedThumb(paths[i], i === 0 ? (coverTransformByPostId.get(postId) ?? null) : null);
         if (image) {
           page.drawImage(image, { x, y: imageY, width: thumbW, height: thumbH });
         } else {

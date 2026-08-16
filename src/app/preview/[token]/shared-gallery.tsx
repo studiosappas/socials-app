@@ -36,10 +36,19 @@ export function SharedGallery({
   const flatMedia = useMemo<FlatMedia[]>(() => {
     const list: FlatMedia[] = [];
     for (const item of items) {
-      for (const m of item.media) {
-        if (!m.url) continue;
-        list.push({ key: m.mediaAssetId, url: m.url, mediaType: m.mediaType, posterUrl: m.posterUrl, contentType: item.type });
-      }
+      item.media.forEach((m, i) => {
+        if (!m.url) return;
+        list.push({
+          key: m.mediaAssetId,
+          url: m.url,
+          mediaType: m.mediaType,
+          posterUrl: m.posterUrl,
+          contentType: item.type,
+          // Only the cover (first media item) ever has a meaningful crop --
+          // every other item's own crop is already baked into its image.
+          coverTransform: i === 0 ? item.coverTransform : null,
+        });
+      });
     }
     return list;
   }, [items]);
@@ -69,15 +78,16 @@ export function SharedGallery({
         <section key={item.id} className="animate-settle-in flex w-full flex-col items-center gap-4">
           {item.media.length > 1 ? (
             <div className="flex w-full max-w-6xl flex-wrap items-center justify-center gap-3">
-              {item.media.map((m) => (
+              {item.media.map((m, i) => (
                 <MediaFrame
                   key={m.mediaAssetId}
                   media={m}
                   type={item.type}
                   grouped
+                  coverTransform={i === 0 ? item.coverTransform : null}
                   onOpen={() => {
-                    const i = indexByKey.get(m.mediaAssetId);
-                    if (i !== undefined) setLightboxIndex(i);
+                    const idx = indexByKey.get(m.mediaAssetId);
+                    if (idx !== undefined) setLightboxIndex(idx);
                   }}
                 />
               ))}
@@ -86,6 +96,7 @@ export function SharedGallery({
             <MediaFrame
               media={item.media[0]}
               type={item.type}
+              coverTransform={item.coverTransform}
               onOpen={() => {
                 const i = indexByKey.get(item.media[0].mediaAssetId);
                 if (i !== undefined) setLightboxIndex(i);

@@ -1,6 +1,6 @@
-import sharp from "sharp";
 import JSZip from "jszip";
 import { createClient } from "@/lib/supabase/server";
+import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 
 const SLIDE_W = 1080;
 const COVER_H = 1350; // 4:5, position 0 (the post's cover)
@@ -16,7 +16,10 @@ const SLIDE_H = 1440; // 3:4, every other carousel slide
 // exists -- a change from this button's previous "always the original,
 // never the edited version" convention (still true elsewhere, e.g. Brief's
 // image chips), because the whole point of this feature is that an export
-// must never silently ignore a crop the user actually applied.
+// must never silently ignore a crop the user actually applied. The cover
+// (position 0) also gets posts.cover_transform applied on top, same as
+// Grid/PDF -- the one canonical crop, applied everywhere a post's cover is
+// rendered or exported.
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ projectId: string; postId: string }> },
@@ -41,6 +44,12 @@ export async function GET(
     return new Response("Forbidden", { status: 403 });
   }
 
+  // Isolated from the query below, same reasoning as every other pending-
+  // column isolation in this codebase -- a missing cover_transform column
+  // just means the cover exports uncropped, not that the whole export fails.
+  const { data: postRow } = await supabase.from("posts").select("cover_transform").eq("id", postId).maybeSingle();
+  const coverTransform = (postRow?.cover_transform as CoverTransform | null) ?? null;
+
   const { data: postAssets } = await supabase
     .from("post_assets")
     .select("position, media_assets(storage_path, preview_storage_path, media_type)")
@@ -59,10 +68,25 @@ export async function GET(
       preview_storage_path: string | null;
       media_type: "image" | "video";
     } | null;
-    // A video carousel slide has no exportable still frame here (Grid's own
-    // cover-poster handling is a separate concern from carousel export) --
-    // skip it rather than exporting raw video bytes at an image resolution.
-    if (!media || media.media_type !== "image") {
+    if (!media) {
+      index += 1;
+      continue;
+    }
+
+    const isCover = index === 0;
+
+    if (media.media_type === "video") {
+      // The actual video file, included as-is -- no resize (sharp can't
+      // process video) and no crop applied (cover_transform is a 2D pan/
+      // zoom of a still image, not a meaningful concept for a video file's
+      // own bytes). Previously skipped entirely, which meant a reel/video
+      // post's "Download Media" produced an empty zip.
+      const { data, error } = await supabase.storage.from("project-media").download(media.storage_path);
+      if (!error && data) {
+        const ext = media.storage_path.includes(".") ? media.storage_path.split(".").pop() : "mp4";
+        const buf = Buffer.from(await data.arrayBuffer());
+        zip.file(`${isCover ? "cover" : `slide-${index + 1}`}.${ext}`, buf);
+      }
       index += 1;
       continue;
     }
@@ -74,14 +98,11 @@ export async function GET(
       continue;
     }
 
-    const isCover = index === 0;
     const targetH = isCover ? COVER_H : SLIDE_H;
     try {
       const buf = Buffer.from(await data.arrayBuffer());
-      const resized = await sharp(buf)
-        .resize(SLIDE_W, targetH, { fit: "cover", position: "centre" })
-        .jpeg({ quality: 95, mozjpeg: true })
-        .toBuffer();
+      const pipeline = await applyCoverTransform(buf, isCover ? coverTransform : null, SLIDE_W, targetH);
+      const resized = await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
       zip.file(`${isCover ? "cover" : `slide-${index + 1}`}.jpg`, resized);
     } catch {
       // Skip a single unreadable asset rather than failing the whole export.

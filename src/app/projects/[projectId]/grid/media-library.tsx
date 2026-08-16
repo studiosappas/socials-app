@@ -121,7 +121,7 @@ export function MediaLibrary({
   function handleBulkDelete() {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    if (!confirm(`Delete ${ids.length} selected asset${ids.length === 1 ? "" : "s"}? This removes ${ids.length === 1 ? "it" : "them"} from any post or story using ${ids.length === 1 ? "it" : "them"}.`)) return;
+    if (!confirm(`Delete ${ids.length} selected asset${ids.length === 1 ? "" : "s"}? Any already used in a post or story will be archived (removed from the library, kept in place there) instead of deleted.`)) return;
     startBulkDelete(async () => {
       await bulkDeleteMedia(projectId, ids);
       setSelectedIds(new Set());

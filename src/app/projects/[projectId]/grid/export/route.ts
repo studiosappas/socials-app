@@ -1,14 +1,11 @@
 import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths, type CoverTransform } from "@/lib/grid-data";
+import { applyCoverTransform } from "@/lib/image-crop";
 
 const CELL_W = 1080;
 const CELL_H = 1350; // 4:5, matching the on-screen grid's slot ratio
 const BLANK_FILL = "#e7e4de"; // matches the --border design token
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
 
 type RawCell = { input: Buffer; raw: { width: number; height: number; channels: 1 | 2 | 3 | 4 } };
 
@@ -21,53 +18,15 @@ async function buildBlankCell(): Promise<RawCell> {
   return { input: data, raw: { width: info.width, height: info.height, channels: 3 } };
 }
 
-// Reproduces the on-screen CSS crop exactly (coverTransformStyle in
-// grid-crop-overlay.tsx: a w-full h-full object-cover <img>, with an
-// additional `translate(x*100%, y*100%) scale(scale)` layered on top) as a
-// sharp extract+resize, instead of a blind centered "fit:cover" that
-// silently ignored whatever the user actually panned/zoomed to. When
-// transform is null (never manually cropped), this reduces to exactly the
-// previous center-cover behavior -- no change for posts nobody has cropped.
+// Reproduces the on-screen CSS crop exactly -- see lib/image-crop.ts's
+// applyCoverTransform, the one shared implementation this route and the PDF
+// export both use, instead of each reimplementing its own blind centered
+// "fit:cover." When transform is null (never manually cropped), this
+// reduces to exactly the previous center-cover behavior -- no change for
+// posts nobody has cropped.
 async function buildImageCell(buffer: Buffer, transform: CoverTransform | null): Promise<RawCell> {
-  if (!transform) {
-    const { data, info } = await sharp(buffer)
-      .resize(CELL_W, CELL_H, { fit: "cover", position: "centre" })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    return { input: data, raw: { width: info.width, height: info.height, channels: 3 } };
-  }
-
-  const { width: naturalW, height: naturalH } = await sharp(buffer).metadata();
-  if (!naturalW || !naturalH) {
-    const { data, info } = await sharp(buffer)
-      .resize(CELL_W, CELL_H, { fit: "cover", position: "centre" })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    return { input: data, raw: { width: info.width, height: info.height, channels: 3 } };
-  }
-
-  const coverFitScale = Math.max(CELL_W / naturalW, CELL_H / naturalH); // same as CSS object-fit:cover
-  const totalScale = coverFitScale * transform.scale;
-  const cropW = clamp(CELL_W / totalScale, 1, naturalW);
-  const cropH = clamp(CELL_H / totalScale, 1, naturalH);
-  // transform.x/y are fractions of the tile's own box (see
-  // coverTransformStyle) -- convert the resulting on-screen pixel pan back
-  // into source-image pixels, then shift the crop window the OPPOSITE
-  // direction (panning the image right is equivalent to moving the crop
-  // window left in source-image space).
-  const panX = (transform.x * CELL_W) / totalScale;
-  const panY = (transform.y * CELL_H) / totalScale;
-  const cropLeft = clamp(Math.round(naturalW / 2 - cropW / 2 - panX), 0, naturalW - cropW);
-  const cropTop = clamp(Math.round(naturalH / 2 - cropH / 2 - panY), 0, naturalH - cropH);
-
-  const { data, info } = await sharp(buffer)
-    .extract({ left: cropLeft, top: cropTop, width: Math.round(cropW), height: Math.round(cropH) })
-    .resize(CELL_W, CELL_H, { fit: "fill" })
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  const pipeline = await applyCoverTransform(buffer, transform, CELL_W, CELL_H);
+  const { data, info } = await pipeline.removeAlpha().raw().toBuffer({ resolveWithObject: true });
   return { input: data, raw: { width: info.width, height: info.height, channels: 3 } };
 }
 

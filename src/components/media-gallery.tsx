@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect } from "react";
+import { coverTransformStyle } from "@/app/projects/[projectId]/grid/grid-crop-overlay";
+import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 
 // Shared with the anonymous Shared Client Preview (`/preview/[token]`,
 // `shared-gallery.tsx`) and the authenticated Client Review Mode
@@ -24,6 +26,9 @@ export type FlatMedia = {
   mediaType: "image" | "video";
   posterUrl: string | null;
   contentType: GalleryItemType;
+  // Only ever set for a post's cover (first media item) -- see
+  // SharedGalleryItem.coverTransform's own comment.
+  coverTransform: GridCoverTransform | null;
 };
 
 export const ASPECT_CLASS: Record<GalleryItemType, string> = {
@@ -53,11 +58,14 @@ export function MediaFrame({
   media,
   type,
   grouped = false,
+  coverTransform = null,
   onOpen,
 }: {
   media: GalleryMedia;
   type: GalleryItemType;
   grouped?: boolean;
+  // Only ever passed for a post's cover item -- see FlatMedia's own comment.
+  coverTransform?: GridCoverTransform | null;
   onOpen: () => void;
 }) {
   if (!media.url) return null;
@@ -81,7 +89,13 @@ export function MediaFrame({
       className={`${className} cursor-zoom-in transition-opacity duration-150 hover:opacity-90`}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={media.url} alt="" draggable={false} className="h-full w-full object-cover select-none" />
+      <img
+        src={media.url}
+        alt=""
+        draggable={false}
+        className="h-full w-full object-cover select-none"
+        style={coverTransformStyle(coverTransform)}
+      />
     </button>
   );
 }
@@ -146,7 +160,12 @@ export function Lightbox({
             />
           ) : (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={current.url} alt="" className="h-full w-full object-cover" />
+            <img
+              src={current.url}
+              alt=""
+              className="h-full w-full object-cover"
+              style={coverTransformStyle(current.coverTransform)}
+            />
           )}
         </div>
       </div>

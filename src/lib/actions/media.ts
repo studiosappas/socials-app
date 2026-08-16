@@ -6,6 +6,29 @@ import type { MediaType } from "@/types/database";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
+// If this asset is the cover (position 0) of any post, that post's saved
+// pan/zoom (posts.cover_transform) is about to be reframing a different
+// image than it was cropped against -- reset it rather than let a stale
+// crop silently keep applying. A media asset can in principle be a cover on
+// more than one post (added via "Add from library" to two different
+// posts), so this clears every one of them, not just a single postId the
+// caller happens to know about.
+async function resetCoverTransformForAsset(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mediaAssetId: string,
+): Promise<void> {
+  const { data: coverRows } = await supabase
+    .from("post_assets")
+    .select("post_id")
+    .eq("media_asset_id", mediaAssetId)
+    .eq("position", 0);
+
+  const postIds = (coverRows ?? []).map((r) => r.post_id);
+  if (postIds.length === 0) return;
+
+  await supabase.from("posts").update({ cover_transform: null }).in("id", postIds);
+}
+
 // Shared by every upload action that accepts video (grid.ts's uploadMedia,
 // posts.ts's uploadPostAsset, stories.ts's uploadStoryFrame): the client
 // generates a poster frame for video files client-side (video-poster.ts)
@@ -94,6 +117,8 @@ export async function saveMediaAssetAnnotation(
     return { message: updateError.message };
   }
 
+  await resetCoverTransformForAsset(supabase, mediaAssetId);
+
   const { data: signed } = await supabase.storage
     .from("project-media")
     .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
@@ -155,6 +180,8 @@ export async function saveMediaAssetPosterAnnotation(
   if (updateError) {
     return { message: updateError.message };
   }
+
+  await resetCoverTransformForAsset(supabase, mediaAssetId);
 
   const { data: signed } = await supabase.storage
     .from("project-media")

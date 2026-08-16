@@ -71,11 +71,23 @@ export async function getStoryPageData(
     .select("id, url, label")
     .eq("story_id", storyId);
 
-  const { data: mediaAssets } = await supabase
+  const { data: allMediaAssets } = await supabase
     .from("media_assets")
     .select("id, storage_path, media_type")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
+
+  // Isolated from the select above -- archived is a newer column that may
+  // not exist yet on a not-yet-migrated database, and a plain .eq() filter
+  // on the main select would fail (silently returning nothing, since only
+  // `data` is read) the instant it doesn't exist, wiping out the whole
+  // library instead of just not filtering archived assets out yet.
+  const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
+  const { data: archivedRows } = allMediaIdsForArchiveCheck.length
+    ? await supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
+    : { data: [] };
+  const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
+  const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
   const allPaths = new Set<string>();
   for (const asset of mediaAssets ?? []) allPaths.add(asset.storage_path);

@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
+import { syncPostType } from "@/lib/post-type";
 import type { MediaType } from "@/types/database";
 
 export type UploadMediaState = { message?: string } | undefined;
@@ -126,12 +127,26 @@ export async function uploadMedia(
   return undefined;
 }
 
+// An asset still referenced by any post/story is archived (hidden from the
+// library picker) instead of hard-deleted -- the row and its storage file
+// stay intact, so every post/story already using it keeps rendering exactly
+// as before (the FK cascade on post_assets/story_frames -> media_assets
+// only ever fires for a genuinely unused asset now, where cascading is
+// moot). Only a truly unused asset (zero references anywhere) is still
+// actually deleted, same as before.
 export async function deleteMedia(projectId: string, mediaAssetId: string) {
   const supabase = await createClient();
-  // FK cascades (post_assets/story_frames -> media_assets) remove it from
-  // wherever it was in use; the RLS delete policy already restricts this to
-  // owners/admins of the project.
-  const { error } = await supabase.from("media_assets").delete().eq("id", mediaAssetId);
+
+  const [{ count: postUsage }, { count: storyUsage }] = await Promise.all([
+    supabase.from("post_assets").select("*", { count: "exact", head: true }).eq("media_asset_id", mediaAssetId),
+    supabase.from("story_frames").select("*", { count: "exact", head: true }).eq("media_asset_id", mediaAssetId),
+  ]);
+  const inUse = (postUsage ?? 0) > 0 || (storyUsage ?? 0) > 0;
+
+  const { error } = inUse
+    ? await supabase.from("media_assets").update({ archived: true }).eq("id", mediaAssetId)
+    : await supabase.from("media_assets").delete().eq("id", mediaAssetId);
+
   if (error) {
     throw new Error(error.message);
   }
@@ -197,17 +212,34 @@ export async function createMediaFolder(
   return { id: folder.id };
 }
 
-// Bulk counterpart of deleteMedia -- same "storage object is never removed"
-// convention (see the comment on restoreMediaAsset above): this only ever
-// deletes media_assets rows, leaving their storage objects orphaned but
-// still live, same as a single delete does today.
+// Bulk counterpart of deleteMedia -- same archive-if-in-use, delete-if-not
+// split, just resolved once for the whole batch instead of one query pair
+// per asset.
 export async function bulkDeleteMedia(projectId: string, mediaAssetIds: string[]) {
   if (mediaAssetIds.length === 0) return;
   const supabase = await createClient();
-  const { error } = await supabase.from("media_assets").delete().in("id", mediaAssetIds);
-  if (error) {
-    throw new Error(error.message);
+
+  const [{ data: postUsageRows }, { data: storyUsageRows }] = await Promise.all([
+    supabase.from("post_assets").select("media_asset_id").in("media_asset_id", mediaAssetIds),
+    supabase.from("story_frames").select("media_asset_id").in("media_asset_id", mediaAssetIds),
+  ]);
+  const inUseIds = new Set([
+    ...(postUsageRows ?? []).map((r) => r.media_asset_id),
+    ...(storyUsageRows ?? []).map((r) => r.media_asset_id),
+  ]);
+
+  const toArchive = mediaAssetIds.filter((id) => inUseIds.has(id));
+  const toDelete = mediaAssetIds.filter((id) => !inUseIds.has(id));
+
+  if (toArchive.length > 0) {
+    const { error } = await supabase.from("media_assets").update({ archived: true }).in("id", toArchive);
+    if (error) throw new Error(error.message);
   }
+  if (toDelete.length > 0) {
+    const { error } = await supabase.from("media_assets").delete().in("id", toDelete);
+    if (error) throw new Error(error.message);
+  }
+
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/posts`);
   revalidatePath(`/projects/${projectId}/stories`);
@@ -288,6 +320,8 @@ export async function placeMediaInSlot(
   if (assetError) {
     throw new Error(assetError.message);
   }
+
+  await syncPostType(supabase, postId);
 
   return { postId };
 }

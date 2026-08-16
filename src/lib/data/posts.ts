@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
+import type { MediaLibraryItem, GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
@@ -16,6 +16,10 @@ export type PostPageData = {
     scheduled_time: string | null;
     status: PostStatus;
     review_status: ReviewStatus;
+    // The one canonical crop for this post's cover asset (position 0) --
+    // same value Grid's own crop tool reads/writes (updatePostCoverTransform),
+    // now also the post editor's cover tile and its own Crop action.
+    coverTransform: GridCoverTransform | null;
   };
   assets: PostAssetItem[];
   links: PostLinkItem[];
@@ -70,6 +74,14 @@ export async function getPostPageData(
     .eq("id", postId)
     .maybeSingle();
 
+  // Isolated the same way -- the one canonical cover crop, same column
+  // Grid's own crop tool reads/writes.
+  const { data: coverTransformRow } = await supabase
+    .from("posts")
+    .select("cover_transform")
+    .eq("id", postId)
+    .maybeSingle();
+
   const { data: postAssets } = await supabase
     .from("post_assets")
     .select("id, position, media_assets(id, storage_path, media_type)")
@@ -81,11 +93,23 @@ export async function getPostPageData(
     .select("id, url, label")
     .eq("post_id", postId);
 
-  const { data: mediaAssets } = await supabase
+  const { data: allMediaAssets } = await supabase
     .from("media_assets")
     .select("id, storage_path, media_type")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
+
+  // Isolated from the select above -- archived is a newer column that may
+  // not exist yet on a not-yet-migrated database, and a plain .eq() filter
+  // on the main select would fail (silently returning nothing, since only
+  // `data` is read) the instant it doesn't exist, wiping out the whole
+  // library instead of just not filtering archived assets out yet.
+  const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
+  const { data: archivedRows } = allMediaIdsForArchiveCheck.length
+    ? await supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
+    : { data: [] };
+  const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
+  const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
   // Same "already used in a carousel" lookup as Grid's own media library
   // (grid/page.tsx) -- kept as two plain queries rather than a joined
@@ -214,6 +238,7 @@ export async function getPostPageData(
       ...post,
       scheduled_time: timeRow?.scheduled_time ?? null,
       review_status: reviewStatusRow?.review_status ?? "pending",
+      coverTransform: (coverTransformRow?.cover_transform as GridCoverTransform | null) ?? null,
     },
     assets,
     links: postLinks,

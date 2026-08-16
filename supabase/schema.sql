@@ -235,6 +235,12 @@ create table public.media_assets (
   -- generated asset is edited/saved/used exactly like a manual upload the
   -- instant it exists.
   generated_by_ai boolean not null default false,
+  -- True once "deleted" from the Media Library while still referenced by at
+  -- least one post_assets/story_frames row -- hides it from the library
+  -- picker without touching the row or its storage file, so posts already
+  -- using it keep working. A truly unused asset (zero references) is still
+  -- actually deleted, never just archived. See deleteMedia/bulkDeleteMedia.
+  archived boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -1061,6 +1067,12 @@ begin
           (select s.review_status from stories s where s.id = sli.story_id),
           'pending'
         ),
+        -- The one canonical crop for a post's cover asset (position 0) --
+        -- lets the anonymous preview apply the same crop Grid shows
+        -- on-screen instead of ignoring it. Null for stories (no
+        -- cover_transform concept there) and for a post that's never been
+        -- cropped.
+        'coverTransform', (select p.cover_transform from posts p where p.id = sli.post_id),
         'media', case
           when sli.post_id is not null then (
             select coalesce(jsonb_agg(jsonb_build_object(

@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useActionState, useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -21,10 +22,12 @@ import {
   removePostAsset,
   removePostLink,
   reorderPostAssets,
+  replacePostAsset,
   updatePost,
   uploadPostAsset,
 } from "@/lib/actions/posts";
 import { saveMediaAssetAnnotation, saveMediaAssetPosterAnnotation } from "@/lib/actions/media";
+import { updatePostCoverTransform } from "@/lib/actions/grid";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
@@ -37,7 +40,8 @@ import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { BrandWriterField } from "@/components/ai/brand-writer";
-import { UndoIcon, type MediaLibraryItem } from "../../grid/grid-board";
+import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
+import { GridCropOverlay, coverTransformStyle } from "../../grid/grid-crop-overlay";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
 
@@ -84,6 +88,9 @@ type PostRecord = {
   scheduled_time: string | null;
   status: PostStatus;
   review_status: ReviewStatus;
+  // The one canonical crop for this post's cover asset (position 0) -- same
+  // value Grid's own crop tool reads/writes.
+  coverTransform: GridCoverTransform | null;
 };
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
@@ -247,6 +254,11 @@ export function PostEditor({
                   key={asset.postAssetId}
                   asset={asset}
                   canManage={canManage}
+                  isCover={index === 0}
+                  coverTransform={post.coverTransform}
+                  projectId={projectId}
+                  postId={post.id}
+                  mediaLibrary={mediaLibrary}
                   onRemove={() =>
                     startTransition(async () => {
                       await removePostAsset(projectId, post.id, asset.postAssetId);
@@ -275,7 +287,10 @@ export function PostEditor({
           <DragOverlay dropAnimation={DROP_ANIMATION}>
             {activeAsset && (
               <div className="aspect-[3/4] w-20 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
-                <AssetPreview asset={activeAsset} />
+                <AssetPreview
+                  asset={activeAsset}
+                  coverTransform={orderedAssets[0]?.postAssetId === activeAssetId ? post.coverTransform : null}
+                />
               </div>
             )}
           </DragOverlay>
@@ -317,7 +332,7 @@ export function PostEditor({
               visible row there instead -- scrolls internally either way. */}
           <div
             className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
-              hideBackLink ? "max-h-36" : "max-h-[min(1000px,65vh)]"
+              hideBackLink ? "max-h-48" : "max-h-[min(1000px,65vh)]"
             }`}
           >
             {availableMedia.map((item) => (
@@ -330,7 +345,7 @@ export function PostEditor({
                     router.refresh();
                   })
                 }
-                className="relative aspect-[3/4] overflow-hidden rounded-none border border-border"
+                className="relative aspect-[3/4] min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
               >
                 {item.url && item.mediaType === "image" && (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -384,12 +399,23 @@ export function PostEditor({
   );
 }
 
-function AssetPreview({ asset }: { asset: PostAssetItem }) {
+function AssetPreview({
+  asset,
+  coverTransform,
+}: {
+  asset: PostAssetItem;
+  // Only ever non-null for the post's cover (position 0) -- see
+  // posts.cover_transform's own comment. Applied with the exact same CSS
+  // Grid's own on-screen tile uses (coverTransformStyle), so this always
+  // matches what Grid shows.
+  coverTransform: GridCoverTransform | null;
+}) {
+  const style = coverTransformStyle(coverTransform);
   return (
     <>
       {asset.url && asset.mediaType === "image" && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={asset.url} alt="" className="h-full w-full object-cover" draggable={false} />
+        <img src={asset.url} alt="" className="h-full w-full object-cover" draggable={false} style={style} />
       )}
       {asset.mediaType === "video" &&
         (asset.posterUrl ? (
@@ -397,7 +423,7 @@ function AssetPreview({ asset }: { asset: PostAssetItem }) {
           // instead of the raw video (which would look unchanged either way
           // and never reflects what "Edit Cover" actually saved).
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={asset.posterUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+          <img src={asset.posterUrl} alt="" className="h-full w-full object-cover" draggable={false} style={style} />
         ) : (
           asset.url && <video src={asset.url} className="h-full w-full object-cover" muted />
         ))}
@@ -408,21 +434,49 @@ function AssetPreview({ asset }: { asset: PostAssetItem }) {
 function SortableAsset({
   asset,
   canManage,
+  isCover,
+  coverTransform,
+  projectId,
+  postId,
+  mediaLibrary,
   onRemove,
   onEditImage,
 }: {
   asset: PostAssetItem;
   canManage: boolean;
+  isCover: boolean;
+  coverTransform: GridCoverTransform | null;
+  projectId: string;
+  postId: string;
+  mediaLibrary: MediaLibraryItem[];
   onRemove: () => void;
   onEditImage: () => void;
 }) {
+  const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: asset.postAssetId,
     transition: SORTABLE_TRANSITION,
   });
+  // Kept alongside dnd-kit's own setNodeRef so ReplaceAssetPopover can
+  // compute a fixed portal position from this tile's rect even after the
+  // ⋮ menu item that opened it has already unmounted.
+  const tileRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [cropMode, setCropMode] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+
+  // Optimistic override so a fresh crop renders immediately instead of
+  // waiting for router.refresh() to land -- same "reset when the server
+  // prop actually changes" pattern as Grid's own GridSlot.
+  const [prevCoverTransform, setPrevCoverTransform] = useState(coverTransform);
+  const [overrideTransform, setOverrideTransform] = useState<GridCoverTransform | null | undefined>(undefined);
+  if (coverTransform !== prevCoverTransform) {
+    setPrevCoverTransform(coverTransform);
+    setOverrideTransform(undefined);
+  }
+  const effectiveTransform = overrideTransform !== undefined ? overrideTransform : coverTransform;
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -438,9 +492,24 @@ function SortableAsset({
     );
   }
 
+  async function handleSaveCrop(next: GridCoverTransform) {
+    setOverrideTransform(next);
+    setCropMode(false);
+    await updatePostCoverTransform(projectId, postId, next);
+    router.refresh();
+  }
+
+  // A video's crop tool operates on its picked poster frame (a static
+  // image) -- the raw video file itself can't be panned/zoomed like Grid's
+  // crop overlay expects. No poster yet means nothing to crop.
+  const cropImageUrl = asset.mediaType === "video" ? asset.posterUrl : asset.url;
+
   return (
     <div
-      ref={setNodeRef}
+      ref={(el) => {
+        setNodeRef(el);
+        tileRef.current = el;
+      }}
       style={style}
       {...(canManage ? { ...attributes, ...listeners } : {})}
       className={`relative aspect-[3/4] w-24 shrink-0 touch-none rounded-none border border-border transition-opacity duration-150 ${
@@ -451,8 +520,8 @@ function SortableAsset({
           the ⋮ dropdown below is a sibling, not a descendant, of this
           clipped box, so it isn't clipped along with it. Same fix as the
           Grid slot's own ⋮ menu (grid-board.tsx). */}
-      <div className="absolute inset-0 overflow-hidden">
-        <AssetPreview asset={asset} />
+      <div className={`absolute inset-0 ${cropMode ? "" : "overflow-hidden"}`}>
+        <AssetPreview asset={asset} coverTransform={isCover ? effectiveTransform : null} />
       </div>
       {canManage && (
         <div ref={menuRef} className="absolute left-1 top-1 z-10">
@@ -482,6 +551,28 @@ function SortableAsset({
               >
                 {asset.mediaType === "video" ? "Edit Cover" : "Edit Image"}
               </button>
+              {isCover && cropImageUrl && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setCropMode(true);
+                  }}
+                  className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                >
+                  Crop
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setReplaceOpen(true);
+                }}
+                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+              >
+                Replace
+              </button>
               <button
                 type="button"
                 onClick={handleDownload}
@@ -504,7 +595,155 @@ function SortableAsset({
           )}
         </div>
       )}
+      {cropMode && cropImageUrl && (
+        <GridCropOverlay
+          imageUrl={cropImageUrl}
+          initialTransform={effectiveTransform}
+          onSave={handleSaveCrop}
+          onCancel={() => setCropMode(false)}
+        />
+      )}
+      {replaceOpen && (
+        <ReplaceAssetPopover
+          projectId={projectId}
+          postId={postId}
+          postAssetId={asset.postAssetId}
+          mediaLibrary={mediaLibrary.filter((m) => m.id !== asset.mediaAssetId)}
+          anchorRef={tileRef}
+          onClose={() => setReplaceOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// Swap this frame's media in place -- upload a new file, or pick an
+// existing library asset -- rather than the old delete-then-re-add, which
+// lost carousel position and any per-asset crop. Direct action calls +
+// startTransition (not useActionState) since "pick a library thumbnail" and
+// "pick a file" both need to invoke the same action with differently-built
+// FormData, not a single <form> submit.
+//
+// Rendered via a portal at a fixed, viewport-clamped position computed from
+// anchorRef, instead of position:absolute inside the asset strip -- that
+// strip sets overflow-x-auto (for horizontal scrolling), which per the CSS
+// overflow spec forces its overflow-y to auto too, clipping an
+// absolutely-positioned popover that opens below its ~106px-tall row.
+function ReplaceAssetPopover({
+  projectId,
+  postId,
+  postAssetId,
+  mediaLibrary,
+  anchorRef,
+  onClose,
+}: {
+  projectId: string;
+  postId: string;
+  postAssetId: string;
+  mediaLibrary: MediaLibraryItem[];
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const popoverRef = useOutsideClick<HTMLDivElement>(true, onClose);
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const width = 224; // w-56
+    setPosition({
+      top: Math.min(rect.bottom + 4, window.innerHeight - 12),
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function runReplace(formData: FormData) {
+    setPending(true);
+    setError(undefined);
+    startTransition(async () => {
+      const result = await replacePostAsset(projectId, postId, postAssetId, undefined, formData);
+      setPending(false);
+      if (result?.message) {
+        setError(result.message);
+        return;
+      }
+      onClose();
+      router.refresh();
+    });
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const formData = new FormData();
+    formData.set("file", file);
+    runReplace(formData);
+  }
+
+  function handlePickLibrary(mediaAssetId: string) {
+    const formData = new FormData();
+    formData.set("media_asset_id", mediaAssetId);
+    runReplace(formData);
+  }
+
+  if (!position) return null;
+
+  return createPortal(
+    <div
+      ref={popoverRef}
+      onClick={(e) => e.stopPropagation()}
+      style={{ position: "fixed", top: position.top, left: position.left }}
+      className="z-20 w-56 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-2 shadow-lg"
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*,video/*"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+      <button
+        type="button"
+        onClick={() => fileInputRef.current?.click()}
+        disabled={pending}
+        className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
+      >
+        {pending ? "Replacing…" : "Upload new file"}
+      </button>
+      {mediaLibrary.length > 0 && (
+        <>
+          <p className="mb-1 mt-1.5 px-2 text-[10px] tracking-wide text-muted uppercase">Or choose from library</p>
+          <div className="grid max-h-40 grid-cols-4 gap-1 overflow-y-auto">
+            {mediaLibrary.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handlePickLibrary(item.id)}
+                disabled={pending}
+                className="aspect-square min-w-0 overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30 disabled:opacity-60"
+              >
+                {item.url && item.mediaType === "image" && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.url} alt="" className="h-full w-full object-cover" />
+                )}
+                {item.url && item.mediaType === "video" && (
+                  <video src={item.url} className="h-full w-full object-cover" muted />
+                )}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      {error && <p className="mt-1 px-2 text-xs text-error">{error}</p>}
+    </div>,
+    document.body,
   );
 }
 
@@ -575,7 +814,19 @@ function PostMainForm({
     updatePost.bind(null, projectId, post.id),
     undefined,
   );
+  // Adding/replacing/removing media auto-suggests the right type (see
+  // lib/post-type.ts's syncPostType, which writes posts.post_type directly
+  // and revalidates) -- this follows that fresh server value whenever it
+  // changes, so the pill selection updates itself, while still staying a
+  // real pick the user can override by hand and Save. "Adjust state during
+  // render" (this codebase's own convention) rather than an effect, since
+  // resetting local state to match a changed prop needs no external sync.
+  const [prevPostType, setPrevPostType] = useState(post.post_type);
   const [postType, setPostType] = useState<PostType>(post.post_type);
+  if (post.post_type !== prevPostType) {
+    setPrevPostType(post.post_type);
+    setPostType(post.post_type);
+  }
   const [addedToTodo, setAddedToTodo] = useState(false);
   const [todoError, setTodoError] = useState<string | undefined>();
   const [, startTransition] = useTransition();
@@ -597,22 +848,28 @@ function PostMainForm({
     <form action={action} className="flex flex-col gap-6">
       <input type="hidden" name="post_type" value={postType} />
 
-      <div className="flex gap-2">
-        {POST_TYPES.map((type) => (
-          <button
-            key={type}
-            type="button"
-            disabled={!canManage}
-            onClick={() => setPostType(type)}
-            className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 ${
-              postType === type
-                ? "border-foreground bg-foreground text-background"
-                : "border-border text-foreground hover:border-foreground/40"
-            }`}
-          >
-            {type}
-          </button>
-        ))}
+      <div className="flex flex-col gap-1.5">
+        <span className={labelClass}>Post Type</span>
+        {/* Auto-selected whenever media changes (1 image = Post, 2+ images
+            = Carousel, any video = Reel), but still a real pick -- click
+            another and Save to override it. */}
+        <div className="flex flex-wrap gap-2">
+          {POST_TYPES.map((type) => (
+            <button
+              key={type}
+              type="button"
+              disabled={!canManage}
+              onClick={() => setPostType(type)}
+              className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                postType === type
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-border text-foreground hover:border-foreground/40"
+              }`}
+            >
+              {type}
+            </button>
+          ))}
+        </div>
       </div>
 
       <label className="flex flex-col gap-1.5">
@@ -647,20 +904,7 @@ function PostMainForm({
 
       <div className="flex flex-col gap-3">
         <span className={labelClass}>Schedule post</span>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1.5">
-            <span className={labelClass}>Type</span>
-            <select
-              value={postType}
-              onChange={(e) => setPostType(e.target.value as PostType)}
-              disabled={!canManage}
-              className={fieldClass}
-            >
-              <option value="post">Post</option>
-              <option value="reel">Reel</option>
-              <option value="carousel">Carousel</option>
-            </select>
-          </label>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Status</span>
             <select name="status" defaultValue={post.status} disabled={!canManage} className={fieldClass}>
