@@ -8,8 +8,8 @@ import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 const PROJECT_PAGES = [
   { href: "", label: "Overview" },
   { href: "grid", label: "Grid" },
-  { href: "stories", label: "Content" },
   { href: "calendar", label: "Calendar" },
+  { href: "stories", label: "Content" },
   { href: "assets", label: "Assets" },
   { href: "brief", label: "Brief" },
   { href: "settings", label: "Settings" },

@@ -29,8 +29,8 @@ const ROLE_LABEL: Record<ProjectRole, string> = {
 const PERMISSION_PAGES: { key: string; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "grid", label: "Grid" },
-  { key: "stories", label: "Content" },
   { key: "calendar", label: "Calendar" },
+  { key: "stories", label: "Content" },
   { key: "brief", label: "Brief" },
   { key: "settings", label: "Settings" },
 ];
