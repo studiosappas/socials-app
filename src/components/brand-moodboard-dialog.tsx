@@ -1,12 +1,25 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { uploadMoodboardItem, addMoodboardLink, deleteMoodboardItem } from "@/lib/actions/brand-moodboard";
-import type { BrandMoodboardItem } from "@/lib/data/brand-moodboard";
+import { useCustomFonts } from "@/lib/use-custom-fonts";
+import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import type { BrandMoodboardCategory } from "@/types/database";
+
+const FONT_WEIGHT_OPTIONS = [
+  { value: "100", label: "Thin (100)" },
+  { value: "200", label: "Extra Light (200)" },
+  { value: "300", label: "Light (300)" },
+  { value: "400", label: "Regular (400)" },
+  { value: "500", label: "Medium (500)" },
+  { value: "600", label: "Semi Bold (600)" },
+  { value: "700", label: "Bold (700)" },
+  { value: "800", label: "Extra Bold (800)" },
+  { value: "900", label: "Black (900)" },
+];
 
 const CATEGORIES: { value: BrandMoodboardCategory; label: string }[] = [
   { value: "logo", label: "Logos" },
@@ -54,8 +67,22 @@ export function BrandMoodboardDialog({
   const [linkUrl, setLinkUrl] = useState("");
   const [addingLink, setAddingLink] = useState(false);
 
+  // A font upload needs a family name + weight/style before it's actually
+  // usable anywhere -- staged here instead of uploading immediately on file
+  // pick, unlike every other category (which still uploads right away).
+  const [pendingFontFile, setPendingFontFile] = useState<File | null>(null);
+  const [fontName, setFontName] = useState("");
+  const [fontWeight, setFontWeight] = useState("400");
+  const [fontStyle, setFontStyle] = useState<"normal" | "italic">("normal");
+
   const visibleItems = items.filter((i) => i.category === category);
   const categoryLabel = CATEGORIES.find((c) => c.value === category)?.label;
+
+  // Triggers loading every uploaded font so MoodboardTile can render each
+  // one's own glyphs instead of a generic file icon -- same hook/mechanism
+  // the editor uses, not a second font-loading path.
+  const customFonts = useMemo(() => deriveCustomFontFaces(items), [items]);
+  useCustomFonts(customFonts);
 
   function handleUploadClick() {
     fileInputRef.current?.click();
@@ -66,6 +93,15 @@ export function BrandMoodboardDialog({
     e.target.value = "";
     if (!file) return;
     setError(undefined);
+
+    if (category === "font") {
+      setPendingFontFile(file);
+      setFontName(file.name.replace(/\.[^./]+$/, "").trim());
+      setFontWeight("400");
+      setFontStyle("normal");
+      return;
+    }
+
     setUploading(true);
     const formData = new FormData();
     formData.set("file", file);
@@ -76,6 +112,30 @@ export function BrandMoodboardDialog({
         setError(result.message ?? "Couldn't upload.");
         return;
       }
+      router.refresh();
+    });
+  }
+
+  function handleAddFont(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pendingFontFile || !fontName.trim() || uploading) return;
+    setError(undefined);
+    setUploading(true);
+    const formData = new FormData();
+    formData.set("file", pendingFontFile);
+    startTransition(async () => {
+      const result = await uploadMoodboardItem(projectId, category, fontName, formData, {
+        fontFamily: fontName.trim(),
+        fontWeight,
+        fontStyle,
+      });
+      setUploading(false);
+      if (!result.success) {
+        setError(result.message ?? "Couldn't upload font.");
+        return;
+      }
+      setPendingFontFile(null);
+      setFontName("");
       router.refresh();
     });
   }
@@ -172,6 +232,62 @@ export function BrandMoodboardDialog({
               </form>
             )}
 
+            {category === "font" && (
+              <p className="text-[11px] text-muted">
+                You&apos;re responsible for having the appropriate license to use any font you upload here.
+              </p>
+            )}
+
+            {pendingFontFile && (
+              <form
+                onSubmit={handleAddFont}
+                className="flex flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center"
+              >
+                <input
+                  value={fontName}
+                  onChange={(e) => setFontName(e.target.value)}
+                  placeholder="Font name"
+                  required
+                  className="w-full min-w-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-36"
+                />
+                <select
+                  value={fontWeight}
+                  onChange={(e) => setFontWeight(e.target.value)}
+                  className="w-full min-w-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-40"
+                >
+                  {FONT_WEIGHT_OPTIONS.map((w) => (
+                    <option key={w.value} value={w.value}>
+                      {w.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={fontStyle}
+                  onChange={(e) => setFontStyle(e.target.value as "normal" | "italic")}
+                  className="w-full min-w-0 rounded-full border border-border bg-transparent px-3 py-1.5 text-sm focus:border-foreground focus:outline-none sm:w-32"
+                >
+                  <option value="normal">Normal</option>
+                  <option value="italic">Italic</option>
+                </select>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  radius="full"
+                  disabled={uploading || !fontName.trim()}
+                  className="w-full shrink-0 sm:w-auto"
+                >
+                  {uploading ? "Adding…" : "Add Font"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setPendingFontFile(null)}
+                  className="text-xs text-muted underline-offset-2 hover:underline"
+                >
+                  Cancel
+                </button>
+              </form>
+            )}
+
             {error && <p className="text-xs text-error">{error}</p>}
           </div>
         )}
@@ -199,10 +315,21 @@ function MoodboardTile({
   onDelete: () => void;
 }) {
   const isImage = item.kind === "file" && item.fileType === "image" && item.fileUrl;
+  const isFont = item.category === "font" && item.kind === "file" && Boolean(item.fontFamily);
 
   const content = isImage ? (
     // eslint-disable-next-line @next/next/no-img-element
     <img src={item.fileUrl!} alt={item.label} className="h-full w-full object-cover" />
+  ) : isFont ? (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black/[.03] p-2 text-center">
+      <span
+        style={{ fontFamily: item.fontFamily!, fontWeight: item.fontWeight ?? "400", fontStyle: item.fontStyle ?? "normal" }}
+        className="text-2xl text-foreground"
+      >
+        Aa
+      </span>
+      <span className="w-full truncate text-[9px] text-muted">{item.label}</span>
+    </div>
   ) : (
     <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black/[.03] p-1 text-center">
       <FileKindIcon kind={item.kind} fileType={item.fileType} className="h-5 w-5 text-muted" />

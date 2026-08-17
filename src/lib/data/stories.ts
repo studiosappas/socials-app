@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
+import type { StoryStatus } from "@/types/database";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -19,7 +20,7 @@ export type StoryPageData = {
     id: string;
     name: string;
     scheduled_date: string | null;
-    status: "draft" | "scheduled" | "published";
+    status: StoryStatus;
     notes: string;
   };
   frames: StoryFrameItem[];

@@ -5,15 +5,24 @@ import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
 import { generateWithImages } from "@/lib/ai/client";
 import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
+import { logActivity } from "@/lib/activity-log";
+import { notifyProjectMembers } from "@/lib/notifications";
 import type {
   BriefFrameSection,
   BriefItemKind,
   BriefItemSection,
+  BriefTaskStatus,
   BriefTaskType,
   GeneratedDesignPostType,
 } from "@/types/database";
 
 const DEFAULT_FRAME_LABELS = ["Cover", "Body 1", "Body 2", "Closure"];
+
+const BRIEF_STATUS_LABEL: Record<BriefTaskStatus, string> = {
+  draft: "Draft",
+  internal_review: "Internal Review",
+  ready_for_design: "Ready for Design",
+};
 
 type ActionResult = { success: boolean; message?: string };
 
@@ -73,6 +82,50 @@ export async function setBriefTaskTypes(
   const supabase = await createClient();
   const { error } = await supabase.from("brief_tasks").update({ content_types: contentTypes }).eq("id", taskId);
   if (error) return { success: false, message: error.message };
+  revalidatePath(`/projects/${projectId}/brief`);
+  return { success: true };
+}
+
+// Generic internal-review workflow (Draft -> Internal Review -> Ready for
+// Design) -- not tied to any specific person or role. Gated the same way as
+// every other Brief mutation: no manual role check here, RLS's owner/admin
+// policy on brief_tasks already enforces it. logActivity/notifyProjectMembers
+// are both best-effort/try-caught internally, so neither can fail this update.
+export async function setBriefTaskStatus(
+  projectId: string,
+  taskId: string,
+  taskName: string,
+  status: BriefTaskStatus,
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("brief_tasks").update({ status }).eq("id", taskId);
+  if (error) return { success: false, message: error.message };
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    const label = BRIEF_STATUS_LABEL[status];
+    await logActivity(supabase, projectId, user.id, `moved "${taskName}" to ${label}`);
+    await notifyProjectMembers(
+      supabase,
+      projectId,
+      "brief_updated",
+      {
+        title: `${taskName} — ${label}`,
+        description:
+          status === "internal_review"
+            ? "Sent for internal review."
+            : status === "ready_for_design"
+              ? "Ready for design."
+              : "Reset to draft.",
+        icon: status === "internal_review" ? "👀" : status === "ready_for_design" ? "✅" : "📝",
+        link: `/projects/${projectId}/brief`,
+      },
+      { excludeUserId: user.id },
+    );
+  }
+
   revalidatePath(`/projects/${projectId}/brief`);
   return { success: true };
 }

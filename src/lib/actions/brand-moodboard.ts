@@ -6,22 +6,37 @@ import type { BrandMoodboardCategory } from "@/types/database";
 
 type ActionResult = { success: boolean; message?: string };
 
+const FONT_EXTENSIONS = new Set(["ttf", "otf", "woff", "woff2"]);
+
 // Same upload shape as grid.ts's uploadMedia -- files live in the same
 // project-media bucket every other project asset already uses, just tagged
 // with a moodboard category instead of becoming a Grid/post media_asset.
+//
+// fontMeta is only ever passed for category "font" -- everything else in
+// this app trusts file.type/extension with zero server-side validation, but
+// a font file that isn't actually a font just silently fails to render
+// anywhere it's used (FontFace().load() rejects), so this is the one
+// deliberate exception: reject before the upload if the extension isn't a
+// real font format.
 export async function uploadMoodboardItem(
   projectId: string,
   category: BrandMoodboardCategory,
   label: string,
   formData: FormData,
+  fontMeta?: { fontFamily: string; fontWeight: string; fontStyle: string },
 ): Promise<ActionResult> {
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) {
     return { success: false, message: "Choose a file to upload." };
   }
 
+  const ext = file.name.includes(".") ? file.name.split(".").pop()?.toLowerCase() : undefined;
+
+  if (category === "font" && (!ext || !FONT_EXTENSIONS.has(ext))) {
+    return { success: false, message: "Unsupported font file -- use .woff, .woff2, .ttf, or .otf." };
+  }
+
   const supabase = await createClient();
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
   const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
 
   const { error: uploadError } = await supabase.storage
@@ -35,6 +50,9 @@ export async function uploadMoodboardItem(
     kind: "file",
     storage_path: storagePath,
     label: label.trim() || file.name,
+    ...(fontMeta
+      ? { font_family: fontMeta.fontFamily, font_weight: fontMeta.fontWeight, font_style: fontMeta.fontStyle }
+      : {}),
   });
   if (error) return { success: false, message: error.message };
 

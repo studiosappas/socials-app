@@ -42,6 +42,7 @@ import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { GridCropOverlay, coverTransformStyle } from "../../grid/grid-crop-overlay";
+import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
 
@@ -106,6 +107,7 @@ export function PostEditor({
   canManage,
   currentUserId,
   members,
+  customFonts = [],
   hideBackLink = false,
 }: {
   projectId: string;
@@ -116,6 +118,7 @@ export function PostEditor({
   canManage: boolean;
   currentUserId: string;
   members: ProjectMemberOption[];
+  customFonts?: CustomFontFace[];
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
@@ -394,6 +397,7 @@ export function PostEditor({
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
         saveAction={editingImage?.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}
+        customFonts={customFonts}
       />
     </div>
   );

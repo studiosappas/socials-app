@@ -31,6 +31,17 @@ export default async function BriefPage({
 
   const taskIds = (tasks ?? []).map((t) => t.id);
 
+  // Isolated from the select above -- `status` is a newer column that may
+  // not exist yet on a not-yet-migrated database, and a plain .select(...)
+  // that fails because the column doesn't exist would wipe out the entire
+  // Brief board (only `data` is read, and it comes back null on error), not
+  // just the status badges -- same reasoning as the folder_id isolation in
+  // stories/page.tsx.
+  const { data: statusRows } = taskIds.length
+    ? await supabase.from("brief_tasks").select("id, status").in("id", taskIds)
+    : { data: [] };
+  const statusByTask = new Map((statusRows ?? []).map((r) => [r.id, r.status]));
+
   // Fetched as flat, independent queries (rather than a nested embed) so a
   // pending migration on one table degrades that section gracefully instead
   // of failing the whole page's select.
@@ -64,6 +75,7 @@ export default async function BriefPage({
     id: task.id,
     name: task.name,
     contentTypes: task.content_types,
+    status: statusByTask.get(task.id) ?? "draft",
     items: (items ?? [])
       .filter((item) => item.task_id === task.id)
       .map((item) => {

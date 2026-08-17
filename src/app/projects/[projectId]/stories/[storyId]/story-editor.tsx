@@ -30,6 +30,7 @@ import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
 import { convertToTask } from "@/lib/actions/todo";
 import { addStoryComment, fetchStoryComments } from "@/lib/actions/post-comments";
+import { CONTENT_STATUS_LABEL, CONTENT_STATUS_OPTIONS } from "@/lib/content-status";
 import { Button } from "@/components/ui/button";
 import { ItemComments } from "@/components/ui/item-comments";
 import type { MediaLibraryItem } from "../../grid/grid-board";
@@ -136,7 +137,7 @@ export function StoryEditor({
           href={`/projects/${projectId}/stories`}
           className="text-sm text-muted transition-colors duration-150 hover:text-foreground"
         >
-          ← Back to stories
+          ← Back to content
         </Link>
       )}
 
@@ -211,7 +212,7 @@ export function StoryEditor({
           {downloading ? "Preparing…" : "Download Media"}
         </Button>
       ) : (
-        <p className="text-xs text-muted">No frames yet — upload one or add from the library below.</p>
+        <p className="text-xs text-muted">No files yet — upload one or add from the library below.</p>
       )}
 
       {canManage && availableMedia.length > 0 && (
@@ -421,12 +422,12 @@ function StoryMainForm({
   return (
     <form action={action} className="flex flex-col gap-6">
       <label className="flex flex-col gap-1.5">
-        <span className={labelClass}>Story name</span>
+        <span className={labelClass}>Content name</span>
         <input
           name="name"
           defaultValue={story.name}
           disabled={!canManage}
-          placeholder="Live text for story name"
+          placeholder="Live text for content name"
           className={fieldClass}
         />
       </label>
@@ -446,14 +447,20 @@ function StoryMainForm({
       </label>
 
       <div className="flex flex-col gap-3">
-        <span className={labelClass}>Schedule story</span>
+        <span className={labelClass}>Schedule content</span>
         <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Status</span>
             <select name="status" defaultValue={story.status} disabled={!canManage} className={fieldClass}>
-              <option value="draft">Draft</option>
-              <option value="scheduled">Scheduled</option>
-              <option value="published">Published</option>
+              {CONTENT_STATUS_OPTIONS.map((s) => (
+                <option key={s} value={s}>
+                  {CONTENT_STATUS_LABEL[s]}
+                </option>
+              ))}
+              {/* Legacy value from before this dropdown was expanded -- kept
+                  so existing "published" rows still render correctly instead
+                  of silently falling back to the first option. */}
+              <option value="published">Published (legacy)</option>
             </select>
           </label>
           <label className="flex flex-col gap-1.5">

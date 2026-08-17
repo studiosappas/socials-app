@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
-import type { MediaType } from "@/types/database";
+import type { MediaType, StoryStatus } from "@/types/database";
 
 // Same reasoning as fetchPostForModal in lib/actions/posts.ts -- lets the
 // Tasks page open a story in a client-side popup without needing a real
@@ -14,7 +14,7 @@ export async function fetchStoryForModal(projectId: string, storyId: string): Pr
   return getStoryPageData(projectId, storyId);
 }
 
-export async function createStory(projectId: string) {
+export async function createStory(projectId: string, folderId?: string | null) {
   const supabase = await createClient();
 
   const { count } = await supabase
@@ -24,7 +24,12 @@ export async function createStory(projectId: string) {
 
   const { data: story, error } = await supabase
     .from("stories")
-    .insert({ project_id: projectId, name: "Untitled story", position: count ?? 0 })
+    .insert({
+      project_id: projectId,
+      name: "Untitled story",
+      position: count ?? 0,
+      folder_id: folderId ?? null,
+    })
     .select("id")
     .single();
 
@@ -34,6 +39,213 @@ export async function createStory(projectId: string) {
 
   revalidatePath(`/projects/${projectId}/stories`);
   redirect(`/projects/${projectId}/stories/${story.id}`);
+}
+
+// ---------- Content folders ----------
+
+export type ActionResult = { success: true } | { success: false; message: string };
+
+export async function createContentFolder(
+  projectId: string,
+  name: string,
+): Promise<{ id: string } | { message: string }> {
+  const trimmed = name.trim();
+  if (!trimmed) return { message: "Folder name is required." };
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("content_folders")
+    .insert({ project_id: projectId, name: trimmed })
+    .select("id")
+    .single();
+
+  if (error || !data) {
+    return { message: error?.message ?? "Failed to create folder." };
+  }
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  return { id: data.id };
+}
+
+export async function renameContentFolder(
+  projectId: string,
+  folderId: string,
+  name: string,
+): Promise<ActionResult> {
+  const trimmed = name.trim();
+  if (!trimmed) return { success: false, message: "Folder name is required." };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("content_folders")
+    .update({ name: trimmed })
+    .eq("id", folderId);
+
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  return { success: true };
+}
+
+// Deletes only the folder row -- contained items fall back to Unfiled via
+// folder_id's `on delete set null`, not a cascade delete of the items.
+export async function deleteContentFolder(projectId: string, folderId: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("content_folders").delete().eq("id", folderId);
+
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  return { success: true };
+}
+
+export async function moveStoryToFolder(
+  projectId: string,
+  storyId: string,
+  folderId: string | null,
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("stories").update({ folder_id: folderId }).eq("id", storyId);
+
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  return { success: true };
+}
+
+// Batched counterparts of moveStoryToFolder/deleteStory for the board's
+// multi-select mode (mirrors Grid Media Library's bulkDeleteMedia/
+// moveMediaToFolder -- one query each instead of N individual ones).
+export async function bulkMoveStoriesToFolder(
+  projectId: string,
+  storyIds: string[],
+  folderId: string | null,
+): Promise<ActionResult> {
+  if (storyIds.length === 0) return { success: true };
+  const supabase = await createClient();
+  const { error } = await supabase.from("stories").update({ folder_id: folderId }).in("id", storyIds);
+
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  return { success: true };
+}
+
+export async function bulkDeleteStories(projectId: string, storyIds: string[]): Promise<ActionResult> {
+  if (storyIds.length === 0) return { success: true };
+  const supabase = await createClient();
+  const { error } = await supabase.from("stories").delete().in("id", storyIds);
+
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  revalidatePath(`/projects/${projectId}/calendar`);
+  return { success: true };
+}
+
+// A targeted single-column update, unlike updateStory -- that one reads
+// name/scheduled_date/notes from FormData too, so building a fresh FormData
+// with only "status" set to reuse it here would silently blank out the
+// item's name and notes on every quick status change from the card menu.
+export async function updateStoryStatus(
+  projectId: string,
+  storyId: string,
+  status: StoryStatus,
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("stories").update({ status }).eq("id", storyId);
+
+  if (error) return { success: false, message: error.message };
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  return { success: true };
+}
+
+export type UploadContentAssetState = { message?: string; success?: boolean } | undefined;
+
+// Uploads exactly one file per call. It's driven from the client by
+// uploadFilesWithPosters, which already submits one FormData per
+// selected/dropped file even when several were picked at once (a poster can
+// only unambiguously belong to one file per request) -- so each call here
+// creates its OWN story + single frame, meaning an N-file drop yields N
+// independent content items, not one item with N frames. That's the
+// Drive-style "drop a pile of unrelated assets into this folder" flow,
+// distinct from the single-item "+" tile inside the editor, which adds more
+// frames to one already-existing item.
+export async function uploadContentAsset(
+  projectId: string,
+  folderId: string | null,
+  _state: UploadContentAssetState,
+  formData: FormData,
+): Promise<UploadContentAssetState> {
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return { message: "Choose a file to upload." };
+  }
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { message: "You must be logged in." };
+
+  const { count } = await supabase
+    .from("stories")
+    .select("*", { count: "exact", head: true })
+    .eq("project_id", projectId);
+
+  const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
+  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
+  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from("project-media")
+    .upload(storagePath, file, { contentType: file.type });
+
+  if (uploadError) {
+    return { message: uploadError.message };
+  }
+
+  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
+
+  const { data: mediaAsset, error: mediaError } = await supabase
+    .from("media_assets")
+    .insert({ project_id: projectId, storage_path: storagePath, media_type: mediaType, uploaded_by: user.id })
+    .select("id")
+    .single();
+
+  if (mediaError || !mediaAsset) {
+    return { message: mediaError?.message ?? "Failed to save media." };
+  }
+
+  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
+
+  // Named from the file itself (minus extension) rather than "Untitled
+  // story" -- these arrive as standalone assets, not something the user is
+  // about to rename immediately the way a freshly created empty item is.
+  const name = file.name.replace(/\.[^./]+$/, "").trim() || "Untitled";
+
+  const { data: story, error: storyError } = await supabase
+    .from("stories")
+    .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
+    .select("id")
+    .single();
+
+  if (storyError || !story) {
+    return { message: storyError?.message ?? "Failed to create content item." };
+  }
+
+  const { error: frameError } = await supabase
+    .from("story_frames")
+    .insert({ story_id: story.id, media_asset_id: mediaAsset.id, position: 0 });
+
+  if (frameError) {
+    return { message: frameError.message };
+  }
+
+  revalidatePath(`/projects/${projectId}/stories`);
+  return { success: true };
 }
 
 export async function deleteStory(projectId: string, storyId: string) {
@@ -71,7 +283,7 @@ export async function updateStory(
     .update({
       name: String(formData.get("name") ?? "Untitled story"),
       scheduled_date: scheduledDate ? scheduledDate : null,
-      status: String(formData.get("status") ?? "draft") as "draft" | "scheduled" | "published",
+      status: String(formData.get("status") ?? "draft") as StoryStatus,
       notes: String(formData.get("notes") ?? ""),
     })
     .eq("id", storyId);

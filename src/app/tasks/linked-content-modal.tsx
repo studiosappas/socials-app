@@ -64,6 +64,7 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           canManage={result.data.canManage}
           currentUserId={result.data.currentUserId}
           members={result.data.members}
+          customFonts={result.data.customFonts}
           hideBackLink
         />
       )}

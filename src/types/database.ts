@@ -14,7 +14,14 @@ export type Platform = "instagram" | "tiktok" | "pinterest" | "youtube";
 export type ProjectPermission = "overview" | "grid" | "stories" | "calendar" | "brief" | "settings";
 export type PostType = "post" | "reel" | "carousel";
 export type PostStatus = "draft" | "scheduled" | "published" | "in_review";
-export type StoryStatus = "draft" | "scheduled" | "published";
+export type StoryStatus =
+  | "draft"
+  | "scheduled"
+  | "published"
+  | "ready"
+  | "approved"
+  | "sent"
+  | "delivered";
 // Independent of PostStatus/StoryStatus above -- see the review_status
 // column comment in schema.sql. Client Review Mode's approve/request-changes.
 export type ReviewStatus = "pending" | "approved" | "changes_requested";
@@ -28,6 +35,9 @@ export type TaskStatus = "todo" | "in_progress" | "done";
 // product feedback, so the type saved on the task IS the canvas size used
 // at generation time.
 export type BriefTaskType = GeneratedDesignPostType;
+// Generic internal-review workflow, not tied to any specific person/role --
+// see setBriefTaskStatus in lib/actions/brief.ts.
+export type BriefTaskStatus = "draft" | "internal_review" | "ready_for_design";
 export type BriefItemSection = "references" | "images" | "products";
 export type AssetProvider = "google_drive" | "dropbox" | "box" | "onedrive" | "collect" | "other";
 export type AssetType =
@@ -384,6 +394,7 @@ export interface Database {
           review_status: ReviewStatus;
           notes: string;
           position: number;
+          folder_id: string | null;
           created_at: string;
         };
         Insert: {
@@ -394,6 +405,7 @@ export interface Database {
           review_status?: ReviewStatus;
           notes?: string;
           position?: number;
+          folder_id?: string | null;
         };
         Update: {
           name?: string;
@@ -402,7 +414,14 @@ export interface Database {
           review_status?: ReviewStatus;
           notes?: string;
           position?: number;
+          folder_id?: string | null;
         };
+        Relationships: [];
+      };
+      content_folders: {
+        Row: { id: string; project_id: string; name: string; created_at: string };
+        Insert: { project_id: string; name: string };
+        Update: { name?: string };
         Relationships: [];
       };
       story_frames: {
@@ -518,6 +537,9 @@ export interface Database {
           url: string | null;
           label: string;
           notes: string;
+          font_family: string | null;
+          font_weight: string | null;
+          font_style: string | null;
           created_at: string;
         };
         Insert: {
@@ -528,11 +550,17 @@ export interface Database {
           url?: string | null;
           label?: string;
           notes?: string;
+          font_family?: string | null;
+          font_weight?: string | null;
+          font_style?: string | null;
         };
         Update: {
           category?: BrandMoodboardCategory;
           label?: string;
           notes?: string;
+          font_family?: string | null;
+          font_weight?: string | null;
+          font_style?: string | null;
         };
         Relationships: [];
       };
@@ -542,6 +570,7 @@ export interface Database {
           project_id: string;
           name: string;
           content_types: BriefTaskType[];
+          status: BriefTaskStatus;
           position: number;
           created_at: string;
         };
@@ -549,11 +578,13 @@ export interface Database {
           project_id: string;
           name?: string;
           content_types?: BriefTaskType[];
+          status?: BriefTaskStatus;
           position?: number;
         };
         Update: {
           name?: string;
           content_types?: BriefTaskType[];
+          status?: BriefTaskStatus;
           position?: number;
         };
         Relationships: [];

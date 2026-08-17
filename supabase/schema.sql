@@ -1465,3 +1465,52 @@ create policy "Admins manage landing media"
 -- notification_prefs jsonb column.
 alter table public.profiles add column if not exists workspace_settings jsonb not null default '{}'::jsonb;
 alter table public.profiles add column if not exists preferences jsonb not null default '{}'::jsonb;
+
+-- ---------- Content Hub: folders ----------
+-- Stories is being generalized into "Content" at the UI level (cosmetic
+-- rename only -- table/route/action names are unchanged, see AGENTS.md-adjacent
+-- session notes). This adds an optional folder layer above stories; a story
+-- row already models "one item -> many files" via story_frames, so no new
+-- file-grouping table is needed, just a place to group items.
+create table public.content_folders (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.content_folders enable row level security;
+
+create policy "Members can view content folders" on public.content_folders for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage content folders" on public.content_folders for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
+-- Ungrouped items stay ungrouped (shown in an "Unfiled" bucket) rather than
+-- being blocked or cascade-deleted, same on-delete behavior as
+-- media_assets.folder_id.
+alter table public.stories add column if not exists folder_id uuid references public.content_folders (id) on delete set null;
+
+-- Widen status additively -- existing draft/scheduled/published rows are
+-- untouched, the new values just become legal alongside them (no data rewrite).
+alter table public.stories drop constraint if exists stories_status_check;
+alter table public.stories add constraint stories_status_check
+  check (status in ('draft', 'scheduled', 'published', 'ready', 'approved', 'sent', 'delivered'));
+
+-- ---------- Brief: lightweight internal review state ----------
+-- Generic, team-agnostic workflow state -- not tied to any specific role or
+-- "approved by owner" concept. Existing owner/admin-only RLS on brief_tasks
+-- already covers writes to this column, so no new policy is needed.
+alter table public.brief_tasks add column if not exists status text not null default 'draft'
+  check (status in ('draft', 'internal_review', 'ready_for_design'));
+
+-- ---------- Brand Moodboard: custom brand fonts ----------
+-- The 'font' category already existed on brand_moodboard_items -- these
+-- columns just make an uploaded font file a real, loadable webfont instead
+-- of an inert attachment. Rows sharing the same font_family are treated as
+-- different faces (weight/style) of one logical font, same as real
+-- @font-face -- no separate font-group table needed.
+alter table public.brand_moodboard_items add column if not exists font_family text;
+alter table public.brand_moodboard_items add column if not exists font_weight text;
+alter table public.brand_moodboard_items add column if not exists font_style text;

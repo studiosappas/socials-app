@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
@@ -19,6 +19,7 @@ import {
   restoreBriefTaskFrame,
   restoreBriefTaskItem,
   saveBriefAnnotation,
+  setBriefTaskStatus,
   setBriefTaskTypes,
   updateBriefTaskFrameBody,
   updateBriefTaskItemNotes,
@@ -30,8 +31,8 @@ import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon } from "../grid/grid-board";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
-import type { BrandMoodboardItem } from "@/lib/data/brand-moodboard";
-import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskType } from "@/types/database";
+import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
+import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskStatus, BriefTaskType } from "@/types/database";
 
 export type BriefTaskItem = {
   id: string;
@@ -55,6 +56,7 @@ export type BriefTaskData = {
   id: string;
   name: string;
   contentTypes: BriefTaskType[];
+  status: BriefTaskStatus;
   items: BriefTaskItem[];
   frames: BriefTaskFrame[];
 };
@@ -94,6 +96,10 @@ export function BriefBoard({
   // Grid's own board-level stack (grid-board.tsx).
   const { push: pushCommand, undo, redo, canUndo, canRedo, isBusy: undoRedoBusy } = useUndoStack();
   useUndoRedoShortcuts(undo, redo);
+  // No separate fetch -- derived from the same brandMoodboard already held
+  // here, so uploading a font through the Moodboard dialog (same page,
+  // router.refresh()) updates the editor's picker live.
+  const customFonts = useMemo(() => deriveCustomFontFaces(brandMoodboard), [brandMoodboard]);
 
   function handleAddTask() {
     setCreating(true);
@@ -221,6 +227,7 @@ export function BriefBoard({
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
         saveAction={editingImage?.source === "asset" ? saveMediaAssetAnnotation : saveBriefAnnotation}
+        customFonts={customFonts}
       />
 
       <BrandMoodboardDialog
@@ -244,6 +251,21 @@ const POST_TYPE_OPTIONS: { value: BriefTaskType; label: string }[] = [
   { value: "reel_cover", label: "Reel Cover" },
   { value: "newsletter", label: "Newsletter" },
 ];
+
+// Generic internal-review workflow -- see setBriefTaskStatus in
+// lib/actions/brief.ts. Colors stay muted/informational (nothing alarming)
+// until the task actually reaches Ready for Design.
+const BRIEF_STATUS_OPTIONS: BriefTaskStatus[] = ["draft", "internal_review", "ready_for_design"];
+const BRIEF_STATUS_LABEL: Record<BriefTaskStatus, string> = {
+  draft: "Draft",
+  internal_review: "Internal Review",
+  ready_for_design: "Ready for Design",
+};
+const BRIEF_STATUS_DOT_COLOR: Record<BriefTaskStatus, string> = {
+  draft: "bg-muted",
+  internal_review: "bg-amber-500",
+  ready_for_design: "bg-emerald-500",
+};
 
 function TaskCard({
   projectId,
@@ -269,11 +291,59 @@ function TaskCard({
   const [saved, setSaved] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | undefined>();
-  const selectedType: BriefTaskType = task.contentTypes[0] ?? "post";
+  const [typeError, setTypeError] = useState<string | undefined>();
+  // Optimistic, with "adjust state during render" sync back to the server
+  // value (same convention Grid's own Post Type pills use) -- previously
+  // this read straight off task.contentTypes with no local state at all, so
+  // a click didn't visibly do anything until the round-trip + router.refresh
+  // landed. On a slow connection (or if the save silently failed, which
+  // went unsurfaced before this) that read as "the button doesn't work."
+  const [prevServerType, setPrevServerType] = useState(task.contentTypes[0] ?? "post");
+  const [optimisticType, setOptimisticType] = useState<BriefTaskType>(prevServerType);
+  if ((task.contentTypes[0] ?? "post") !== prevServerType) {
+    setPrevServerType(task.contentTypes[0] ?? "post");
+    setOptimisticType(task.contentTypes[0] ?? "post");
+  }
+  const selectedType: BriefTaskType = optimisticType;
 
   function handleSelectType(type: BriefTaskType) {
+    if (type === selectedType) return;
+    setTypeError(undefined);
+    const previous = selectedType;
+    setOptimisticType(type);
     startTransition(async () => {
-      await setBriefTaskTypes(projectId, task.id, [type]);
+      const result = await setBriefTaskTypes(projectId, task.id, [type]);
+      if (!result.success) {
+        setOptimisticType(previous);
+        setTypeError(result.message ?? "Couldn't change the type.");
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  // Same optimistic pair/rollback shape as the Post Type pills above.
+  const [statusError, setStatusError] = useState<string | undefined>();
+  const [prevServerStatus, setPrevServerStatus] = useState(task.status);
+  const [optimisticStatus, setOptimisticStatus] = useState<BriefTaskStatus>(prevServerStatus);
+  if (task.status !== prevServerStatus) {
+    setPrevServerStatus(task.status);
+    setOptimisticStatus(task.status);
+  }
+  const currentStatus: BriefTaskStatus = optimisticStatus;
+
+  function handleSetStatus(next: BriefTaskStatus) {
+    if (next === currentStatus) return;
+    setStatusError(undefined);
+    const previous = currentStatus;
+    setOptimisticStatus(next);
+    startTransition(async () => {
+      const result = await setBriefTaskStatus(projectId, task.id, task.name, next);
+      if (!result.success) {
+        setOptimisticStatus(previous);
+        setStatusError(result.message ?? "Couldn't change the status.");
+        return;
+      }
       router.refresh();
     });
   }
@@ -340,15 +410,21 @@ function TaskCard({
         className="flex cursor-pointer items-center justify-between gap-3"
         onClick={() => setExpanded((v) => !v)}
       >
-        <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+        <div className="flex min-w-0 items-center gap-3" onClick={(e) => e.stopPropagation()}>
           <input
             key={task.name}
             ref={nameRef}
             defaultValue={task.name}
             disabled={!canManage}
             onBlur={handleNameBlur}
-            className={`${labelClass} cursor-text border-0 bg-transparent focus:outline-none disabled:opacity-100`}
+            className={`${labelClass} min-w-0 cursor-text border-0 bg-transparent focus:outline-none disabled:opacity-100`}
           />
+          {/* Clearly-but-subtly visible even while collapsed -- the whole
+              point is a designer can scan the list without expanding every
+              card or asking anyone whether a brief is ready. Doubles as the
+              only control for changing status -- canManage users get a
+              dropdown, everyone else just sees the badge. */}
+          <StatusBadge status={currentStatus} canManage={canManage} onSetStatus={handleSetStatus} />
         </div>
         <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
           {canManage && (
@@ -384,6 +460,10 @@ function TaskCard({
           </button>
         </div>
       </div>
+      {/* Outside the expand/collapse block on purpose -- a failed status
+          change from the (always-visible) badge above needs to be visible
+          even while the card is collapsed. */}
+      {statusError && <p className="-mt-2 text-xs text-error">{statusError}</p>}
 
       {expanded && (
         <div className="flex flex-col gap-6">
@@ -405,6 +485,7 @@ function TaskCard({
                 </button>
               ))}
             </div>
+            {typeError && <p className="text-xs text-error">{typeError}</p>}
           </div>
 
           <ItemSection
@@ -479,6 +560,67 @@ function TaskCard({
               {generateError && <p className="text-xs text-error">{generateError}</p>}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The status badge doubles as its own control -- canManage users click it to
+// open a small dropdown of the three states instead of separate "Send to
+// Review"/"Mark Ready for Design" buttons living elsewhere on the card.
+// View-only members (or the badge for anyone once there's nothing to do)
+// just see the static badge.
+function StatusBadge({
+  status,
+  canManage,
+  onSetStatus,
+}: {
+  status: BriefTaskStatus;
+  canManage: boolean;
+  onSetStatus: (status: BriefTaskStatus) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+
+  const badge = (
+    <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[10px] tracking-wide text-muted uppercase">
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${BRIEF_STATUS_DOT_COLOR[status]}`} />
+      {BRIEF_STATUS_LABEL[status]}
+    </span>
+  );
+
+  if (!canManage) {
+    return <span title={`Status: ${BRIEF_STATUS_LABEL[status]}`}>{badge}</span>;
+  }
+
+  return (
+    <div ref={menuRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setMenuOpen((v) => !v)}
+        title={`Status: ${BRIEF_STATUS_LABEL[status]} — click to change`}
+        className="flex items-center gap-1 transition-opacity duration-150 hover:opacity-80"
+      >
+        {badge}
+        <ChevronIcon className="h-2.5 w-2.5 text-muted" />
+      </button>
+      {menuOpen && (
+        <div className="absolute left-0 top-7 z-20 w-40 rounded-none border border-border bg-background p-1 normal-case shadow-lg">
+          {BRIEF_STATUS_OPTIONS.map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onSetStatus(opt);
+              }}
+              className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+            >
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${BRIEF_STATUS_DOT_COLOR[opt]}`} />
+              <span className={opt === status ? "font-semibold" : ""}>{BRIEF_STATUS_LABEL[opt]}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>

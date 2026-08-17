@@ -7,6 +7,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  closestCenter,
   useDraggable,
   useDroppable,
   useSensor,
@@ -261,6 +262,13 @@ export function CalendarBoard({
       <DndContext
         id={`calendar-dnd-${projectId}`}
         sensors={sensors}
+        // Was missing entirely -- dnd-kit's default (rectIntersection)
+        // requires the dragged chip's rect to actually overlap a day cell's
+        // rect, which is unreliable for small/edge drops. closestCenter
+        // (already used by Grid's own board for the same dnd-kit setup)
+        // resolves to whichever droppable's center is nearest instead, far
+        // more forgiving for dropping onto a small calendar cell.
+        collisionDetection={closestCenter}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveItem(null)}
@@ -393,7 +401,7 @@ export function CalendarBoard({
               <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
                 {activeItem.thumbnailUrl && (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={activeItem.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                  <img src={activeItem.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
                 )}
               </span>
               <span className="truncate">{activeItem.label}</span>
@@ -459,7 +467,7 @@ export function CalendarBoard({
               <span className="min-h-0 flex-1 overflow-hidden">
                 {item.thumbnailUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
                 ) : (
                   <span className="flex h-full w-full items-center justify-center bg-black/[.04] text-muted">
                     {item.itemType === "story" ? "📖" : "🖼"}
@@ -933,7 +941,7 @@ function CompactItemChip({ item }: { item: CalendarItem }) {
         <span className="h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full bg-black/10 sm:h-4 sm:w-4">
           {item.thumbnailUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
           ) : (
             <span className="flex h-full w-full items-center justify-center text-[7px]">
               {item.itemType === "story" ? "📖" : "🖼"}
@@ -1012,6 +1020,7 @@ function ExpandedItemTile({
             src={item.thumbnailUrl}
             alt=""
             className={`h-full w-full object-cover ${published ? "opacity-70" : ""}`}
+            draggable={false}
           />
         ) : (
           <span className="flex h-full w-full items-center justify-center text-2xl">
@@ -1185,7 +1194,7 @@ function CalendarItemRow({ item }: { item: CalendarItem }) {
       <div className="h-16 w-16 shrink-0 overflow-hidden border border-border sm:h-20 sm:w-20">
         {item.thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+          <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
         ) : (
           <div className="flex h-full w-full items-center justify-center bg-black/[.04] text-2xl text-muted">
             {item.itemType === "story" ? "📖" : "🖼"}
@@ -1468,7 +1477,7 @@ function ItemChip({
           <div className="relative aspect-square overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30">
             {item.thumbnailUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+              <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
             ) : (
               <div className="flex h-full w-full items-center justify-center bg-black/[.04] text-muted">
                 {item.itemType === "story" ? "📖" : "🖼"}
@@ -1524,7 +1533,7 @@ function ItemChip({
         <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
           {item.thumbnailUrl && (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
           )}
         </span>
         <span className="truncate">{item.label}</span>

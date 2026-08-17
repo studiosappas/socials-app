@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
+import { useCustomFonts } from "@/lib/use-custom-fonts";
 import {
   NEUTRAL_ADJUSTMENTS,
   applyAdjustments,
   readAdjustments,
   type AdjustmentValues,
 } from "@/lib/image-adjustments";
+import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 
 const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
@@ -24,13 +26,26 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-const BRUSH_COLORS = ["#171412", "#6b6a68", "#a8a29e", "#6b8e6b", "#b08a4e", "#b25450"];
+// Accepts "#fff"/"fff"/"#ffffff"/"ffffff" (3- or 6-digit, with or without
+// the leading #) and returns a normalized "#rrggbb", or null if the input
+// isn't a valid hex color at all -- lets ColorPicker revert an invalid
+// pasted/typed value instead of passing garbage to Fabric.
+function normalizeHex(input: string): string | null {
+  const trimmed = input.trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{3}$/.test(trimmed)) {
+    return `#${trimmed[0]}${trimmed[0]}${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}`.toLowerCase();
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return `#${trimmed}`.toLowerCase();
+  }
+  return null;
+}
+
 const BRUSH_WIDTHS: { label: string; value: number }[] = [
   { label: "Thin", value: 2 },
   { label: "Medium", value: 5 },
   { label: "Thick", value: 10 },
 ];
-const TEXT_COLORS = ["#171412", "#6b6a68", "#a8a29e", "#6b8e6b", "#b08a4e", "#b25450", "#ffffff"];
 // Generic CSS font-family stacks rather than named webfonts -- the canvas
 // renders with whatever the browser resolves at draw time, and these three
 // generic families (serif/sans-serif/cursive) always resolve to *something*
@@ -91,6 +106,64 @@ function findBasePhoto(canvas: fabric.Canvas): fabric.FabricImage | null {
   return obj instanceof fabric.FabricImage ? obj : null;
 }
 
+// Fabric's cropX/cropY/width/height are just a WINDOW into the base photo's
+// underlying element (getElement()) -- the element itself stays the full,
+// un-cropped source no matter what's currently visible. This flattens
+// exactly what's currently VISIBLE (respecting whatever crop window, if
+// any, is already applied) into one standalone image, as a data URL.
+// rotateBasePhoto/flipBasePhoto use this so rotating after cropping rotates
+// the cropped result, not a version from before the crop.
+function getVisibleCropDataUrl(basePhoto: fabric.FabricImage): string {
+  const el = basePhoto.getElement() as HTMLImageElement;
+  const cropX = basePhoto.cropX ?? 0;
+  const cropY = basePhoto.cropY ?? 0;
+  const cropW = basePhoto.width || el.naturalWidth || 1;
+  const cropH = basePhoto.height || el.naturalHeight || 1;
+  const off = document.createElement("canvas");
+  off.width = cropW;
+  off.height = cropH;
+  const ctx = off.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable.");
+  ctx.drawImage(el, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+  return off.toDataURL("image/png");
+}
+
+// Renders `sourceUrl` onto an offscreen canvas rotated/flipped by exactly
+// this one increment (dimensions swapped for a 90/270 rotation), and
+// returns the result as a data URL -- same "flatten a transform into a new
+// image, then setElement() the base photo to it" technique already used by
+// Remove Background (handleRemoveBackground below), just for rotate/flip
+// instead of a chroma-key cutout.
+function getTransformedImageUrl(
+  sourceUrl: string,
+  transform: { rotation: 0 | 90 | 180 | 270; flipX: boolean; flipY: boolean },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const swapped = transform.rotation === 90 || transform.rotation === 270;
+      const w = swapped ? img.naturalHeight : img.naturalWidth;
+      const h = swapped ? img.naturalWidth : img.naturalHeight;
+      const off = document.createElement("canvas");
+      off.width = w || 1;
+      off.height = h || 1;
+      const ctx = off.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas 2D context unavailable."));
+        return;
+      }
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate((transform.rotation * Math.PI) / 180);
+      ctx.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
+      ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+      resolve(off.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("Couldn't load the image to rotate/flip it."));
+    img.src = sourceUrl;
+  });
+}
+
 export type AnnotationSaveAction = (
   projectId: string,
   targetId: string,
@@ -108,6 +181,7 @@ export function AnnotationEditor({
   onClose,
   onSaved,
   saveAction,
+  customFonts = [],
 }: {
   projectId: string;
   attachmentId: string | null;
@@ -137,6 +211,10 @@ export function AnnotationEditor({
   // identical (projectId, id, formData) => {previewUrl|message} shape, so
   // the editor itself stays agnostic to which one it's editing.
   saveAction: AnnotationSaveAction;
+  // This project's uploaded Brand Moodboard fonts (see
+  // lib/data/brand-moodboard.ts's deriveCustomFontFaces) -- merged into the
+  // font picker below, alongside the built-in generic stacks.
+  customFonts?: CustomFontFace[];
 }) {
   const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -189,6 +267,23 @@ export function AnnotationEditor({
   // inline during render, since reading a ref's .current during render
   // isn't render-pure (see the identical reasoning in use-undo-stack.ts).
   const [canvasResolution, setCanvasResolution] = useState<{ width: number; height: number } | null>(null);
+  // Custom brand fonts load asynchronously (FontFace().load()) -- familyNames
+  // feeds the merged font picker below, readyVersion drives the repaint
+  // effect further down that corrects any text painted before its font
+  // finished loading.
+  const { familyNames: customFontFamilies, readyVersion: customFontsReady } = useCustomFonts(customFonts);
+  const fontOptions = useMemo(
+    () => [...FONT_OPTIONS, ...customFontFamilies.map((f) => ({ label: f, value: f }))],
+    [customFontFamilies],
+  );
+  // Repaints once a custom font finishes loading -- a text object using that
+  // family may have already painted (in a fallback font, since Canvas2D
+  // doesn't wait for a font it doesn't know about) before this landed. Not
+  // gated on `ready` below since a font can finish loading well after the
+  // canvas itself is already up and interactive.
+  useEffect(() => {
+    fabricRef.current?.requestRenderAll();
+  }, [customFontsReady]);
   const [textColor, setTextColor] = useState(INK);
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
@@ -203,6 +298,12 @@ export function AnnotationEditor({
   const [cropZoom, setCropZoom] = useState(1);
   const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
   const [cropFrameSize, setCropFrameSize] = useState<{ width: number; height: number } | null>(null);
+  // The base photo's CURRENT full source (getElement().src), captured fresh
+  // every time the crop tool opens -- must match whatever handleApplyCrop
+  // itself crops from, or the live drag-to-position preview shows the wrong
+  // (e.g. pre-rotation) orientation while the actual apply step crops the
+  // right one, positioning the crop window against a mismatched preview.
+  const [cropSourceUrl, setCropSourceUrl] = useState<string | null>(null);
   // Independent of `tool` -- Adjustments is a toggleable panel, not a canvas
   // interaction mode, so it can stay open alongside Select/Draw/etc. Synced
   // FROM the base photo's actual filters (not just reset to neutral) inside
@@ -210,6 +311,8 @@ export function AnnotationEditor({
   // really on the canvas, including on reopen or after undoing past an edit.
   const [adjustPanelOpen, setAdjustPanelOpen] = useState(false);
   const [adjustments, setAdjustments] = useState<AdjustmentValues>(NEUTRAL_ADJUSTMENTS);
+  const [rotatePanelOpen, setRotatePanelOpen] = useState(false);
+  const [rotating, setRotating] = useState(false);
 
   // For video: a JPEG data URL of whatever frame the user picked (or, when
   // reopening an already-edited video, one captured silently for canvas-
@@ -337,14 +440,6 @@ export function AnnotationEditor({
     });
   }
 
-  useEffect(() => {
-    if (!open) return;
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
 
   useEffect(() => {
     if (!open || !loadUrl || !canvasElRef.current) return;
@@ -381,6 +476,7 @@ export function AnnotationEditor({
       setReady(false);
       setTool("select");
       setCropping(false);
+      setCropSourceUrl(null);
       // These reference objects that belong to the PREVIOUS canvas instance
       // (disposed above/about to be) -- left stale, they kept the
       // selection-dependent toolbar rows (Align/Arrange, Remove Background,
@@ -392,6 +488,7 @@ export function AnnotationEditor({
       setSelectedImage(null);
       setSelectedObject(null);
       setAdjustPanelOpen(false);
+      setRotatePanelOpen(false);
 
       setupCanvas(canvas);
     })();
@@ -466,6 +563,14 @@ export function AnnotationEditor({
         // point is a DIFFERENT frame silently captured only to size the
         // canvas (see the effect above) -- patching src here would swap
         // the correct saved cover for a random unrelated frame.
+        //
+        // Same "self-contained, never expires" reasoning excludes a rotated/
+        // flipped base photo here too -- rotateBasePhoto/flipBasePhoto
+        // (below) flatten the transform into a data URL via setElement(),
+        // same technique Remove Background already uses, so a data: src
+        // is never a stale signed URL to refresh; overwriting it with the
+        // ORIGINAL un-rotated `url` would silently discard the rotation on
+        // every reopen.
         let patched = restoreAnnotation;
         if (!isVideo) {
           const clone = JSON.parse(JSON.stringify(restoreAnnotation)) as {
@@ -474,11 +579,19 @@ export function AnnotationEditor({
             [k: string]: unknown;
           };
           const basePhoto = clone.objects?.find((o) => o.appRole === BASE_PHOTO_ROLE);
-          if (basePhoto) basePhoto.src = url;
+          if (basePhoto && typeof basePhoto.src === "string" && !basePhoto.src.startsWith("data:")) {
+            basePhoto.src = url;
+          }
           // Legacy shape (pre-migration, see the backgroundImage handling
           // right below) stored the photo under its own top-level key
           // instead of in `objects` -- needs the same src refresh.
-          if (clone.backgroundImage) clone.backgroundImage.src = url;
+          if (
+            clone.backgroundImage &&
+            typeof clone.backgroundImage.src === "string" &&
+            !clone.backgroundImage.src.startsWith("data:")
+          ) {
+            clone.backgroundImage.src = url;
+          }
           patched = clone;
         }
 
@@ -732,8 +845,79 @@ export function AnnotationEditor({
         setCropFrameSize(rect ? { width: rect.width, height: rect.height } : null);
         setCropZoom(1);
         setCropOffset({ x: 0, y: 0 });
+        const basePhoto = findBasePhoto(canvas);
+        setCropSourceUrl(basePhoto ? (basePhoto.getElement() as HTMLImageElement).src : null);
       }
     });
+  }
+
+  // Rotate/mirror the base photo itself -- never whatever's selected (text/
+  // arrows/logos aren't touched, same "always the base photo" reasoning as
+  // Adjustments above). Only reachable when targetAspect is set (Post/Grid's
+  // fixed-frame covers) -- see the sidebar button below; without a fixed
+  // frame the CANVAS itself would need to resize to the newly-rotated
+  // image's own orientation, a materially bigger change than this.
+  //
+  // Always transforms getVisibleCropDataUrl's flattened output -- exactly
+  // what's currently on screen, crop included -- not the pristine original.
+  // Rotating now bakes the current crop into the new full underlying
+  // element (cropX/Y reset to 0, width/height become the new full size),
+  // which is also why handleApplyCrop below reads its source from
+  // basePhoto.getElement() rather than the original url: that element IS
+  // already the correctly-rotated, correctly-cropped-so-far image.
+  async function applyBaseTransform(rotation: 0 | 90 | 180 | 270, flipX: boolean, flipY: boolean) {
+    const canvas = fabricRef.current;
+    const basePhoto = canvas ? findBasePhoto(canvas) : null;
+    if (!canvas || !basePhoto || !targetAspect) return;
+
+    setRotating(true);
+    try {
+      const visibleUrl = getVisibleCropDataUrl(basePhoto);
+      const transformedUrl = await getTransformedImageUrl(visibleUrl, { rotation, flipX, flipY });
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new window.Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error("Couldn't load the rotated image."));
+        el.src = transformedUrl;
+      });
+
+      const naturalW = img.naturalWidth;
+      const naturalH = img.naturalHeight;
+      const frameW = canvas.getWidth();
+      const frameH = canvas.getHeight();
+      // Same cover-fit formula as the initial load (targetAspect branch) --
+      // naturalW/H already reflect the swapped dimensions for a 90/270
+      // rotation, so this re-centers/re-covers correctly with no separate
+      // "swapped" case to handle.
+      const imgScale = Math.max(frameW / naturalW, frameH / naturalH);
+
+      basePhoto.setElement(img);
+      basePhoto.set({
+        scaleX: imgScale,
+        scaleY: imgScale,
+        left: (frameW - naturalW * imgScale) / 2,
+        top: (frameH - naturalH * imgScale) / 2,
+        cropX: 0,
+        cropY: 0,
+        width: naturalW,
+        height: naturalH,
+      });
+      basePhoto.setCoords();
+      canvas.requestRenderAll();
+      canvas.fire("object:modified", { target: basePhoto });
+      setCropZoom(1);
+      setCropOffset({ x: 0, y: 0 });
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  function rotateBasePhoto(deltaDegrees: 90 | -90) {
+    applyBaseTransform(deltaDegrees === 90 ? 90 : 270, false, false);
+  }
+
+  function flipBasePhoto(axis: "horizontal" | "vertical") {
+    applyBaseTransform(0, axis === "horizontal", axis === "vertical");
   }
 
   // Mirrors Grid's crop math exactly (see grid-crop-overlay.tsx): the frame
@@ -757,62 +941,70 @@ export function AnnotationEditor({
   // template (preserving whatever shape Fabric already uses for type/
   // originX/originY/etc, which side-steps needing to guess it), and only
   // override the crop-specific fields.
-  function handleApplyCrop() {
+  async function handleApplyCrop() {
     const canvas = fabricRef.current;
-    if (!canvas || !loadUrl) return;
+    const basePhoto = canvas ? findBasePhoto(canvas) : null;
+    if (!canvas || !basePhoto) return;
     const frameW = canvas.getWidth();
     const frameH = canvas.getHeight();
-    fabric.FabricImage.fromURL(loadUrl, { crossOrigin: "anonymous" }).then((freshImg) => {
-      const naturalW = freshImg.width ?? frameW;
-      const naturalH = freshImg.height ?? frameH;
-      // Same "cover" baseline as the initial image load: at zoom 1 the full
-      // image exactly fills the frame (cropping whichever axis overflows).
-      const coverScale = Math.max(frameW / naturalW, frameH / naturalH);
-      const cropW = clamp(frameW / (coverScale * cropZoom), 0, naturalW);
-      const cropH = clamp(frameH / (coverScale * cropZoom), 0, naturalH);
-      // offset is a fraction of the FRAME (matching Grid's own drag-delta
-      // convention), which is the same as a fraction of the crop window's
-      // own natural size -- both are scaled by the same factor to fill the
-      // frame, so a "one frame-width" drag is exactly "one crop-window-
-      // width" in natural pixels, regardless of zoom.
-      const cropX = clamp((naturalW - cropW) / 2 + cropOffset.x * cropW, 0, naturalW - cropW);
-      const cropY = clamp((naturalH - cropH) / 2 + cropOffset.y * cropH, 0, naturalH - cropH);
 
-      // The base photo is a regular (tagged) entry in json.objects now, not
-      // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
-      const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
-      const objects = json.objects ?? [];
-      const photoIndex = objects.findIndex((o) => o.appRole === BASE_PHOTO_ROLE);
-      const updatedPhoto = {
-        ...(photoIndex >= 0 ? objects[photoIndex] : {}),
-        appRole: BASE_PHOTO_ROLE,
-        src: loadUrl,
-        cropX,
-        cropY,
-        width: cropW,
-        height: cropH,
-        scaleX: frameW / cropW,
-        scaleY: frameH / cropH,
-        left: 0,
-        top: 0,
-        // See the identical note on the initial-load path -- without this,
-        // the object renders centered on (left,top) instead of anchored
-        // there, which is why the crop never appeared to visually apply.
-        originX: "left",
-        originY: "top",
-      };
-      if (photoIndex >= 0) {
-        objects[photoIndex] = updatedPhoto;
-      } else {
-        objects.unshift(updatedPhoto);
-      }
-      json.objects = objects;
-      canvas.loadFromJSON(json).then(() => {
-        canvas.requestRenderAll();
-        setCropping(false);
-        setTool("select");
-      });
-    });
+    // basePhoto.getElement() is always the current FULL underlying source
+    // -- cropX/Y/width/height are just Fabric's window into it, never the
+    // element itself -- so this already correctly reflects any prior
+    // rotate/flip (rotateBasePhoto/flipBasePhoto bake those directly into
+    // this same element) without needing to separately track/reapply a
+    // transform here.
+    const sourceUrl = (basePhoto.getElement() as HTMLImageElement).src;
+
+    const freshImg = await fabric.FabricImage.fromURL(sourceUrl, { crossOrigin: "anonymous" });
+    const naturalW = freshImg.width ?? frameW;
+    const naturalH = freshImg.height ?? frameH;
+    // Same "cover" baseline as the initial image load: at zoom 1 the full
+    // image exactly fills the frame (cropping whichever axis overflows).
+    const coverScale = Math.max(frameW / naturalW, frameH / naturalH);
+    const cropW = clamp(frameW / (coverScale * cropZoom), 0, naturalW);
+    const cropH = clamp(frameH / (coverScale * cropZoom), 0, naturalH);
+    // offset is a fraction of the FRAME (matching Grid's own drag-delta
+    // convention), which is the same as a fraction of the crop window's
+    // own natural size -- both are scaled by the same factor to fill the
+    // frame, so a "one frame-width" drag is exactly "one crop-window-
+    // width" in natural pixels, regardless of zoom.
+    const cropX = clamp((naturalW - cropW) / 2 + cropOffset.x * cropW, 0, naturalW - cropW);
+    const cropY = clamp((naturalH - cropH) / 2 + cropOffset.y * cropH, 0, naturalH - cropH);
+
+    // The base photo is a regular (tagged) entry in json.objects now, not
+    // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
+    const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
+    const objects = json.objects ?? [];
+    const photoIndex = objects.findIndex((o) => o.appRole === BASE_PHOTO_ROLE);
+    const updatedPhoto = {
+      ...(photoIndex >= 0 ? objects[photoIndex] : {}),
+      appRole: BASE_PHOTO_ROLE,
+      src: sourceUrl,
+      cropX,
+      cropY,
+      width: cropW,
+      height: cropH,
+      scaleX: frameW / cropW,
+      scaleY: frameH / cropH,
+      left: 0,
+      top: 0,
+      // See the identical note on the initial-load path -- without this,
+      // the object renders centered on (left,top) instead of anchored
+      // there, which is why the crop never appeared to visually apply.
+      originX: "left",
+      originY: "top",
+    };
+    if (photoIndex >= 0) {
+      objects[photoIndex] = updatedPhoto;
+    } else {
+      objects.unshift(updatedPhoto);
+    }
+    json.objects = objects;
+    await canvas.loadFromJSON(json);
+    canvas.requestRenderAll();
+    setCropping(false);
+    setTool("select");
   }
 
   function handleUndo() {
@@ -852,6 +1044,31 @@ export function AnnotationEditor({
       canvas.requestRenderAll();
     });
   }
+
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        // Don't hijack normal text editing -- a DOM input/textarea focused
+        // elsewhere in this editor (e.g. the hex color field), or an IText
+        // object the user is actively typing into (Fabric's own isEditing
+        // flag), both need their normal character-delete behavior.
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+        const active = fabricRef.current?.getActiveObject();
+        if (!active || ("isEditing" in active && (active as fabric.IText).isEditing)) return;
+        e.preventDefault();
+        handleDeleteSelected();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, onClose]);
 
   // Delta-based (compute how far off the object's current bounding box is
   // from the target edge/center, then nudge left/top by that amount) rather
@@ -1250,6 +1467,26 @@ export function AnnotationEditor({
         >
           <AdjustIcon />
         </SidebarToolButton>
+        {targetAspect && (
+          <SidebarToolButton
+            active={rotatePanelOpen}
+            onClick={() => setRotatePanelOpen((v) => !v)}
+            label="Rotate"
+            title="Rotate / Flip Photo"
+          >
+            <RotateIcon direction="right" />
+          </SidebarToolButton>
+        )}
+        {isVideo && ready && (
+          <SidebarToolButton
+            active={false}
+            onClick={handleChooseDifferentFrame}
+            label="Frame"
+            title="Select Cover Frame"
+          >
+            <FrameIcon />
+          </SidebarToolButton>
+        )}
         <span className="my-1 h-px w-full bg-border" />
         <SidebarToolButton active={false} onClick={handleUndo} label="Undo">
           <UndoIcon />
@@ -1260,38 +1497,31 @@ export function AnnotationEditor({
         <SidebarToolButton active={false} onClick={handleDeleteSelected} label="Delete">
           <DeleteIcon />
         </SidebarToolButton>
-        {isVideo && ready && (
-          <>
-            <span className="my-1 h-px w-full bg-border" />
-            <SidebarToolButton
-              active={false}
-              onClick={handleChooseDifferentFrame}
-              label="Frame"
-              title="Select Cover Frame"
-            >
-              <FrameIcon />
-            </SidebarToolButton>
-          </>
-        )}
       </div>
 
       <div className="flex flex-1 flex-col overflow-hidden">
-      {tool === "draw" && (
+      {rotatePanelOpen && ready && targetAspect && (
         <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
           <div className="flex items-center gap-1">
-            {BRUSH_COLORS.map((color) => (
-              <button
-                key={color}
-                type="button"
-                onClick={() => handleBrushColorChange(color)}
-                title={color}
-                style={{ backgroundColor: color }}
-                className={`h-5 w-5 rounded-full border ${
-                  brushColor === color ? "border-foreground" : "border-border"
-                }`}
-              />
-            ))}
+            <IconToolButton onClick={() => rotateBasePhoto(-90)} label="Rotate left">
+              <RotateIcon direction="left" />
+            </IconToolButton>
+            <IconToolButton onClick={() => rotateBasePhoto(90)} label="Rotate right">
+              <RotateIcon direction="right" />
+            </IconToolButton>
+            <IconToolButton onClick={() => flipBasePhoto("horizontal")} label="Flip horizontal">
+              <FlipIcon axis="horizontal" />
+            </IconToolButton>
+            <IconToolButton onClick={() => flipBasePhoto("vertical")} label="Flip vertical">
+              <FlipIcon axis="vertical" />
+            </IconToolButton>
           </div>
+          {rotating && <span className="text-xs text-muted">Rotating…</span>}
+        </div>
+      )}
+      {tool === "draw" && (
+        <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
+          <ColorPicker value={brushColor} onChange={handleBrushColorChange} />
           <div className="flex items-center gap-1">
             {BRUSH_WIDTHS.map((w) => (
               <button
@@ -1366,20 +1596,7 @@ export function AnnotationEditor({
 
       {selectedText && (
         <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
-          <div className="flex items-center gap-1">
-            {TEXT_COLORS.map((color) => (
-              <button
-                key={color}
-                type="button"
-                onClick={() => handleTextColorChange(color)}
-                title={color}
-                style={{ backgroundColor: color }}
-                className={`h-5 w-5 rounded-full border ${
-                  textColor === color ? "border-foreground" : "border-border"
-                }`}
-              />
-            ))}
-          </div>
+          <ColorPicker value={textColor} onChange={handleTextColorChange} />
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -1402,21 +1619,17 @@ export function AnnotationEditor({
               I
             </button>
           </div>
-          <div className="flex items-center gap-1">
-            {FONT_OPTIONS.map((f) => (
-              <button
-                key={f.label}
-                type="button"
-                onClick={() => handleTextFontChange(f.value)}
-                style={{ fontFamily: f.value }}
-                className={`rounded px-2 py-1 text-xs ${
-                  textFont === f.value ? "bg-foreground text-background" : "hover:bg-black/[.05]"
-                }`}
-              >
+          <select
+            value={textFont}
+            onChange={(e) => handleTextFontChange(e.target.value)}
+            className="rounded border border-border bg-transparent px-2 py-1 text-xs focus:border-foreground focus:outline-none"
+          >
+            {fontOptions.map((f) => (
+              <option key={f.label} value={f.value} style={{ fontFamily: f.value }}>
                 {f.label}
-              </button>
+              </option>
             ))}
-          </div>
+          </select>
           <div className="flex items-center gap-1">
             {ALIGN_OPTIONS.map((a) => (
               <button
@@ -1508,7 +1721,7 @@ export function AnnotationEditor({
             className={cropping ? "invisible" : ""}
             style={{ maxWidth: "100%", maxHeight: "100%", height: "auto" }}
           />
-          {cropping && loadUrl && cropFrameSize && (
+          {cropping && cropSourceUrl && cropFrameSize && (
             <div
               className="absolute"
               style={{
@@ -1520,7 +1733,7 @@ export function AnnotationEditor({
               }}
             >
               <AnnotationCropOverlay
-                imageUrl={loadUrl}
+                imageUrl={cropSourceUrl}
                 zoom={cropZoom}
                 offset={cropOffset}
                 onZoomChange={setCropZoom}
@@ -2018,6 +2231,52 @@ function IconToolButton({
   );
 }
 
+// <input type="color"> is the browser's own full-RGB-spectrum picker --
+// no custom color-wheel UI/dependency needed. Paired with a plain hex text
+// input (same pairing Google Drive's own color picker uses) so a color code
+// can be typed/pasted directly; only commits on blur/Enter, and reverts to
+// the last valid value on an invalid entry instead of erroring.
+function ColorPicker({ value, onChange }: { value: string; onChange: (hex: string) => void }) {
+  const [hexInput, setHexInput] = useState(value);
+  const [prevValue, setPrevValue] = useState(value);
+  if (value !== prevValue) {
+    setPrevValue(value);
+    setHexInput(value);
+  }
+
+  function commitHexInput() {
+    const normalized = normalizeHex(hexInput);
+    if (normalized) {
+      onChange(normalized);
+    } else {
+      setHexInput(value);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        title="Pick a color"
+        className="h-6 w-6 cursor-pointer rounded-full border border-border bg-transparent p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch-wrapper]:rounded-full [&::-webkit-color-swatch-wrapper]:p-0"
+      />
+      <input
+        type="text"
+        value={hexInput}
+        onChange={(e) => setHexInput(e.target.value)}
+        onBlur={commitHexInput}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        placeholder="#000000"
+        className="w-[4.5rem] rounded border border-border bg-transparent px-1.5 py-0.5 text-[11px] focus:border-foreground focus:outline-none"
+      />
+    </div>
+  );
+}
+
 // Minimal "equalizer sliders" glyph -- three horizontal tracks with a handle
 // at a different position on each, the standard shorthand for an
 // adjustments/tuning panel (distinct enough from the plain-text toolbar
@@ -2121,6 +2380,41 @@ function LayerIcon({ variant }: { variant: "front" | "forward" | "backward" | "b
       {variant === "backward" && (
         <path d="M9.6 7.4L8.75 8.4L7.9 7.4" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
       )}
+    </svg>
+  );
+}
+
+// Curved arrow around a partial circle, arrowhead pointing the turn
+// direction -- "left" mirrors "right" horizontally via scaleX.
+function RotateIcon({ direction }: { direction: "left" | "right" }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style={{ transform: direction === "left" ? "scaleX(-1)" : undefined }}>
+      <path
+        d="M3 5.5A5 5 0 1 1 2.2 8.8"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <path d="M3.4 2.2L3 5.7L6.4 5.9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// Two facing triangles with a dashed mirror-line between them -- the
+// standard flip-horizontal glyph, rotated 90deg for vertical via `axis`.
+function FlipIcon({ axis }: { axis: "horizontal" | "vertical" }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      style={{ transform: axis === "vertical" ? "rotate(90deg)" : undefined }}
+    >
+      <path d="M2 3L5.5 7L2 11Z" fill="currentColor" />
+      <path d="M12 3L8.5 7L12 11Z" fill="currentColor" />
+      <path d="M7 1.5V12.5" stroke="currentColor" strokeWidth="1" strokeDasharray="1.6 1.6" strokeLinecap="round" />
     </svg>
   );
 }

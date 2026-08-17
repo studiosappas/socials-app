@@ -22,6 +22,7 @@ export default async function PostPage({
       canManage={data.canManage}
       currentUserId={data.currentUserId}
       members={data.members}
+      customFonts={data.customFonts}
     />
   );
 }

@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem, GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
+import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@/lib/data/brand-moodboard";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
@@ -27,6 +28,7 @@ export type PostPageData = {
   canManage: boolean;
   currentUserId: string;
   members: ProjectMemberOption[];
+  customFonts: CustomFontFace[];
 };
 
 export async function getPostPageData(
@@ -233,6 +235,12 @@ export async function getPostPageData(
 
   const members = await getProjectMemberOptions(supabase, projectId);
 
+  // Reuses Brand Moodboard's own project-scoped, RLS-backed fetch (already
+  // isolated/graceful on its own) -- the post editor's font picker just
+  // derives its custom-font list from the same source Brief's does.
+  const brandMoodboard = await getBrandMoodboard(supabase, projectId);
+  const customFonts = deriveCustomFontFaces(brandMoodboard);
+
   return {
     post: {
       ...post,
@@ -246,5 +254,6 @@ export async function getPostPageData(
     canManage,
     currentUserId: user!.id,
     members,
+    customFonts,
   };
 }
