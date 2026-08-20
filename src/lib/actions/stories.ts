@@ -244,11 +244,14 @@ export async function uploadContentAsset(
   return { success: true };
 }
 
+// Not revalidating or redirecting -- its one real caller (StoryCard, on the
+// Stories list page itself) already removes the card from local state
+// before calling this, and was never actually leaving the page in the
+// first place (the redirect this used to unconditionally do just sent the
+// list page back to... itself, a wasted round trip every single time).
 export async function deleteStory(projectId: string, storyId: string) {
   const supabase = await createClient();
   await supabase.from("stories").delete().eq("id", storyId);
-  revalidatePath(`/projects/${projectId}/stories`);
-  redirect(`/projects/${projectId}/stories`);
 }
 
 // Same delete as above, minus the redirect -- used by Calendar's Drafts
@@ -288,8 +291,11 @@ export async function updateStory(
     return { message: error.message };
   }
 
+  // Not revalidating this action's own route (/stories/[storyId]) -- the
+  // client already applied every field optimistically (see StoryMainForm's
+  // handleSave). The list page and Calendar still show this story's
+  // name/status, so they still need to reflect the change next visit.
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
   revalidatePath(`/projects/${projectId}/calendar`);
   return { success: true };
 }
@@ -379,11 +385,14 @@ export async function uploadStoryFrame(
   return { success: true };
 }
 
+// Not revalidating this action's own route (/stories/[storyId]) -- the
+// client already removes the frame from local state before calling this
+// (see story-editor.tsx's onRemove). /stories (the list) still needs it:
+// removing the cover frame changes that story's thumbnail there.
 export async function removeStoryFrame(projectId: string, storyId: string, frameId: string) {
   const supabase = await createClient();
   await supabase.from("story_frames").delete().eq("id", frameId);
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
 }
 
 export async function reorderStoryFrames(
@@ -393,13 +402,19 @@ export async function reorderStoryFrames(
 ) {
   const supabase = await createClient();
 
-  await Promise.all(
+  const results = await Promise.all(
     orderedFrameIds.map((id, position) =>
       supabase.from("story_frames").update({ position }).eq("id", id),
     ),
   );
+  const failed = results.find((r) => r.error);
+  if (failed?.error) {
+    throw new Error(failed.error.message);
+  }
 
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- the client already shows the reordered frames
+  // optimistically (see story-editor.tsx's handleDragEnd), same reasoning
+  // as reorderGridPosts.
 }
 
 export async function updateStoryFrameLink(

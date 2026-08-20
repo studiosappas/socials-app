@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Poppins, Fraunces } from "next/font/google";
 import { cookies } from "next/headers";
+import { ToastProvider } from "@/lib/hooks/use-toast";
 import "./globals.css";
 
 const poppins = Poppins({
@@ -59,7 +60,13 @@ export default async function RootLayout({
       data-reduce-motion={reduceMotion ? "true" : undefined}
       className={`${poppins.variable} ${fraunces.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      {/* suppressHydrationWarning: browser extensions (Grammarly, etc.) inject
+          their own data-* attributes onto <body> before React hydrates --
+          real, expected, and unfixable from app code; this only silences the
+          mismatch on this one element, not its children. */}
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        <ToastProvider>{children}</ToastProvider>
+      </body>
     </html>
   );
 }

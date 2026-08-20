@@ -92,6 +92,14 @@ export function BriefBoard({
   const [createError, setCreateError] = useState<string | undefined>();
   const [editingImage, setEditingImage] = useState<EditingImage | null>(null);
   const [moodboardOpen, setMoodboardOpen] = useState(false);
+  // Keyed by attachmentId -- saveBriefAnnotation already returns a
+  // ready-to-use preview URL, so an edited item's thumbnail updates
+  // instantly instead of waiting on a route refresh to re-fetch it. Not
+  // reset-on-prop-change (like Grid/Calendar's override state) since
+  // there's no natural "fresh tasks prop" event to key off anymore -- this
+  // action no longer revalidates its own route, so this map just is the
+  // source of truth for these thumbnails going forward.
+  const [previewOverrides, setPreviewOverrides] = useState<Record<string, string>>({});
 
   // Board-level (not per-task) since undoing "Add Task" must survive that
   // task's own TaskCard being removed from the tree -- same reasoning as
@@ -137,7 +145,17 @@ export function BriefBoard({
     });
   }
 
-  function handleAnnotationSaved() {
+  function handleAnnotationSaved(previewUrl: string) {
+    const target = editingImage;
+    if (target?.source === "attachment") {
+      setPreviewOverrides((current) => ({ ...current, [target.attachmentId]: previewUrl }));
+      setEditingImage(null);
+      return;
+    }
+    // "Generate Design" (source: "asset") edits a freshly-created media_asset
+    // that isn't part of `tasks` yet -- there's no local item to patch, so
+    // this one case still needs the refresh to pick up wherever that new
+    // asset surfaces next.
     setEditingImage(null);
     router.refresh();
   }
@@ -195,7 +213,18 @@ export function BriefBoard({
         <TaskCard
           key={task.id}
           projectId={projectId}
-          task={task}
+          task={
+            Object.keys(previewOverrides).length === 0
+              ? task
+              : {
+                  ...task,
+                  items: task.items.map((item) =>
+                    item.attachmentId && previewOverrides[item.attachmentId]
+                      ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
+                      : item,
+                  ),
+                }
+          }
           canManage={canManage}
           onEditImage={setEditingImage}
           pushCommand={pushCommand}

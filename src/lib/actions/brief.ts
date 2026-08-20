@@ -541,8 +541,11 @@ export async function saveBriefAnnotation(
     return { message: updateError.message };
   }
 
+  // Not revalidating /brief (its own route, only caller) -- brief-board.tsx
+  // already patches the edited item's thumbnail locally from the
+  // `previewUrl` this returns, and no other route consumes brief
+  // attachments today.
   const { data } = supabase.storage.from("brief-media").getPublicUrl(storagePath);
-  revalidatePath(`/projects/${projectId}/brief`);
   return { previewUrl: data.publicUrl };
 }
 

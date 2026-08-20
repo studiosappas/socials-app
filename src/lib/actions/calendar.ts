@@ -51,7 +51,10 @@ export async function scheduleItem(
     }
   }
 
-  revalidatePath(`/projects/${projectId}/calendar`);
+  // Not revalidating /calendar (its own route) -- the client already moved
+  // the item optimistically (see calendar-board.tsx's applySchedule) before
+  // this action ever runs. Grid/Stories/Tasks still need to reflect the new
+  // date whenever next visited.
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/stories`);
   revalidatePath("/tasks");
@@ -80,7 +83,9 @@ export async function setItemPublished(
     throw new Error(error.message);
   }
 
-  revalidatePath(`/projects/${projectId}/calendar`);
+  // Not revalidating /calendar (its own route) -- the publish toggle in
+  // calendar-board.tsx already applies this optimistically before the
+  // action runs.
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/stories`);
 }
@@ -170,7 +175,6 @@ export async function upsertCalendarNote(
       const { error } = await supabase.from("calendar_notes").delete().eq("id", existing.id);
       if (error) return { success: false, message: error.message };
     }
-    revalidatePath(`/projects/${projectId}/calendar`);
     return { success: true };
   }
 
@@ -195,6 +199,8 @@ export async function upsertCalendarNote(
     });
   }
 
-  revalidatePath(`/projects/${projectId}/calendar`);
+  // Not revalidating /calendar (its own route, only caller) -- the client
+  // already applied the note text optimistically (see calendar-board.tsx's
+  // handleSaveNote) before this action ever runs.
   return { success: true };
 }

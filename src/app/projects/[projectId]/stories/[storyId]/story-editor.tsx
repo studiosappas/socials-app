@@ -33,6 +33,7 @@ import { addStoryComment, fetchStoryComments } from "@/lib/actions/post-comments
 import { CONTENT_STATUS_LABEL, CONTENT_STATUS_OPTIONS } from "@/lib/content-status";
 import { Button } from "@/components/ui/button";
 import { ItemComments } from "@/components/ui/item-comments";
+import { useToast } from "@/lib/hooks/use-toast";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem, StoryLinkItem } from "@/lib/data/stories";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
@@ -72,6 +73,7 @@ export function StoryEditor({
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
+  const { showError } = useToast();
   const [prevFrames, setPrevFrames] = useState(frames);
   const [orderedFrames, setOrderedFrames] = useState(frames);
   const [activeFrameId, setActiveFrameId] = useState<string | null>(null);
@@ -103,8 +105,13 @@ export function StoryEditor({
     const next = arrayMove(orderedFrames, oldIndex, newIndex);
     setOrderedFrames(next);
     startTransition(async () => {
-      await reorderStoryFrames(projectId, story.id, next.map((f) => f.frameId));
-      router.refresh();
+      try {
+        await reorderStoryFrames(projectId, story.id, next.map((f) => f.frameId));
+      } catch (error) {
+        console.error("Failed to save frame reorder:", error);
+        setOrderedFrames(frames);
+        router.refresh();
+      }
     });
   }
 
@@ -162,12 +169,19 @@ export function StoryEditor({
                   storyId={story.id}
                   frame={frame}
                   canManage={canManage}
-                  onRemove={() =>
+                  onRemove={() => {
+                    const before = orderedFrames;
+                    setOrderedFrames(before.filter((f) => f.frameId !== frame.frameId));
                     startTransition(async () => {
-                      await removeStoryFrame(projectId, story.id, frame.frameId);
-                      router.refresh();
-                    })
-                  }
+                      try {
+                        await removeStoryFrame(projectId, story.id, frame.frameId);
+                      } catch (error) {
+                        console.error("Failed to remove frame:", error);
+                        setOrderedFrames(before);
+                        showError("Couldn't remove that frame. Please try again.");
+                      }
+                    });
+                  }}
                 />
               ))}
               {canManage && (
@@ -407,13 +421,29 @@ function StoryMainForm({
   links: StoryLinkItem[];
   canManage: boolean;
 }) {
-  const [state, action, pending] = useActionState(
-    updateStory.bind(null, projectId, story.id),
-    undefined,
-  );
+  // Same shape as Post Editor's PostMainForm: local optimistic field state
+  // committed immediately on Save, persisted in the background, reverted
+  // + toasted only on failure -- see updateStory's own comment for why it
+  // no longer revalidates this exact route.
+  const [prevStory, setPrevStory] = useState(story);
+  const [name, setName] = useState(story.name);
+  const [notes, setNotes] = useState(story.notes);
+  const [status, setStatus] = useState<StoryStatus>(story.status);
+  const [scheduledDate, setScheduledDate] = useState(story.scheduled_date ?? "");
+  if (story !== prevStory) {
+    setPrevStory(story);
+    setName(story.name);
+    setNotes(story.notes);
+    setStatus(story.status);
+    setScheduledDate(story.scheduled_date ?? "");
+  }
+
   const [addedToTodo, setAddedToTodo] = useState(false);
   const [todoError, setTodoError] = useState<string | undefined>();
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [, startTransition] = useTransition();
+  const { showError } = useToast();
 
   function handleAddToTodo() {
     setTodoError(undefined);
@@ -427,13 +457,40 @@ function StoryMainForm({
     });
   }
 
+  function handleSave(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (saving) return;
+    setSaved(false);
+    setSaving(true);
+    const formData = new FormData();
+    formData.set("name", name);
+    formData.set("notes", notes);
+    formData.set("status", status);
+    formData.set("scheduled_date", scheduledDate);
+    startTransition(async () => {
+      const result = await updateStory(projectId, story.id, undefined, formData);
+      setSaving(false);
+      if (result?.message) {
+        showError(result.message);
+        setName(story.name);
+        setNotes(story.notes);
+        setStatus(story.status);
+        setScheduledDate(story.scheduled_date ?? "");
+      } else {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1800);
+      }
+    });
+  }
+
   return (
-    <form action={action} className="flex flex-col gap-6">
+    <form onSubmit={handleSave} className="flex flex-col gap-6">
       <label className="flex flex-col gap-1.5">
         <span className={labelClass}>Content name</span>
         <input
           name="name"
-          defaultValue={story.name}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
           disabled={!canManage}
           placeholder="Live text for content name"
           className={fieldClass}
@@ -446,7 +503,8 @@ function StoryMainForm({
         <span className={labelClass}>Notes</span>
         <textarea
           name="notes"
-          defaultValue={story.notes}
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
           disabled={!canManage}
           rows={3}
           placeholder="Live text for notes"
@@ -459,7 +517,13 @@ function StoryMainForm({
         <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Status</span>
-            <select name="status" defaultValue={story.status} disabled={!canManage} className={fieldClass}>
+            <select
+              name="status"
+              value={status}
+              onChange={(e) => setStatus(e.target.value as StoryStatus)}
+              disabled={!canManage}
+              className={fieldClass}
+            >
               {CONTENT_STATUS_OPTIONS.map((s) => (
                 <option key={s} value={s}>
                   {CONTENT_STATUS_LABEL[s]}
@@ -476,7 +540,8 @@ function StoryMainForm({
             <input
               type="date"
               name="scheduled_date"
-              defaultValue={story.scheduled_date ?? ""}
+              value={scheduledDate}
+              onChange={(e) => setScheduledDate(e.target.value)}
               disabled={!canManage}
               className={fieldClass}
             />
@@ -496,17 +561,15 @@ function StoryMainForm({
       </Button>
       {todoError && <p className="text-sm text-error">{todoError}</p>}
 
-      {state?.message && <p className="text-sm text-error">{state.message}</p>}
-
       {canManage && (
         <Button
           type="submit"
           variant="primary"
           radius="none"
-          disabled={pending}
+          disabled={saving}
           className="w-full py-3 text-xs tracking-wide uppercase"
         >
-          {pending ? "Saving..." : "Save Changes"}
+          {saving ? "Saving…" : saved ? "Saved" : "Save Changes"}
         </Button>
       )}
     </form>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -137,8 +137,25 @@ export function CalendarBoard({
     const targetTop = target.getBoundingClientRect().top + window.scrollY;
     window.scrollTo({ top: targetTop - stickyHeight - 8, behavior: "smooth" });
   }
+  // Touch needs a long-press (not a tiny movement threshold) to activate a
+  // drag, same reasoning and same values as Grid's own board -- a bare
+  // distance-based activator fires on the first pixel of a scroll swipe on
+  // touch, which is what made touch drags feel like they never picked the
+  // item up cleanly. Desktop keeps the original short distance threshold so
+  // a normal click-through to the post/story still works.
+  const isTouchDevice = useSyncExternalStore(
+    (onChange) => {
+      const mq = window.matchMedia("(pointer: coarse)");
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia("(pointer: coarse)").matches,
+    () => false,
+  );
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(PointerSensor, {
+      activationConstraint: isTouchDevice ? { delay: 200, tolerance: 8 } : { distance: 4 },
+    }),
   );
 
   // Optimistic override so scheduling an item renders immediately instead of
@@ -188,9 +205,21 @@ export function CalendarBoard({
     setOverrideCells(nextCells);
     setOverrideUnscheduled(nextUnscheduled);
 
+    // The optimistic move above is already the final state, and the write
+    // below is durable, so a router.refresh() on success would only cause a
+    // redundant flash (every visible chip's thumbnail gets a freshly
+    // re-signed URL on every route refetch) -- same reasoning as Grid's own
+    // reorder. On failure, resync with the server instead of leaving an
+    // optimistic state that was never actually persisted.
     startTransition(async () => {
-      await scheduleItem(projectId, item.itemType, item.itemId, date);
-      router.refresh();
+      try {
+        await scheduleItem(projectId, item.itemType, item.itemId, date);
+      } catch (error) {
+        console.error("Failed to save schedule change:", error);
+        setOverrideCells(null);
+        setOverrideUnscheduled(null);
+        router.refresh();
+      }
     });
   }
 
@@ -210,12 +239,17 @@ export function CalendarBoard({
   function handleSaveNote(date: string, body: string) {
     setEditingNoteDate(null);
     const trimmed = body.trim();
+    const previousCells = effectiveCells;
     setOverrideCells(
       effectiveCells.map((cell) => (cell.date === date ? { ...cell, note: trimmed || null } : cell)),
     );
     startTransition(async () => {
-      await upsertCalendarNote(projectId, date, trimmed);
-      router.refresh();
+      const result = await upsertCalendarNote(projectId, date, trimmed);
+      if (!result.success) {
+        console.error("Failed to save note:", result.message);
+        setOverrideCells(previousCells);
+        router.refresh();
+      }
     });
   }
 
@@ -936,6 +970,14 @@ function CompactItemChip({ item }: { item: CalendarItem }) {
       <Link
         href={item.href}
         title={contentTypeLabel(item)}
+        // The browser's own native link-drag (grab a link, drop it on the
+        // address bar, etc.) fires from pointerdown on ANY <a>, completely
+        // independent of dnd-kit's synthetic pointer-drag on the wrapping
+        // div above -- without this, the two raced, which is what made the
+        // chip feel like it never got picked up cleanly / lagged behind the
+        // cursor. draggable={false} turns the native one off; dnd-kit's own
+        // drag (via the wrapper's listeners) is unaffected.
+        draggable={false}
         className="flex max-w-full items-center gap-1 rounded-full border border-border bg-background py-0.5 pr-1.5 pl-0.5 text-[9px] transition-colors duration-150 hover:border-foreground/30 sm:text-[10px]"
       >
         <span className="h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full bg-black/10 sm:h-4 sm:w-4">
@@ -995,8 +1037,13 @@ function ExpandedItemTile({
     const next = !published;
     setOptimisticPublished(next);
     startTransition(async () => {
-      await setItemPublished(projectId, item.itemType, item.itemId, next);
-      router.refresh();
+      try {
+        await setItemPublished(projectId, item.itemType, item.itemId, next);
+      } catch (error) {
+        console.error("Failed to update published status:", error);
+        setOptimisticPublished(null);
+        router.refresh();
+      }
     });
   }
 
@@ -1010,6 +1057,9 @@ function ExpandedItemTile({
       <Link
         href={item.href}
         title={contentTypeLabel(item)}
+        // Same native-link-drag-vs-dnd-kit-drag conflict as CompactItemChip's
+        // own Link above -- see its comment for why.
+        draggable={false}
         className={`group relative block aspect-[3/4] w-full overflow-hidden border transition-colors duration-150 ${
           published ? "border-foreground/60 bg-black/[.03]" : "border-border bg-black/[.03] hover:border-foreground/30"
         }`}
@@ -1473,7 +1523,9 @@ function ItemChip({
         onClick={(e) => e.stopPropagation()}
         className={`group relative touch-none transition-opacity duration-150 ${isDragging ? "opacity-30" : ""}`}
       >
-        <Link href={item.href} className="flex flex-col gap-0.5">
+        {/* draggable={false}: same native-link-drag-vs-dnd-kit conflict as
+            CompactItemChip's own Link (calendar-board.tsx). */}
+        <Link href={item.href} draggable={false} className="flex flex-col gap-0.5">
           <div className="relative aspect-square overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30">
             {item.thumbnailUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -1528,6 +1580,7 @@ function ItemChip({
     >
       <Link
         href={item.href}
+        draggable={false}
         className="flex items-center gap-2 rounded-full border border-foreground bg-background px-2.5 py-1 text-[11px] transition-colors duration-150 hover:bg-black/[.03]"
       >
         <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
