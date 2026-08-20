@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { memo, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
@@ -100,6 +100,31 @@ export function BriefBoard({
   // action no longer revalidates its own route, so this map just is the
   // source of truth for these thumbnails going forward.
   const [previewOverrides, setPreviewOverrides] = useState<Record<string, string>>({});
+
+  // Only builds a new task object for a task that actually HAS an
+  // overridden item -- returning the original `task`/`tasks` references for
+  // everything else. Otherwise every task in the board got a brand-new
+  // object on every render the instant previewOverrides had ANY entry,
+  // which would have defeated TaskCard's React.memo below for the whole
+  // list, not just the one task that changed.
+  const effectiveTasks = useMemo(() => {
+    if (Object.keys(previewOverrides).length === 0) return tasks;
+    let changed = false;
+    const next = tasks.map((task) => {
+      const affected = task.items.some((item) => item.attachmentId && previewOverrides[item.attachmentId]);
+      if (!affected) return task;
+      changed = true;
+      return {
+        ...task,
+        items: task.items.map((item) =>
+          item.attachmentId && previewOverrides[item.attachmentId]
+            ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
+            : item,
+        ),
+      };
+    });
+    return changed ? next : tasks;
+  }, [tasks, previewOverrides]);
 
   // Board-level (not per-task) since undoing "Add Task" must survive that
   // task's own TaskCard being removed from the tree -- same reasoning as
@@ -209,22 +234,11 @@ export function BriefBoard({
         )}
       </div>
 
-      {tasks.map((task) => (
+      {effectiveTasks.map((task) => (
         <TaskCard
           key={task.id}
           projectId={projectId}
-          task={
-            Object.keys(previewOverrides).length === 0
-              ? task
-              : {
-                  ...task,
-                  items: task.items.map((item) =>
-                    item.attachmentId && previewOverrides[item.attachmentId]
-                      ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
-                      : item,
-                  ),
-                }
-          }
+          task={task}
           canManage={canManage}
           onEditImage={setEditingImage}
           pushCommand={pushCommand}
@@ -298,7 +312,13 @@ const BRIEF_STATUS_DOT_COLOR: Record<BriefTaskStatus, string> = {
   ready_for_design: "bg-emerald-500",
 };
 
-function TaskCard({
+// memo: one of these renders per Brief task, and without it every task
+// card re-rendered whenever BriefBoard re-rendered for any reason -- see
+// the perf investigation this was added for. task/onEditImage/pushCommand
+// are all already stable references at the call site (see effectiveTasks
+// above and the useUndoStack hook), so no further stabilization was needed
+// here beyond fixing effectiveTasks' own referential-stability bug.
+const TaskCard = memo(function TaskCard({
   projectId,
   task,
   canManage,
@@ -595,7 +615,7 @@ function TaskCard({
       )}
     </div>
   );
-}
+});
 
 // The status badge doubles as its own control -- canManage users click it to
 // open a small dropdown of the three states instead of separate "Send to

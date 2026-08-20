@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore, useTransition } from "react";
+import { memo, useCallback, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -235,23 +235,41 @@ export function CalendarBoard({
 
   // Saves inline, optimistically -- the cell shows the new note text (or
   // goes back to empty) immediately instead of waiting on the round trip,
-  // same reasoning as applySchedule's optimistic override above.
-  function handleSaveNote(date: string, body: string) {
-    setEditingNoteDate(null);
-    const trimmed = body.trim();
-    const previousCells = effectiveCells;
-    setOverrideCells(
-      effectiveCells.map((cell) => (cell.date === date ? { ...cell, note: trimmed || null } : cell)),
-    );
-    startTransition(async () => {
-      const result = await upsertCalendarNote(projectId, date, trimmed);
-      if (!result.success) {
-        console.error("Failed to save note:", result.message);
-        setOverrideCells(previousCells);
-        router.refresh();
-      }
-    });
-  }
+  // same reasoning as applySchedule's optimistic override above. useCallback
+  // (dep on effectiveCells, which only gets a new reference on a real data
+  // change, never on an unrelated UI-only re-render) so DayCell's memo below
+  // actually holds -- otherwise every cell would see a "new" onSaveNote
+  // prop on every render of CalendarBoard.
+  const handleSaveNote = useCallback(
+    (date: string, body: string) => {
+      setEditingNoteDate(null);
+      const trimmed = body.trim();
+      const previousCells = effectiveCells;
+      setOverrideCells(
+        effectiveCells.map((cell) => (cell.date === date ? { ...cell, note: trimmed || null } : cell)),
+      );
+      startTransition(async () => {
+        const result = await upsertCalendarNote(projectId, date, trimmed);
+        if (!result.success) {
+          console.error("Failed to save note:", result.message);
+          setOverrideCells(previousCells);
+          router.refresh();
+        }
+      });
+    },
+    [effectiveCells, projectId, router, startTransition],
+  );
+
+  // Stable references for the rest of DayCell's callback props, same
+  // reasoning as handleSaveNote above.
+  const handleToggleRow = useCallback((rowIndex: number) => {
+    setExpandedRowIndex((current) => (current === rowIndex ? null : rowIndex));
+  }, []);
+  const handleCancelEditNote = useCallback(() => setEditingNoteDate(null), []);
+  const handleOpenContextMenu = useCallback(
+    (date: string, x: number, y: number) => setContextMenu({ date, x, y }),
+    [],
+  );
 
   const libraryCell = libraryDialog ? effectiveCells.find((c) => c.date === libraryDialog.date) : undefined;
   const libraryItems = libraryDialog
@@ -377,23 +395,17 @@ export function CalendarBoard({
                     key={cell.date}
                     projectId={projectId}
                     cell={cell}
+                    rowIndex={Math.floor(index / 7)}
                     isExpanded={Math.floor(index / 7) === expandedRowIndex}
-                    onToggleRow={() =>
-                      setExpandedRowIndex((current) => {
-                        const rowIndex = Math.floor(index / 7);
-                        return current === rowIndex ? null : rowIndex;
-                      })
-                    }
-                    onOpenDetail={() => setDayDetailDate(cell.date)}
-                    onContextMenu={
-                      canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
-                    }
+                    onToggleRow={handleToggleRow}
+                    onOpenDetail={setDayDetailDate}
+                    onContextMenu={canManage ? handleOpenContextMenu : undefined}
                     canManage={canManage}
                     members={members}
                     isEditingNote={editingNoteDate === cell.date}
-                    onStartEditNote={() => setEditingNoteDate(cell.date)}
-                    onCancelEditNote={() => setEditingNoteDate(null)}
-                    onSaveNote={(body) => handleSaveNote(cell.date, body)}
+                    onStartEditNote={setEditingNoteDate}
+                    onCancelEditNote={handleCancelEditNote}
+                    onSaveNote={handleSaveNote}
                   />
                 ))}
               </div>
@@ -410,13 +422,11 @@ export function CalendarBoard({
                     canManage={canManage}
                     members={members}
                     highlighted={selectedMobileDate === cell.date}
-                    onContextMenu={
-                      canManage ? (x, y) => setContextMenu({ date: cell.date, x, y }) : undefined
-                    }
+                    onContextMenu={canManage ? handleOpenContextMenu : undefined}
                     isEditingNote={editingNoteDate === cell.date}
-                    onStartEditNote={() => setEditingNoteDate(cell.date)}
-                    onCancelEditNote={() => setEditingNoteDate(null)}
-                    onSaveNote={(body) => handleSaveNote(cell.date, body)}
+                    onStartEditNote={setEditingNoteDate}
+                    onCancelEditNote={handleCancelEditNote}
+                    onSaveNote={handleSaveNote}
                   />
                 ))}
             </div>
@@ -525,9 +535,18 @@ export function CalendarBoard({
   );
 }
 
-function DayCell({
+// memo: one of these renders per visible day (30-42+ per month), and
+// without it every cell re-rendered whenever CalendarBoard re-rendered for
+// ANY reason (starting a drag anywhere on the month, an unrelated menu
+// opening on a different day, etc.) -- see the perf investigation this was
+// added for. Every callback prop below is a stable reference from
+// CalendarBoard (useCallback / a raw setState function) rather than a
+// fresh per-cell closure, which is what actually lets memo skip cells
+// whose own data didn't change.
+const DayCell = memo(function DayCell({
   projectId,
   cell,
+  rowIndex,
   isExpanded,
   onToggleRow,
   onOpenDetail,
@@ -541,16 +560,17 @@ function DayCell({
 }: {
   projectId: string;
   cell: CalendarCell;
+  rowIndex: number;
   isExpanded: boolean;
-  onToggleRow: () => void;
-  onOpenDetail: () => void;
-  onContextMenu?: (x: number, y: number) => void;
+  onToggleRow: (rowIndex: number) => void;
+  onOpenDetail: (date: string) => void;
+  onContextMenu?: (date: string, x: number, y: number) => void;
   canManage: boolean;
   members: ProjectMemberOption[];
   isEditingNote: boolean;
-  onStartEditNote: () => void;
+  onStartEditNote: (date: string) => void;
   onCancelEditNote: () => void;
-  onSaveNote: (body: string) => void;
+  onSaveNote: (date: string, body: string) => void;
 }) {
   const [noteText, setNoteText] = useState(cell.note ?? "");
   // Adjust state during render (this codebase's own convention, see
@@ -595,13 +615,13 @@ function DayCell({
         clearTimeout(clickTimerRef.current);
         clickTimerRef.current = null;
       }
-      onOpenDetail();
+      onOpenDetail(cell.date);
       return;
     }
 
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
-      onToggleRow();
+      onToggleRow(rowIndex);
     }, DOUBLE_CLICK_WINDOW_MS);
   }
 
@@ -615,7 +635,7 @@ function DayCell({
       onCancelEditNote();
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      onSaveNote(noteText);
+      onSaveNote(cell.date, noteText);
     }
   }
 
@@ -628,7 +648,7 @@ function DayCell({
         onContextMenu
           ? (e) => {
               e.preventDefault();
-              onContextMenu(e.clientX, e.clientY);
+              onContextMenu(cell.date, e.clientX, e.clientY);
             }
           : undefined
       }
@@ -668,14 +688,14 @@ function DayCell({
               e.preventDefault();
               e.stopPropagation();
               const rect = e.currentTarget.getBoundingClientRect();
-              onContextMenu(rect.right, rect.bottom);
+              onContextMenu(cell.date, rect.right, rect.bottom);
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
                 e.stopPropagation();
                 const rect = e.currentTarget.getBoundingClientRect();
-                onContextMenu(rect.right, rect.bottom);
+                onContextMenu(cell.date, rect.right, rect.bottom);
               }
             }}
             title="Day options"
@@ -701,7 +721,7 @@ function DayCell({
           placeholder="Note... (@ to mention)"
           onClick={(e) => e.stopPropagation()}
           onKeyDown={handleNoteKeyDown}
-          onBlur={() => onSaveNote(noteText)}
+          onBlur={() => onSaveNote(cell.date, noteText)}
           className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] focus:outline-none sm:text-[10px]"
         />
       ) : (
@@ -716,13 +736,13 @@ function DayCell({
             tabIndex={canManage ? 0 : undefined}
             onClick={(e) => {
               e.stopPropagation();
-              if (canManage) onStartEditNote();
+              if (canManage) onStartEditNote(cell.date);
             }}
             onKeyDown={(e) => {
               if (canManage && (e.key === "Enter" || e.key === " ")) {
                 e.preventDefault();
                 e.stopPropagation();
-                onStartEditNote();
+                onStartEditNote(cell.date);
               }
             }}
             title={cell.note}
@@ -754,7 +774,7 @@ function DayCell({
       )}
     </button>
   );
-}
+});
 
 // The compact month grid at the top of the mobile layout -- date numbers and
 // a small content dot only, never tiles/thumbnails (a 7-column grid caps
@@ -826,7 +846,8 @@ function MiniCalendarGrid({
 // -- image, content-type badge, publish-toggle circle -- stays identical to
 // desktop, and reuses the same ⋮ day-options menu DayCell already wires up
 // for touch, so no new server actions or menu component were needed.
-function MobileDayRow({
+// memo, same reasoning as DayCell above.
+const MobileDayRow = memo(function MobileDayRow({
   projectId,
   cell,
   canManage,
@@ -846,11 +867,11 @@ function MobileDayRow({
   // scrollIntoView already gets the viewport there, this is just the visual
   // confirmation that it landed on the right day.
   highlighted?: boolean;
-  onContextMenu?: (x: number, y: number) => void;
+  onContextMenu?: (date: string, x: number, y: number) => void;
   isEditingNote: boolean;
-  onStartEditNote: () => void;
+  onStartEditNote: (date: string) => void;
   onCancelEditNote: () => void;
-  onSaveNote: (body: string) => void;
+  onSaveNote: (date: string, body: string) => void;
 }) {
   const [noteText, setNoteText] = useState(cell.note ?? "");
   const [prevIsEditingNote, setPrevIsEditingNote] = useState(isEditingNote);
@@ -866,7 +887,7 @@ function MobileDayRow({
       onCancelEditNote();
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      onSaveNote(noteText);
+      onSaveNote(cell.date, noteText);
     }
   }
 
@@ -899,7 +920,7 @@ function MobileDayRow({
             rows={2}
             placeholder="Note... (@ to mention)"
             onKeyDown={handleNoteKeyDown}
-            onBlur={() => onSaveNote(noteText)}
+            onBlur={() => onSaveNote(cell.date, noteText)}
             className="w-full resize-none rounded-none border border-foreground bg-background px-2 py-1 text-xs focus:outline-none"
           />
         ) : (
@@ -907,7 +928,7 @@ function MobileDayRow({
             <div
               role={canManage ? "button" : undefined}
               tabIndex={canManage ? 0 : undefined}
-              onClick={() => canManage && onStartEditNote()}
+              onClick={() => canManage && onStartEditNote(cell.date)}
               className="w-full rounded-none border border-border bg-black/[.02] px-2 py-1 text-left text-xs text-muted"
             >
               {cell.note}
@@ -938,7 +959,7 @@ function MobileDayRow({
           type="button"
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
-            onContextMenu(rect.right, rect.bottom);
+            onContextMenu(cell.date, rect.right, rect.bottom);
           }}
           title="Day options"
           className="h-7 w-7 shrink-0 self-start rounded text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
@@ -948,13 +969,17 @@ function MobileDayRow({
       )}
     </div>
   );
-}
+});
 
 // Matches Brief's image-chip language (rounded-full pill, small circular
 // thumbnail, label text) -- draggable so an already-scheduled item can be
 // picked up and dropped on a different day, same as items dragged in from
 // the Drafts sidebar.
-function CompactItemChip({ item }: { item: CalendarItem }) {
+// memo: one of these renders per scheduled item across the whole visible
+// month -- same reasoning as DayCell above. `item` is already a stable
+// reference from its parent's array (DayCell's previewItems slice doesn't
+// clone the underlying item objects), so no extra stabilization needed here.
+const CompactItemChip = memo(function CompactItemChip({ item }: { item: CalendarItem }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `cell-item-${item.itemType}-${item.itemId}`,
     data: { itemType: item.itemType, itemId: item.itemId, item },
@@ -994,7 +1019,7 @@ function CompactItemChip({ item }: { item: CalendarItem }) {
       </Link>
     </div>
   );
-}
+});
 
 // The expanded-row tile: a real, readable image (not a small icon) at a
 // fixed 3:4 ratio, full width of the cell -- these now stack vertically
@@ -1002,7 +1027,8 @@ function CompactItemChip({ item }: { item: CalendarItem }) {
 // `w-full` instead of the old `flex-1` row-sharing width. Content-type tag
 // stays a small corner badge (the same "minimal tag" language as Grid's
 // asset-count/video badges). Draggable for the same reason as CompactItemChip.
-function ExpandedItemTile({
+// memo, same reasoning as CompactItemChip above.
+const ExpandedItemTile = memo(function ExpandedItemTile({
   projectId,
   item,
   canManage,
@@ -1140,7 +1166,7 @@ function ExpandedItemTile({
       </Link>
     </div>
   );
-}
+});
 
 function DayContextMenu({
   x,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
+import { memo, useActionState, useCallback, useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -234,14 +234,19 @@ export function GridBoard({
   const [sharing, startSharing] = useTransition();
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  function handleToggleSelectPost(postId: string) {
+  // useCallback (stable reference, empty deps -- only reads via the
+  // functional setState form) so GridSlot's React.memo below actually
+  // takes effect for every slot instead of re-rendering all of them
+  // whenever GridBoard re-renders for an unrelated reason (e.g. a drag
+  // starting elsewhere).
+  const handleToggleSelectPost = useCallback((postId: string) => {
     setSelectedPostIds((prev) => {
       const next = new Set(prev);
       if (next.has(postId)) next.delete(postId);
       else next.add(postId);
       return next;
     });
-  }
+  }, []);
 
   function handleCancelSelection() {
     setSelectionMode(false);
@@ -776,6 +781,10 @@ function GridRow({
   // overrideRows -- "Remove Row" only ever needs to hide this one row
   // instantly, and this is the smallest scope that can do that.
   const [removed, setRemoved] = useState(false);
+  // Stable reference (empty deps, setRemoved is itself stable) -- otherwise
+  // every GridSlot below would see a "new" onRequestRemoveRow prop on every
+  // render and its React.memo would never actually skip re-rendering.
+  const handleRequestRemoveRow = useCallback(() => setRemoved(true), []);
   if (removed) return null;
 
   // No dedicated "remove row" bar between rows -- the grid stays tight like
@@ -794,7 +803,7 @@ function GridRow({
           selectionMode={selectionMode}
           selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
           onToggleSelectPost={onToggleSelectPost}
-          onRequestRemoveRow={() => setRemoved(true)}
+          onRequestRemoveRow={handleRequestRemoveRow}
           demoMode={demoMode}
           dragEnabled={dragEnabled}
           reorderMode={reorderMode}
@@ -804,7 +813,14 @@ function GridRow({
   );
 }
 
-function GridSlot({
+// memo: this renders once per slot (up to dozens per Grid page), and without
+// it every slot re-rendered whenever GridBoard re-rendered for ANY reason
+// (starting a drag anywhere on the board, an unrelated toast, etc.) --
+// see the perf investigation this was added for. Only actually skips
+// re-rendering when every prop below is reference-stable, which is why
+// onToggleSelectPost/onRequestRemoveRow are wrapped in useCallback at their
+// call sites rather than passed as fresh inline closures.
+const GridSlot = memo(function GridSlot({
   slot,
   rowId,
   projectId,
@@ -1191,7 +1207,7 @@ function GridSlot({
       )}
     </div>
   );
-}
+});
 
 // Touch-friendly equivalent of dragging a thumbnail from the sidebar
 // library onto a slot -- tap an empty slot to open this, tap a thumbnail to
