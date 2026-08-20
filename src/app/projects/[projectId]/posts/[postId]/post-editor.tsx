@@ -41,6 +41,7 @@ import { AnnotationEditor } from "@/components/annotation-editor";
 import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
+import { useToast } from "@/lib/hooks/use-toast";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { GridCropOverlay, coverTransformStyle } from "../../grid/grid-crop-overlay";
@@ -131,9 +132,36 @@ export function PostEditor({
   const [, startTransition] = useTransition();
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  function handleAnnotationSaved() {
+  // Optimistic override for the cover crop -- saveMediaAssetAnnotation/
+  // saveMediaAssetPosterAnnotation reset posts.cover_transform server-side
+  // whenever the edited asset is the cover (position 0); this mirrors that
+  // locally so the carousel never shows a stale crop after an annotation
+  // save, without waiting on a route refresh to pick it up. Same
+  // undefined-means-"no override" convention as SortableAsset's own
+  // overrideTransform below.
+  const [prevPost, setPrevPost] = useState(post);
+  const [overrideCoverTransform, setOverrideCoverTransform] = useState<GridCoverTransform | null | undefined>(
+    undefined,
+  );
+  if (post !== prevPost) {
+    setPrevPost(post);
+    setOverrideCoverTransform(undefined);
+  }
+  const effectiveCoverTransform = overrideCoverTransform !== undefined ? overrideCoverTransform : post.coverTransform;
+
+  function handleAnnotationSaved(previewUrl: string) {
+    const target = editingImage;
+    setOrderedAssets((current) =>
+      current.map((asset) =>
+        asset.mediaAssetId === target?.mediaAssetId
+          ? target.mediaType === "video"
+            ? { ...asset, posterUrl: previewUrl }
+            : { ...asset, url: previewUrl }
+          : asset,
+      ),
+    );
+    if (target?.isCover) setOverrideCoverTransform(null);
     setEditingImage(null);
-    router.refresh();
   }
 
   if (assets !== prevAssets) {
@@ -260,7 +288,7 @@ export function PostEditor({
                   asset={asset}
                   canManage={canManage}
                   isCover={index === 0}
-                  coverTransform={post.coverTransform}
+                  coverTransform={effectiveCoverTransform}
                   projectId={projectId}
                   postId={post.id}
                   mediaLibrary={mediaLibrary}
@@ -294,7 +322,7 @@ export function PostEditor({
               <div className="aspect-[3/4] w-20 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
                 <AssetPreview
                   asset={activeAsset}
-                  coverTransform={orderedAssets[0]?.postAssetId === activeAssetId ? post.coverTransform : null}
+                  coverTransform={orderedAssets[0]?.postAssetId === activeAssetId ? effectiveCoverTransform : null}
                 />
               </div>
             )}
@@ -501,8 +529,13 @@ function SortableAsset({
   async function handleSaveCrop(next: GridCoverTransform) {
     setOverrideTransform(next);
     setCropMode(false);
-    await updatePostCoverTransform(projectId, postId, next);
-    router.refresh();
+    try {
+      await updatePostCoverTransform(projectId, postId, next);
+    } catch (error) {
+      console.error("Failed to save crop:", error);
+      setOverrideTransform(undefined);
+      router.refresh();
+    }
   }
 
   // A video's crop tool operates on its picked poster frame (a static
@@ -841,10 +874,6 @@ function PostMainForm({
   links: PostLinkItem[];
   canManage: boolean;
 }) {
-  const [state, action, pending] = useActionState(
-    updatePost.bind(null, projectId, post.id),
-    undefined,
-  );
   // Adding/replacing/removing media auto-suggests the right type (see
   // lib/post-type.ts's syncPostType, which writes posts.post_type directly
   // and revalidates) -- this follows that fresh server value whenever it
@@ -858,10 +887,35 @@ function PostMainForm({
     setPrevPostType(post.post_type);
     setPostType(post.post_type);
   }
+
+  // Same pattern, one block covering the rest of the form's fields since
+  // they all reset together on the same event (a fresh `post` prop -- today
+  // that only happens via some other action's revalidation of this route;
+  // this form's own save no longer triggers one, see updatePost).
+  const [prevPost, setPrevPost] = useState(post);
+  const [caption, setCaption] = useState(post.caption);
+  const [notes, setNotes] = useState(post.notes);
+  const [status, setStatus] = useState<PostStatus>(post.status);
+  const [reviewStatus, setReviewStatus] = useState<ReviewStatus>(post.review_status);
+  const [scheduledDate, setScheduledDate] = useState(post.scheduled_date ?? "");
+  const [scheduledTime, setScheduledTime] = useState(post.scheduled_time ?? "");
+  if (post !== prevPost) {
+    setPrevPost(post);
+    setCaption(post.caption);
+    setNotes(post.notes);
+    setStatus(post.status);
+    setReviewStatus(post.review_status);
+    setScheduledDate(post.scheduled_date ?? "");
+    setScheduledTime(post.scheduled_time ?? "");
+  }
+
   const [addedToTodo, setAddedToTodo] = useState(false);
   const [todoError, setTodoError] = useState<string | undefined>();
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [, startTransition] = useTransition();
   const [captionEl, setCaptionEl] = useState<HTMLTextAreaElement | null>(null);
+  const { showError } = useToast();
 
   function handleAddToTodo() {
     setTodoError(undefined);
@@ -875,8 +929,46 @@ function PostMainForm({
     });
   }
 
+  // The optimistic field values above already ARE the shown state the
+  // instant Save is clicked -- persistence happens in the background and,
+  // on success, changes nothing further (a redundant "fresh" render would
+  // only flash every re-signed asset thumbnail on this page for no reason,
+  // see updatePost's revalidation scope). On failure, every field reverts
+  // to the last known-good server value and the error surfaces as a toast
+  // instead of blocking the page.
+  function handleSave(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (saving) return;
+    setSaved(false);
+    setSaving(true);
+    const formData = new FormData();
+    formData.set("post_type", postType);
+    formData.set("caption", caption);
+    formData.set("notes", notes);
+    formData.set("status", status);
+    formData.set("review_status", reviewStatus);
+    formData.set("scheduled_date", scheduledDate);
+    formData.set("scheduled_time", scheduledTime);
+    startTransition(async () => {
+      const result = await updatePost(projectId, post.id, undefined, formData);
+      setSaving(false);
+      if (result?.message) {
+        showError(result.message);
+        setCaption(post.caption);
+        setNotes(post.notes);
+        setStatus(post.status);
+        setReviewStatus(post.review_status);
+        setScheduledDate(post.scheduled_date ?? "");
+        setScheduledTime(post.scheduled_time ?? "");
+      } else {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1800);
+      }
+    });
+  }
+
   return (
-    <form action={action} className="flex flex-col gap-6">
+    <form onSubmit={handleSave} className="flex flex-col gap-6">
       <input type="hidden" name="post_type" value={postType} />
 
       <div className="flex flex-col gap-1.5">
@@ -911,7 +1003,8 @@ function PostMainForm({
         <textarea
           ref={setCaptionEl}
           name="caption"
-          defaultValue={post.caption}
+          value={caption}
+          onChange={(e) => setCaption(e.target.value)}
           disabled={!canManage}
           rows={3}
           placeholder="Live text for caption"
@@ -925,7 +1018,8 @@ function PostMainForm({
         <span className={labelClass}>Notes</span>
         <textarea
           name="notes"
-          defaultValue={post.notes}
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
           disabled={!canManage}
           rows={3}
           placeholder="Live text for notes"
@@ -938,7 +1032,13 @@ function PostMainForm({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Status</span>
-            <select name="status" defaultValue={post.status} disabled={!canManage} className={fieldClass}>
+            <select
+              name="status"
+              value={status}
+              onChange={(e) => setStatus(e.target.value as PostStatus)}
+              disabled={!canManage}
+              className={fieldClass}
+            >
               <option value="draft">Draft</option>
               <option value="scheduled">Scheduled</option>
               <option value="published">Published</option>
@@ -950,7 +1050,13 @@ function PostMainForm({
                 (set_post_review_status_by_token) -- this updates automatically
                 based on their latest review, and can also be changed manually
                 here, same as the workflow Status select next to it. */}
-            <select name="review_status" defaultValue={post.review_status} disabled={!canManage} className={fieldClass}>
+            <select
+              name="review_status"
+              value={reviewStatus}
+              onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
+              disabled={!canManage}
+              className={fieldClass}
+            >
               <option value="pending">Pending Review</option>
               <option value="approved">Approved</option>
               <option value="changes_requested">Needs Changes</option>
@@ -961,7 +1067,8 @@ function PostMainForm({
             <input
               type="date"
               name="scheduled_date"
-              defaultValue={post.scheduled_date ?? ""}
+              value={scheduledDate}
+              onChange={(e) => setScheduledDate(e.target.value)}
               disabled={!canManage}
               className={fieldClass}
             />
@@ -971,7 +1078,8 @@ function PostMainForm({
             <input
               type="time"
               name="scheduled_time"
-              defaultValue={post.scheduled_time ?? ""}
+              value={scheduledTime}
+              onChange={(e) => setScheduledTime(e.target.value)}
               disabled={!canManage}
               className={fieldClass}
             />
@@ -991,17 +1099,15 @@ function PostMainForm({
       </Button>
       {todoError && <p className="text-sm text-error">{todoError}</p>}
 
-      {state?.message && <p className="text-sm text-error">{state.message}</p>}
-
       {canManage && (
         <Button
           type="submit"
           variant="primary"
           radius="none"
-          disabled={pending}
+          disabled={saving}
           className="w-full py-3 text-xs tracking-wide uppercase"
         >
-          {pending ? "Saving..." : "Save Changes"}
+          {saving ? "Saving…" : saved ? "Saved" : "Save Changes"}
         </Button>
       )}
     </form>

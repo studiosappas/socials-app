@@ -49,10 +49,12 @@ export async function addGridRow(projectId: string) {
   revalidatePath(`/projects/${projectId}/grid`);
 }
 
+// Not revalidating /grid (its own route, only caller) -- GridRow already
+// hides itself locally the instant this is requested (see grid-board.tsx's
+// handleRemoveRow/onRequestRemoveRow).
 export async function removeGridRow(projectId: string, rowId: string) {
   const supabase = await createClient();
   await supabase.from("grid_rows").delete().eq("id", rowId);
-  revalidatePath(`/projects/${projectId}/grid`);
 }
 
 export async function uploadMedia(

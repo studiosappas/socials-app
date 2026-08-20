@@ -1,9 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { StoryStatus } from "@/types/database";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export type StoryFrameItem = {
   frameId: string;
@@ -97,15 +96,7 @@ export async function getStoryPageData(
     if (media) allPaths.add(media.storage_path);
   }
 
-  const pathList = Array.from(allPaths);
-  const { data: signedUrls } = pathList.length
-    ? await supabase.storage.from("project-media").createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
 
   const frameItems: StoryFrameItem[] = (frames ?? []).map((frame) => {
     const media = frame.media_assets as { id: string; storage_path: string; media_type: string } | null;

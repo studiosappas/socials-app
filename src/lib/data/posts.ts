@@ -3,9 +3,8 @@ import type { MediaLibraryItem, GridCoverTransform } from "@/app/projects/[proje
 import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@/lib/data/brand-moodboard";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export type PostPageData = {
   post: {
@@ -189,15 +188,7 @@ export async function getPostPageData(
     }
   }
 
-  const pathList = Array.from(allPaths);
-  const { data: signedUrls } = pathList.length
-    ? await supabase.storage.from("project-media").createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
 
   const assets: PostAssetItem[] = (postAssets ?? []).map((pa) => {
     const media = pa.media_assets as { id: string; storage_path: string; media_type: string } | null;

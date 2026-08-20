@@ -1,7 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { BrandMoodboardCategory, BrandMoodboardItemKind } from "@/types/database";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 // fileType is derived from the storage_path's own extension, purely so the
 // UI/generation code knows how to treat a 'file' item -- render it as an
@@ -67,10 +66,7 @@ export async function getBrandMoodboard(
   if (!data || data.length === 0) return [];
 
   const paths = data.map((d) => d.storage_path).filter((p): p is string => Boolean(p));
-  const { data: signedUrls } = paths.length
-    ? await supabase.storage.from("project-media").createSignedUrls(paths, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-  const urlByPath = new Map((signedUrls ?? []).map((s) => [s.path, s.signedUrl]));
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", paths);
 
   // Isolated from the select above -- font_family/font_weight/font_style are
   // newer columns that may not exist yet on a not-yet-migrated database. A

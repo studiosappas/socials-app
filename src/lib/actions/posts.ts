@@ -22,11 +22,15 @@ export async function fetchPostForModal(projectId: string, postId: string): Prom
   return getPostPageData(projectId, postId);
 }
 
+// Not revalidating /grid or /calendar -- deletePost has two callers (Grid's
+// own delete, Calendar's bulk-delete) and each already removes the post from
+// its own local optimistic state before calling this, so whichever route is
+// currently mounted never needs a refetch to look right. Both routes still
+// pick up the deletion fresh on next visit regardless (staleTimes.dynamic
+// is 0), so this loses nothing.
 export async function deletePost(projectId: string, postId: string) {
   const supabase = await createClient();
   await supabase.from("posts").delete().eq("id", postId);
-  revalidatePath(`/projects/${projectId}/grid`);
-  revalidatePath(`/projects/${projectId}/calendar`);
 }
 
 export async function updatePost(
@@ -116,7 +120,13 @@ export async function updatePost(
     );
   }
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- the
+  // client already applied every field optimistically (see PostMainForm's
+  // handleSave), and revalidating it would force a full refetch of this
+  // page's ~10 queries plus a freshly re-signed URL for every asset
+  // thumbnail, which is exactly the "reload" flash this was rewritten to
+  // avoid. Grid/Tasks still show this post's caption/status, so they still
+  // need to reflect the change whenever next visited.
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath("/tasks");
   return undefined;

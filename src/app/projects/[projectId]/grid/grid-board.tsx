@@ -37,6 +37,7 @@ import { ShareMenuButton } from "../share-menu";
 import { createShareLink } from "@/lib/actions/share-links";
 import type { ShareLinkItem } from "@/lib/data/share-links";
 import { Toast } from "@/components/ui/toast";
+import { useToast } from "@/lib/hooks/use-toast";
 import type { MediaType, Platform } from "@/types/database";
 
 const DOUBLE_CLICK_WINDOW_MS = 220;
@@ -771,6 +772,12 @@ function GridRow({
   dragEnabled?: boolean;
   reorderMode?: boolean;
 }) {
+  // Owns its own "removed" flag rather than reaching up into GridBoard's
+  // overrideRows -- "Remove Row" only ever needs to hide this one row
+  // instantly, and this is the smallest scope that can do that.
+  const [removed, setRemoved] = useState(false);
+  if (removed) return null;
+
   // No dedicated "remove row" bar between rows -- the grid stays tight like
   // desktop, and "Remove Row" lives in each slot's own ⋮ menu instead.
   return (
@@ -787,6 +794,7 @@ function GridRow({
           selectionMode={selectionMode}
           selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
           onToggleSelectPost={onToggleSelectPost}
+          onRequestRemoveRow={() => setRemoved(true)}
           demoMode={demoMode}
           dragEnabled={dragEnabled}
           reorderMode={reorderMode}
@@ -806,6 +814,7 @@ function GridSlot({
   selectionMode,
   selected,
   onToggleSelectPost,
+  onRequestRemoveRow,
   demoMode = false,
   dragEnabled = true,
   reorderMode = false,
@@ -819,6 +828,7 @@ function GridSlot({
   selectionMode: boolean;
   selected: boolean;
   onToggleSelectPost: (postId: string) => void;
+  onRequestRemoveRow: () => void;
   demoMode?: boolean;
   dragEnabled?: boolean;
   reorderMode?: boolean;
@@ -854,11 +864,18 @@ function GridSlot({
   const [overrideTransform, setOverrideTransform] = useState<GridCoverTransform | null | undefined>(
     undefined,
   );
+  // Same shape as overrideTransform, generalized to the rest of the slot's
+  // fields -- lets delete and the poster self-heal effect update this one
+  // tile instantly without waiting on a route refresh, exactly like a fresh
+  // crop already does.
+  const [overridePatch, setOverridePatch] = useState<Partial<GridBoardSlot> | null>(null);
   if (slot !== prevSlot) {
     setPrevSlot(slot);
     setOverrideTransform(undefined);
+    setOverridePatch(null);
   }
   const effectiveTransform = overrideTransform !== undefined ? overrideTransform : slot.coverTransform;
+  const effectiveSlot: GridBoardSlot = overridePatch ? { ...slot, ...overridePatch } : slot;
 
   // Self-heals a video cover that's missing its poster (upload-time capture
   // can fail for some codecs/timeouts -- see video-poster.ts) instead of
@@ -880,9 +897,11 @@ function GridSlot({
       const formData = new FormData();
       formData.set("poster", new File([posterBlob], "poster.jpg", { type: "image/jpeg" }));
       const result = await saveRegeneratedPoster(projectId, slot.coverMediaAssetId!, formData);
-      if (!result.message) router.refresh();
+      if (result.posterUrl) {
+        setOverridePatch((current) => ({ ...current, thumbnailUrl: result.posterUrl }));
+      }
     })();
-  }, [canManage, demoMode, projectId, router, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
+  }, [canManage, demoMode, projectId, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
 
   // dnd-kit's PointerSensor listens on this same element, and its pointerdown
   // handling suppresses the browser's native "dblclick" synthesis -- so
@@ -954,20 +973,41 @@ function GridSlot({
 
   function handleDeletePost() {
     if (!slot.postId) return;
+    const postId = slot.postId;
     setContentMenuOpen(false);
     if (!confirm("Delete this post? This can't be undone.")) return;
+    setOverridePatch({
+      postId: null,
+      thumbnailUrl: null,
+      coverMediaType: null,
+      coverMediaAssetId: null,
+      coverOriginalUrl: null,
+      assetCount: 0,
+      coverTransform: null,
+      scheduledDate: null,
+    });
     startDeleteTransition(async () => {
-      await deletePost(projectId, slot.postId!);
-      router.refresh();
+      try {
+        await deletePost(projectId, postId);
+      } catch (error) {
+        console.error("Failed to delete post:", error);
+        setOverridePatch(null);
+        router.refresh();
+      }
     });
   }
 
   function handleRemoveRow() {
     setContentMenuOpen(false);
     if (!confirm("Remove this row? This can't be undone.")) return;
+    onRequestRemoveRow();
     startDeleteTransition(async () => {
-      await removeGridRow(projectId, rowId);
-      router.refresh();
+      try {
+        await removeGridRow(projectId, rowId);
+      } catch (error) {
+        console.error("Failed to remove row:", error);
+        router.refresh();
+      }
     });
   }
 
@@ -975,14 +1015,18 @@ function GridSlot({
     <div
       ref={setNodeRef}
       style={style}
-      {...(slot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
-      role={slot.postId || canManage ? "button" : undefined}
-      tabIndex={slot.postId || canManage ? 0 : undefined}
-      onClick={slot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
+      {...(effectiveSlot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
+      role={effectiveSlot.postId || canManage ? "button" : undefined}
+      tabIndex={effectiveSlot.postId || canManage ? 0 : undefined}
+      onClick={effectiveSlot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
       className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 ${
-        slot.postId && canManage && dragEnabled ? "cursor-grab touch-none" : slot.postId || canManage ? "cursor-pointer" : ""
+        effectiveSlot.postId && canManage && dragEnabled
+          ? "cursor-grab touch-none"
+          : effectiveSlot.postId || canManage
+            ? "cursor-pointer"
+            : ""
       } ${
-        slot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
+        effectiveSlot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
       } ${
         isDragging ? "opacity-30" : ""
       } ${
@@ -996,20 +1040,20 @@ function GridSlot({
           a descendant, so it can render outside the tile's own bounds
           instead of being cropped by it. */}
       <div className={`absolute inset-0 flex items-center justify-center ${cropMode ? "" : "overflow-hidden"}`}>
-        {slot.thumbnailUrl ? (
+        {effectiveSlot.thumbnailUrl ? (
           // Always a static <img>, even when the cover is a video -- this is
           // the video's poster frame (captured client-side at upload time),
           // never the video file itself. Grid never plays/autoplays video.
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            key={slot.thumbnailUrl}
-            src={slot.thumbnailUrl}
+            key={effectiveSlot.thumbnailUrl}
+            src={effectiveSlot.thumbnailUrl}
             alt=""
             className="h-full w-full animate-settle-in object-cover"
             draggable={false}
             style={coverTransformStyle(effectiveTransform)}
           />
-        ) : slot.coverMediaType === "video" ? (
+        ) : effectiveSlot.coverMediaType === "video" ? (
           // A video cover with no poster yet (e.g. uploaded before this
           // feature existed, or poster capture failed) -- still distinct
           // from a truly empty slot.
@@ -1026,7 +1070,7 @@ function GridSlot({
           <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
         )}
       </div>
-      {slot.coverMediaType === "video" && (
+      {effectiveSlot.coverMediaType === "video" && (
         <span
           title="Video"
           className="absolute bottom-1 left-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-[9px] text-white"
@@ -1042,7 +1086,7 @@ function GridSlot({
           instead -- same "one small badge, top-left" language, just a
           different moment (there's no reason to see the scheduled-date
           badge and the selection circle at once). */}
-      {selectionMode && slot.postId ? (
+      {selectionMode && effectiveSlot.postId ? (
         <span
           title={selected ? "Deselect" : "Select"}
           className="absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full"
@@ -1059,18 +1103,18 @@ function GridSlot({
           )}
         </span>
       ) : (
-        slot.scheduledDate && (
+        effectiveSlot.scheduledDate && (
           <span
-            title={`Scheduled for ${slot.scheduledDate}`}
+            title={`Scheduled for ${effectiveSlot.scheduledDate}`}
             className="absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
           >
             <ScheduledIcon className="h-2.5 w-2.5" />
           </span>
         )
       )}
-      {slot.assetCount > 1 && (
+      {effectiveSlot.assetCount > 1 && (
         <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
-          {slot.assetCount}
+          {effectiveSlot.assetCount}
         </span>
       )}
       {canManage && (
@@ -1091,19 +1135,19 @@ function GridSlot({
               onClick={(e) => e.stopPropagation()}
               className="absolute right-0 top-7 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
-              {slot.postId && !demoMode && (
+              {effectiveSlot.postId && !demoMode && (
                 <button
                   type="button"
                   onClick={() => {
                     setContentMenuOpen(false);
-                    router.push(`/projects/${projectId}/posts/${slot.postId}`);
+                    router.push(`/projects/${projectId}/posts/${effectiveSlot.postId}`);
                   }}
                   className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Edit Content
                 </button>
               )}
-              {slot.thumbnailUrl && (
+              {effectiveSlot.thumbnailUrl && (
                 <button
                   type="button"
                   onClick={() => {
@@ -1115,7 +1159,7 @@ function GridSlot({
                   Crop Image
                 </button>
               )}
-              {slot.postId && !demoMode && (
+              {effectiveSlot.postId && !demoMode && (
                 <button
                   type="button"
                   onClick={handleDeletePost}
@@ -1137,9 +1181,9 @@ function GridSlot({
           )}
         </div>
       )}
-      {cropMode && slot.thumbnailUrl && (
+      {cropMode && effectiveSlot.thumbnailUrl && (
         <GridCropOverlay
-          imageUrl={slot.thumbnailUrl}
+          imageUrl={effectiveSlot.thumbnailUrl}
           initialTransform={effectiveTransform}
           onSave={handleSaveCrop}
           onCancel={() => setCropMode(false)}
@@ -1171,7 +1215,7 @@ function MediaPickerDialog({
   const [state, action, pending] = useActionState(uploadMedia.bind(null, projectId), undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
-  const router = useRouter();
+  const { showError } = useToast();
   const [, startDeleteTransition] = useTransition();
   // Surfaces a too-large/direct-upload-failed file before the Server Action
   // ever runs (uploadFilesWithPosters rejects it client-side) -- shown
@@ -1179,12 +1223,45 @@ function MediaPickerDialog({
   // the upload now that the file itself uploads direct to Storage.
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // Same optimistic overlay as media-library.tsx's sidebar library -- see
+  // its comments for the full reasoning (instant blob-URL preview on
+  // upload, instant removal on delete, both superseded by the real item
+  // once this route's own revalidation lands).
+  const [prevItems, setPrevItems] = useState(items);
+  const [overrideItems, setOverrideItems] = useState<MediaLibraryItem[] | null>(null);
+  const pendingBlobUrlsRef = useRef<Set<string>>(new Set());
+  if (items !== prevItems) {
+    setPrevItems(items);
+    setOverrideItems(null);
+  }
+  const effectiveItems = overrideItems ?? items;
+
+  useEffect(() => {
+    for (const url of pendingBlobUrlsRef.current) URL.revokeObjectURL(url);
+    pendingBlobUrlsRef.current = new Set();
+  }, [items]);
+
+  useEffect(() => {
+    if (state?.message) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setOverrideItems(null);
+      showError(state.message);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
     if (!confirm("Delete this asset? This removes it from any post or story using it.")) return;
+    setOverrideItems(effectiveItems.filter((item) => item.id !== mediaAssetId));
     startDeleteTransition(async () => {
-      await deleteMedia(projectId, mediaAssetId);
-      router.refresh();
+      try {
+        await deleteMedia(projectId, mediaAssetId);
+      } catch (error) {
+        console.error("Failed to delete media:", error);
+        setOverrideItems(null);
+        showError("Couldn't delete this asset. Please try again.");
+      }
     });
   }
 
@@ -1205,9 +1282,32 @@ function MediaPickerDialog({
                 const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
                 setUploadError(null);
-                if (files.length > 0) {
-                  uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
-                }
+                if (files.length === 0) return;
+
+                const optimistic = files.map((file) => {
+                  const url = URL.createObjectURL(file);
+                  pendingBlobUrlsRef.current.add(url);
+                  return {
+                    file,
+                    item: {
+                      id: `optimistic-${crypto.randomUUID()}`,
+                      url,
+                      mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
+                    } satisfies MediaLibraryItem,
+                  };
+                });
+                setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
+
+                uploadFilesWithPosters(projectId, action, files, (fileName, message) => {
+                  setUploadError(message);
+                  const failed = optimistic.find((o) => o.file.name === fileName);
+                  if (!failed) return;
+                  pendingBlobUrlsRef.current.delete(failed.item.url!);
+                  URL.revokeObjectURL(failed.item.url!);
+                  setOverrideItems((current) =>
+                    (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
+                  );
+                });
               }}
             />
             <Button
@@ -1233,7 +1333,7 @@ function MediaPickerDialog({
             count can overflow small viewports, and a pure vh cap wouldn't
             read as "about 9 rows" on a typically-sized one. */}
         <div className="grid max-h-[min(1400px,70vh)] grid-cols-3 gap-2 overflow-y-auto">
-          {items.map((item) => (
+          {effectiveItems.map((item) => (
             <div key={item.id} className="relative min-w-0">
               <button
                 type="button"
@@ -1257,7 +1357,7 @@ function MediaPickerDialog({
             </div>
           ))}
         </div>
-        {items.length === 0 && <p className="text-sm text-muted">No media uploaded yet.</p>}
+        {effectiveItems.length === 0 && <p className="text-sm text-muted">No media uploaded yet.</p>}
       </div>
     </Dialog>
   );

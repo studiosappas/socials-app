@@ -234,7 +234,8 @@ export async function saveRegeneratedPoster(
     .from("project-media")
     .createSignedUrl(posterPath, SIGNED_URL_TTL_SECONDS);
 
-  revalidatePath(`/projects/${projectId}/grid`);
-
+  // Not revalidating /grid (its own route, only caller) -- the self-heal
+  // effect in grid-board.tsx already patches this slot's thumbnail locally
+  // from the posterUrl returned below.
   return { posterUrl: signed?.signedUrl };
 }

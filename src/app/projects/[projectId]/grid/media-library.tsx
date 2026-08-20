@@ -14,6 +14,7 @@ import {
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
+import { useToast } from "@/lib/hooks/use-toast";
 import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 
@@ -86,6 +87,7 @@ export function MediaLibrary({
   onSelectionChange?: (ids: string[]) => void;
 }) {
   const router = useRouter();
+  const { showError } = useToast();
   const [state, action, pending] = useActionState(
     uploadMedia.bind(null, projectId),
     undefined,
@@ -96,11 +98,54 @@ export function MediaLibrary({
   // ever runs -- see grid-board.tsx's identical picker-dialog pattern.
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // Optimistic overlay so a new upload appears (via a local blob URL --
+  // instant, no network round trip needed to show it) and a delete
+  // disappears the moment it's requested, instead of waiting on
+  // uploadMedia/bulkDeleteMedia's full round trip (which still revalidates
+  // this route in the background for the undo/redo auto-track effect below
+  // to keep working) to land. Same reset-on-prop-change guard as Grid's own
+  // overrideRows.
+  const [prevItems, setPrevItems] = useState(items);
+  const [overrideItems, setOverrideItems] = useState<MediaLibraryItem[] | null>(null);
+  const pendingBlobUrlsRef = useRef<Set<string>>(new Set());
+  if (items !== prevItems) {
+    setPrevItems(items);
+    setOverrideItems(null);
+  }
+  const effectiveItems = overrideItems ?? items;
+
+  // The real (signed-URL) item has arrived to replace whichever optimistic
+  // blob-URL placeholders were showing -- release them now rather than
+  // leaking that memory for the rest of the page's life.
+  useEffect(() => {
+    for (const url of pendingBlobUrlsRef.current) URL.revokeObjectURL(url);
+    pendingBlobUrlsRef.current = new Set();
+  }, [items]);
+
+  // uploadFilesWithPosters' onError only covers a rejected file never
+  // reaching the server (too large, direct-upload failed); a failure INSIDE
+  // uploadMedia itself (the DB insert) only ever surfaces here, as this
+  // action-state's own message -- without this, that specific failure mode
+  // would leave the optimistic blob-URL thumbnail stuck looking like a
+  // successful upload that was actually never persisted. Can't tell exactly
+  // which in-flight file failed (uploadFilesWithPosters dispatches multiple
+  // files as separate fire-and-forget action calls sharing one action-state),
+  // so this drops back to the real server list entirely rather than risk
+  // leaving a fake entry behind.
+  useEffect(() => {
+    if (state?.message) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setOverrideItems(null);
+      showError(state.message);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
   // null = root view (folder tiles + unfoldered assets). Non-null = browsing
   // one folder's assets, with a "back" affordance to return to root.
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null;
-  const visibleItems = items.filter((item) =>
+  const visibleItems = effectiveItems.filter((item) =>
     activeFolderId ? item.folderId === activeFolderId : !item.folderId,
   );
 
@@ -125,10 +170,21 @@ export function MediaLibrary({
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
     if (!confirm(`Delete ${ids.length} selected asset${ids.length === 1 ? "" : "s"}? Any already used in a post or story will be archived (removed from the library, kept in place there) instead of deleted.`)) return;
+    const idSet = new Set(ids);
+    setOverrideItems(effectiveItems.filter((item) => !idSet.has(item.id)));
+    setSelectedIds(new Set());
+    // No router.refresh() on success -- bulkDeleteMedia already revalidates
+    // this route server-side, so its own response already carries the fresh
+    // data; refreshing again would just redo that same round trip a second
+    // time for nothing the optimistic removal above hasn't already shown.
     startBulkDelete(async () => {
-      await bulkDeleteMedia(projectId, ids);
-      setSelectedIds(new Set());
-      router.refresh();
+      try {
+        await bulkDeleteMedia(projectId, ids);
+      } catch (error) {
+        console.error("Failed to delete media:", error);
+        setOverrideItems(null);
+        showError("Couldn't delete those assets. Please try again.");
+      }
     });
   }
 
@@ -226,9 +282,37 @@ export function MediaLibrary({
               const files = Array.from(e.target.files ?? []);
               e.target.value = "";
               setUploadError(null);
-              if (files.length > 0) {
-                uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
-              }
+              if (files.length === 0) return;
+
+              // Instant thumbnail from the file the browser already has in
+              // memory -- no network round trip needed to show it, unlike
+              // waiting for uploadMedia's DB insert + this route's own
+              // revalidation to land. Superseded automatically once the
+              // real item arrives (see the reset-on-prop-change guard above).
+              const optimistic = files.map((file) => {
+                const url = URL.createObjectURL(file);
+                pendingBlobUrlsRef.current.add(url);
+                return {
+                  file,
+                  item: {
+                    id: `optimistic-${crypto.randomUUID()}`,
+                    url,
+                    mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
+                  } satisfies MediaLibraryItem,
+                };
+              });
+              setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
+
+              uploadFilesWithPosters(projectId, action, files, (fileName, message) => {
+                setUploadError(message);
+                const failed = optimistic.find((o) => o.file.name === fileName);
+                if (!failed) return;
+                pendingBlobUrlsRef.current.delete(failed.item.url!);
+                URL.revokeObjectURL(failed.item.url!);
+                setOverrideItems((current) =>
+                  (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
+                );
+              });
             }}
           />
           <Button

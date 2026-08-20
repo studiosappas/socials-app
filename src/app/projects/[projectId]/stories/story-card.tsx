@@ -52,18 +52,28 @@ export function StoryCard({
   const [menuView, setMenuView] = useState<MenuView>("root");
   const [downloading, setDownloading] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [deleted, setDeleted] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => {
     setMenuOpen(false);
     setMenuView("root");
   });
   const href = `/projects/${projectId}/stories/${storyId}`;
 
+  if (deleted) return null;
+
   function handleDelete() {
     setMenuOpen(false);
     if (!confirm("Delete this content? This can't be undone.")) return;
-    // deleteStory redirects on completion (same pattern used by the story
-    // editor's own delete button) -- no follow-up refresh needed.
-    startTransition(() => deleteStory(projectId, storyId));
+    setDeleted(true);
+    startTransition(async () => {
+      try {
+        await deleteStory(projectId, storyId);
+      } catch (error) {
+        console.error("Failed to delete story:", error);
+        setDeleted(false);
+        router.refresh();
+      }
+    });
   }
 
   function handleMove(folderId: string | null) {

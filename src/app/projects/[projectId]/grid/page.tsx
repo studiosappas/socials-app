@@ -1,9 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { getShareLinksData } from "@/lib/data/share-links";
+import { getCachedSignedUrl, getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { GridBoard, type GridBoardRow, type MediaFolder, type MediaLibraryItem } from "./grid-board";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export default async function GridPage({
   params,
@@ -43,13 +42,7 @@ export default async function GridPage({
     .eq("id", projectId)
     .maybeSingle();
 
-  const profilePhotoUrl = project?.profile_photo_path
-    ? (
-        await supabase.storage
-          .from("project-media")
-          .createSignedUrl(project.profile_photo_path, SIGNED_URL_TTL_SECONDS)
-      ).data?.signedUrl ?? null
-    : null;
+  const profilePhotoUrl = await getCachedSignedUrl(supabase, "project-media", project?.profile_photo_path);
 
   const gridRowsWithPaths = await getGridRowsWithCoverPaths(supabase, projectId);
 
@@ -113,17 +106,7 @@ export default async function GridPage({
     }
   }
 
-  const pathList = Array.from(allPaths);
-  const { data: signedUrls } = pathList.length
-    ? await supabase.storage
-        .from("project-media")
-        .createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
 
   const gridRows: GridBoardRow[] = gridRowsWithPaths.map((row) => ({
     id: row.rowId,
