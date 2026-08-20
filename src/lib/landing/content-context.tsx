@@ -10,6 +10,9 @@ import {
   DEMO_MEDIA_LIBRARY_ITEMS,
   DEMO_SEARCH_MATCH_IDS,
   DEMO_SEARCH_INSPIRATION_IMAGE,
+  DEMO_WORKSPACE_TILES,
+  DEMO_BRIEF_TASK,
+  DEMO_GRID_ROWS,
   DEMO_BRAND_DOCUMENTS,
   DEMO_SPECTRUM,
   DEMO_BRAND_ACCORDION,
@@ -34,6 +37,14 @@ import {
 // (motion constants, not content), and types stay plain static imports
 // wherever they're used; only what the "One Continuous Workflow" story and
 // Hero/Why/CTA sections actually render as data goes through here.
+//
+// Also deliberately excluded: demo-create.ts's DEMO_DESIGN_BASE_PHOTO/
+// DEMO_LAYOUT_ELEMENTS/DEMO_DESIGN_FABRIC_JSON. The Fabric JSON is derived
+// FROM the base photo at module-load time (layoutToFabricJson) -- making
+// the photo admin-editable independently of that derived JSON would let
+// them silently drift out of sync (the editor would open showing a
+// different photo than the one the layout was actually composed for).
+// Chapter 02's stage-02-create.tsx imports those directly instead.
 const DEFAULT_LANDING_CONTENT = {
   HERO_CONTENT,
   HERO_PHRASES,
@@ -43,6 +54,9 @@ const DEFAULT_LANDING_CONTENT = {
   DEMO_MEDIA_LIBRARY_ITEMS,
   DEMO_SEARCH_MATCH_IDS,
   DEMO_SEARCH_INSPIRATION_IMAGE,
+  DEMO_WORKSPACE_TILES,
+  DEMO_BRIEF_TASK,
+  DEMO_GRID_ROWS,
   DEMO_BRAND_DOCUMENTS,
   DEMO_SPECTRUM,
   DEMO_BRAND_ACCORDION,

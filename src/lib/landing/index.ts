@@ -7,4 +7,5 @@ export * from "./demo-brief";
 export * from "./demo-collaboration";
 export * from "./demo-brand";
 export * from "./demo-media-library";
+export * from "./demo-create";
 export * from "./demo-export";
