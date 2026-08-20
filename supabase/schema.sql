@@ -1514,3 +1514,14 @@ alter table public.brief_tasks add column if not exists status text not null def
 alter table public.brand_moodboard_items add column if not exists font_family text;
 alter table public.brand_moodboard_items add column if not exists font_weight text;
 alter table public.brand_moodboard_items add column if not exists font_style text;
+
+-- ---------- Large upload limits ----------
+-- Explicit, verified 50MB per-bucket ceiling (matching Supabase Storage's
+-- own documented Free-tier project-wide default) rather than an assumed
+-- dashboard setting -- see src/lib/upload-limits.ts, the single source of
+-- truth this mirrors. Uploads now go direct browser-to-Storage (see
+-- src/lib/direct-upload.ts) for every real file-picker path, bypassing
+-- Vercel's separate, non-configurable ~4.5MB Function request-body limit
+-- that every FormData-through-a-Server-Action upload was actually bound by.
+update storage.buckets set file_size_limit = 52428800
+where id in ('project-media', 'brief-media', 'brand-documents', 'avatars', 'landing-media');

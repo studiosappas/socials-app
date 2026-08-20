@@ -353,6 +353,9 @@ function UploadFrameTile({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Surfaces a too-large/direct-upload-failed file before the Server Action
+  // ever runs (uploadFilesWithPosters rejects it client-side).
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (state?.success) onUploaded();
@@ -371,7 +374,10 @@ function UploadFrameTile({
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           e.target.value = "";
-          if (files.length > 0) uploadFilesWithPosters(action, files);
+          setUploadError(null);
+          if (files.length > 0) {
+            uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+          }
         }}
       />
       <button
@@ -383,7 +389,9 @@ function UploadFrameTile({
       >
         {pending ? "…" : "+"}
       </button>
-      {state?.message && <p className="text-xs text-error">{state.message}</p>}
+      {(uploadError || state?.message) && (
+        <p className="text-xs text-error">{uploadError || state?.message}</p>
+      )}
     </form>
   );
 }

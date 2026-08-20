@@ -6,6 +6,8 @@ import { detectProvider, PROVIDER_LABEL, PROVIDER_OPTIONS, ASSET_TYPE_LABEL, ASS
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 import type { AssetCollectionAiStatus, AssetProvider, AssetType } from "@/types/database";
 
 export type AssetCollectionItem = {
@@ -312,9 +314,13 @@ function AssetSourceDialog({
   const [state, action, pending] = useActionState(boundAction, undefined);
   const [folderUrl, setFolderUrl] = useState(editing?.folderUrl ?? "");
   const [coverPreview, setCoverPreview] = useState<string | null>(editing?.coverUrl ?? null);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | undefined>(undefined);
   const detected = detectProvider(folderUrl);
   const formRef = useRef<HTMLFormElement>(null);
   const coverInputRef = useRef<HTMLInputElement>(null);
+  const [, startTransition] = useTransition();
 
   useEffect(() => {
     if (state?.success) onClose();
@@ -333,15 +339,41 @@ function AssetSourceDialog({
         if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
         return editing?.coverUrl ?? null;
       });
+      setCoverFile(null);
+      setUploadError(undefined);
     } else {
       formRef.current?.reset();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const formEl = e.currentTarget;
+    setUploadError(undefined);
+    startTransition(async () => {
+      const formData = new FormData(formEl);
+      formData.delete("cover");
+
+      if (coverFile) {
+        setUploading(true);
+        const path = newStoragePath(projectId, coverFile.name);
+        const uploaded = await uploadFileDirect("project-media", path, coverFile);
+        setUploading(false);
+        if ("error" in uploaded) {
+          setUploadError(uploaded.error);
+          return;
+        }
+        formData.set("cover_storage_path", uploaded.path);
+      }
+
+      action(formData);
+    });
+  }
+
   return (
     <Dialog open={open} onClose={onClose} title={isEditing ? "Edit Asset Source" : "Add Asset Source"} radius="none">
-      <form key={editing?.id ?? "add"} ref={formRef} action={action} className="flex flex-col gap-4">
+      <form key={editing?.id ?? "add"} ref={formRef} onSubmit={handleSubmit} className="flex flex-col gap-4">
         <label className="flex flex-col gap-1.5">
           <span className="text-xs tracking-wide text-muted uppercase">Folder URL</span>
           <input
@@ -386,12 +418,20 @@ function AssetSourceDialog({
           <input
             ref={coverInputRef}
             type="file"
-            name="cover"
             accept="image/*"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) setCoverPreview(URL.createObjectURL(file));
+              if (!file) return;
+              const sizeCheck = validateUploadSize(file);
+              if (!sizeCheck.ok) {
+                setUploadError(sizeCheck.message);
+                e.target.value = "";
+                return;
+              }
+              setUploadError(undefined);
+              setCoverFile(file);
+              setCoverPreview(URL.createObjectURL(file));
             }}
           />
         </label>
@@ -447,10 +487,10 @@ function AssetSourceDialog({
           />
         </label>
 
-        {state?.message && <p className="text-sm text-error">{state.message}</p>}
+        {(uploadError || state?.message) && <p className="text-sm text-error">{uploadError ?? state?.message}</p>}
 
-        <Button type="submit" variant="primary" radius="none" disabled={pending}>
-          {pending ? "Saving…" : isEditing ? "Save Changes" : "Add Source"}
+        <Button type="submit" variant="primary" radius="none" disabled={pending || uploading}>
+          {uploading ? "Uploading…" : pending ? "Saving…" : isEditing ? "Save Changes" : "Add Source"}
         </Button>
       </form>
     </Dialog>

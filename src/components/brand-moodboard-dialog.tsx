@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { uploadMoodboardItem, addMoodboardLink, deleteMoodboardItem } from "@/lib/actions/brand-moodboard";
 import { useCustomFonts } from "@/lib/use-custom-fonts";
 import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 import type { BrandMoodboardCategory } from "@/types/database";
 
 const FONT_WEIGHT_OPTIONS = [
@@ -102,11 +104,22 @@ export function BrandMoodboardDialog({
       return;
     }
 
+    const sizeCheck = validateUploadSize(file);
+    if (!sizeCheck.ok) {
+      setError(sizeCheck.message);
+      return;
+    }
+
     setUploading(true);
-    const formData = new FormData();
-    formData.set("file", file);
     startTransition(async () => {
-      const result = await uploadMoodboardItem(projectId, category, file.name, formData);
+      const path = newStoragePath(projectId, file.name);
+      const uploaded = await uploadFileDirect("project-media", path, file);
+      if ("error" in uploaded) {
+        setUploading(false);
+        setError(uploaded.error);
+        return;
+      }
+      const result = await uploadMoodboardItem(projectId, category, file.name, uploaded.path, file.name);
       setUploading(false);
       if (!result.success) {
         setError(result.message ?? "Couldn't upload.");
@@ -120,11 +133,33 @@ export function BrandMoodboardDialog({
     e.preventDefault();
     if (!pendingFontFile || !fontName.trim() || uploading) return;
     setError(undefined);
+
+    // Same check uploadMoodboardItem makes server-side -- duplicated (not
+    // imported) since a "use server" file can only export async functions,
+    // never a plain constant. Catching it here avoids uploading a file to
+    // Storage that's certain to be rejected right after.
+    const fontExt = pendingFontFile.name.includes(".") ? pendingFontFile.name.split(".").pop()?.toLowerCase() : undefined;
+    if (!fontExt || !["ttf", "otf", "woff", "woff2"].includes(fontExt)) {
+      setError("Unsupported font file -- use .woff, .woff2, .ttf, or .otf.");
+      return;
+    }
+
+    const sizeCheck = validateUploadSize(pendingFontFile);
+    if (!sizeCheck.ok) {
+      setError(sizeCheck.message);
+      return;
+    }
+
     setUploading(true);
-    const formData = new FormData();
-    formData.set("file", pendingFontFile);
     startTransition(async () => {
-      const result = await uploadMoodboardItem(projectId, category, fontName, formData, {
+      const path = newStoragePath(projectId, pendingFontFile.name);
+      const uploaded = await uploadFileDirect("project-media", path, pendingFontFile);
+      if ("error" in uploaded) {
+        setUploading(false);
+        setError(uploaded.error);
+        return;
+      }
+      const result = await uploadMoodboardItem(projectId, category, fontName, uploaded.path, pendingFontFile.name, {
         fontFamily: fontName.trim(),
         fontWeight,
         fontStyle,

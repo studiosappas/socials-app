@@ -1,10 +1,12 @@
 "use client";
 
-import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { updateAccountPassword, updateAccountProfile, updatePreferences, updateWorkspaceSettings } from "@/lib/actions/settings";
+import { validateUploadSize, tooLargeMessage } from "@/lib/upload-limits";
+import { createClient } from "@/lib/supabase/client";
 import {
   DATE_FORMAT_OPTIONS,
   LANDING_PAGE_OPTIONS,
@@ -104,6 +106,9 @@ function ProfileCard({
   const router = useRouter();
   const [state, action, pending] = useActionState(updateAccountProfile, undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [, startTransition] = useTransition();
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | undefined>();
 
   const [name, setName] = useState(initialName);
   const [email, setEmail] = useState(initialEmail);
@@ -148,6 +153,15 @@ function ProfileCard({
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
+    if (file) {
+      const sizeCheck = validateUploadSize(file);
+      if (!sizeCheck.ok) {
+        setUploadError(sizeCheck.message);
+        e.target.value = "";
+        return;
+      }
+    }
+    setUploadError(undefined);
     setAvatarFile(file);
     if (file) setAvatarRemoved(false);
   }
@@ -158,13 +172,58 @@ function ProfileCard({
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
+  // The photo itself goes direct browser-to-Storage (avatars bucket, same
+  // ${userId}/avatar.ext + upsert:true convention the server action used to
+  // use itself) before the action ever runs -- bypasses Vercel's Function
+  // request-body limit entirely. Name/email/remove_avatar still travel
+  // through the action's own FormData as before, just without the file.
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const formEl = e.currentTarget;
+    setUploadError(undefined);
+    startTransition(async () => {
+      const formData = new FormData(formEl);
+      formData.delete("avatar");
+
+      if (avatarFile) {
+        setUploading(true);
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) {
+          setUploading(false);
+          setUploadError("Not signed in.");
+          return;
+        }
+        const ext = avatarFile.name.includes(".") ? avatarFile.name.split(".").pop() : undefined;
+        const path = `${user.id}/avatar${ext ? `.${ext}` : ""}`;
+        const supabaseUpload = await supabase.storage
+          .from("avatars")
+          .upload(path, avatarFile, { contentType: avatarFile.type, upsert: true });
+        setUploading(false);
+        if (supabaseUpload.error) {
+          setUploadError(
+            supabaseUpload.error.message.toLowerCase().includes("size")
+              ? tooLargeMessage()
+              : "Couldn't upload this photo. Please try again.",
+          );
+          return;
+        }
+        formData.set("avatar_storage_path", path);
+      }
+
+      action(formData);
+    });
+  }
+
   const displayedAvatarUrl = avatarRemoved ? null : (avatarPreviewUrl ?? avatarUrl);
   const isDirty =
     name.trim() !== savedName || email.trim() !== savedEmail || avatarFile !== null || avatarRemoved;
 
   return (
     <SettingsCard title="Profile" description="Your name, photo, and how people can reach you.">
-      <form action={action} className="flex flex-col gap-6">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-6">
         <input type="hidden" name="remove_avatar" value={avatarRemoved ? "true" : "false"} />
 
         <div className="flex items-center gap-5">
@@ -229,10 +288,14 @@ function ProfileCard({
         </Field>
 
         <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" disabled={pending || !isDirty} className="w-fit">
-            {pending ? "Saving…" : "Save Changes"}
+          <Button type="submit" variant="primary" disabled={pending || uploading || !isDirty} className="w-fit">
+            {uploading ? "Uploading…" : pending ? "Saving…" : "Save Changes"}
           </Button>
-          <StatusNote pending={pending} state={state} />
+          {uploadError ? (
+            <span className="text-xs text-error">{uploadError}</span>
+          ) : (
+            <StatusNote pending={pending} state={state} />
+          )}
         </div>
       </form>
     </SettingsCard>

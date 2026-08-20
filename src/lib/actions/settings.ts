@@ -35,17 +35,13 @@ export async function updateAccountProfile(
 
   const update: { name: string; avatar_url?: string | null } = { name };
 
-  const photo = formData.get("avatar");
-  if (photo instanceof File && photo.size > 0) {
-    const ext = photo.name.includes(".") ? photo.name.split(".").pop() : undefined;
-    const storagePath = `${user.id}/avatar${ext ? `.${ext}` : ""}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("avatars")
-      .upload(storagePath, photo, { contentType: photo.type, upsert: true });
-    if (uploadError) return { message: uploadError.message };
-
-    const { data } = supabase.storage.from("avatars").getPublicUrl(storagePath);
+  // The photo itself already went direct browser-to-Storage before this
+  // action ever runs (same ${userId}/avatar.ext + upsert:true path this
+  // action used to build itself, see account-panel.tsx's handleSubmit) --
+  // this only ever receives the resulting storage path, never the raw file.
+  const avatarStoragePath = formData.get("avatar_storage_path");
+  if (typeof avatarStoragePath === "string" && avatarStoragePath) {
+    const { data } = supabase.storage.from("avatars").getPublicUrl(avatarStoragePath);
     update.avatar_url = data.publicUrl;
   } else if (formData.get("remove_avatar") === "true") {
     update.avatar_url = null;

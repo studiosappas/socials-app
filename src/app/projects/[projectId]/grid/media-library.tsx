@@ -92,6 +92,9 @@ export function MediaLibrary({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Surfaces a too-large/direct-upload-failed file before the Server Action
+  // ever runs -- see grid-board.tsx's identical picker-dialog pattern.
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   // null = root view (folder tiles + unfoldered assets). Non-null = browsing
   // one folder's assets, with a "back" affordance to return to root.
@@ -222,7 +225,10 @@ export function MediaLibrary({
             onChange={(e) => {
               const files = Array.from(e.target.files ?? []);
               e.target.value = "";
-              if (files.length > 0) uploadFilesWithPosters(action, files);
+              setUploadError(null);
+              if (files.length > 0) {
+                uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+              }
             }}
           />
           <Button
@@ -235,7 +241,9 @@ export function MediaLibrary({
           >
             {pending ? "Uploading..." : "Upload Assets"}
           </Button>
-          {state?.message && <p className="text-xs text-error">{state.message}</p>}
+          {(uploadError || state?.message) && (
+            <p className="text-xs text-error">{uploadError || state?.message}</p>
+          )}
         </form>
       )}
 

@@ -22,6 +22,8 @@ import { updateProjectProfile } from "@/lib/actions/projects";
 import { updateTaskStatus } from "@/lib/actions/todo";
 import { externalUrl, socialProfileUrl } from "@/lib/social-links";
 import { computeTileLayout, MAX_ORBIT_TILES, ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 import type { AiInsights, Platform } from "@/types/database";
 
 const labelClass = "text-xs font-semibold tracking-wide uppercase";
@@ -831,17 +833,45 @@ function BrandKnowledgeDialog({
   const [linkState, linkAction, linkPending] = useActionState(addBrandLink.bind(null, projectId), undefined);
   const [, startTransition] = useTransition();
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
-  const [pendingFileName, setPendingFileName] = useState<string | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | undefined>();
   const router = useRouter();
   const fileFormRef = useRef<HTMLFormElement>(null);
   const linkFormRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // The file itself goes direct browser-to-Storage (brand-documents bucket)
+  // before the action ever runs -- bypasses Vercel's Function request-body
+  // limit entirely, which matters here since brand PDFs/decks are often
+  // large. Intercepts the form's native submit (the action can no longer be
+  // the form's own `action` prop, since the upload has to happen first).
+  function handleUploadSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pendingFile || uploading) return;
+    setUploadError(undefined);
+    setUploading(true);
+    startTransition(async () => {
+      const path = newStoragePath(projectId, pendingFile.name);
+      const uploaded = await uploadFileDirect("brand-documents", path, pendingFile);
+      if ("error" in uploaded) {
+        setUploading(false);
+        setUploadError(uploaded.error);
+        return;
+      }
+      const formData = new FormData();
+      formData.set("storagePath", uploaded.path);
+      formData.set("fileName", pendingFile.name);
+      fileAction(formData);
+      setUploading(false);
+    });
+  }
+
   useEffect(() => {
     if (fileState?.success) {
       fileFormRef.current?.reset();
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setPendingFileName(null);
+      setPendingFile(null);
       onUploaded(fileState.documentId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -866,15 +896,26 @@ function BrandKnowledgeDialog({
   return (
     <Dialog open={open} onClose={onClose} title="Brand knowledge" radius="none" widthClassName="max-w-lg">
       <div className="flex flex-col gap-5">
-        <form ref={fileFormRef} action={fileAction} className="flex items-center gap-2">
+        <form ref={fileFormRef} onSubmit={handleUploadSubmit} className="flex items-center gap-2">
           <input
             ref={fileInputRef}
             type="file"
-            name="file"
             accept=".pdf,.doc,.docx,.txt"
             required
             className="hidden"
-            onChange={(e) => setPendingFileName(e.target.files?.[0]?.name ?? null)}
+            onChange={(e) => {
+              const file = e.target.files?.[0] ?? null;
+              if (file) {
+                const sizeCheck = validateUploadSize(file);
+                if (!sizeCheck.ok) {
+                  setUploadError(sizeCheck.message);
+                  e.target.value = "";
+                  return;
+                }
+              }
+              setUploadError(undefined);
+              setPendingFile(file);
+            }}
           />
           <Button
             type="button"
@@ -883,13 +924,15 @@ function BrandKnowledgeDialog({
             onClick={() => fileInputRef.current?.click()}
             className="flex-1 truncate text-left"
           >
-            {pendingFileName ?? "Choose File"}
+            {pendingFile?.name ?? "Choose File"}
           </Button>
-          <Button type="submit" variant="primary" radius="full" disabled={filePending || !pendingFileName}>
-            {filePending ? "Uploading..." : "Upload"}
+          <Button type="submit" variant="primary" radius="full" disabled={filePending || uploading || !pendingFile}>
+            {filePending || uploading ? "Uploading..." : "Upload"}
           </Button>
         </form>
-        {fileState?.message && <p className="text-xs text-error">{fileState.message}</p>}
+        {(uploadError || fileState?.message) && (
+          <p className="text-xs text-error">{uploadError || fileState?.message}</p>
+        )}
 
         <form ref={linkFormRef} action={linkAction} className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <input

@@ -1,6 +1,8 @@
 "use client";
 
 import { startTransition } from "react";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 
 // Grabs a still frame from a video file for use as a Grid-safe poster image,
 // entirely client-side (an offscreen <video> + <canvas>, never uploaded or
@@ -119,20 +121,48 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTim
   });
 }
 
-// Every upload action here (uploadMedia, uploadPostAsset, uploadStoryFrame)
-// accepts multiple files via getAll("file"), but a poster can only
-// unambiguously belong to one file per request -- so this submits one
-// file (with its own generated poster, if it's a video) per action call
-// instead of relying on the native multi-file form submission, even when
-// several files were selected at once.
+// Every upload action here (uploadMedia, uploadPostAsset, uploadStoryFrame,
+// uploadContentAsset) accepts multiple files via getAll("file"), but a
+// poster can only unambiguously belong to one file per request -- so this
+// submits one file (with its own generated poster, if it's a video) per
+// action call instead of relying on the native multi-file form submission,
+// even when several files were selected at once.
+//
+// The main file itself now uploads DIRECT to Supabase Storage from the
+// browser (uploadFileDirect) before the action ever runs -- bypassing
+// Vercel's hard, non-configurable ~4.5MB Function request-body limit, which
+// every previous FormData-through-a-Server-Action upload was actually bound
+// by regardless of next.config.ts's own serverActions.bodySizeLimit. The
+// action now receives the resulting storagePath/mediaType (tiny strings)
+// instead of the raw file -- see the four target actions' own updated
+// signatures. The poster stays in FormData as before (a small,
+// client-generated JPEG, never a large raw upload).
 export async function uploadFilesWithPosters(
+  projectId: string,
   action: (formData: FormData) => void,
   files: File[],
+  onError?: (fileName: string, message: string) => void,
 ): Promise<void> {
   for (const file of files) {
+    const sizeCheck = validateUploadSize(file);
+    if (!sizeCheck.ok) {
+      onError?.(file.name, sizeCheck.message);
+      continue;
+    }
+
+    const mediaType = file.type.startsWith("video/") ? "video" : "image";
+    const storagePath = newStoragePath(projectId, file.name);
+    const uploaded = await uploadFileDirect("project-media", storagePath, file);
+    if ("error" in uploaded) {
+      onError?.(file.name, uploaded.error);
+      continue;
+    }
+
     const formData = new FormData();
-    formData.set("file", file);
-    if (file.type.startsWith("video/")) {
+    formData.set("storagePath", uploaded.path);
+    formData.set("mediaType", mediaType);
+    formData.set("fileName", file.name);
+    if (mediaType === "video") {
       const poster = await generateVideoPosterBlob(file);
       if (poster) {
         formData.set("poster", new File([poster], "poster.jpg", { type: "image/jpeg" }));

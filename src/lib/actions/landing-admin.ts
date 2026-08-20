@@ -50,25 +50,17 @@ export async function resetLandingContent(key: LandingContentKey): Promise<{ suc
   return { success: true };
 }
 
-// Uploads to the public landing-media bucket and returns the storage path
-// (not a full URL -- the bucket is public, so any consumer can build the
-// URL from the path via getPublicUrl, same as avatars/brief-media do
-// today). Paste the returned path into a MediaRef's `src` field in the
-// content JSON to point that image at the new file.
+// The file itself already went direct browser-to-Storage before this ever
+// runs (see admin-landing-form.tsx's handleFileChange) -- the same "Admins
+// manage landing media" RLS policy that used to gate this upload already
+// gates that direct one identically, so this is just a final admin check
+// before handing back the path to paste into a MediaRef's `src` field.
 export async function uploadLandingImage(formData: FormData): Promise<{ path?: string; message?: string }> {
   const admin = await requireAdmin();
   if (!admin.ok) return { message: admin.message };
 
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) return { message: "Choose a file to upload." };
-
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-  const path = `uploads/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-  const { error } = await admin.supabase.storage
-    .from("landing-media")
-    .upload(path, file, { contentType: file.type });
-  if (error) return { message: error.message };
+  const path = formData.get("storagePath");
+  if (typeof path !== "string" || !path) return { message: "Choose a file to upload." };
 
   return { path };
 }

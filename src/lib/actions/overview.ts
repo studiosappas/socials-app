@@ -186,14 +186,13 @@ export async function uploadBrandDocument(
   } = await supabase.auth.getUser();
   if (!user) return { message: "Not signed in." };
 
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) return { message: "Choose a file first." };
-
-  const storagePath = `${projectId}/${Date.now()}-${file.name}`;
-  const { error: uploadError } = await supabase.storage
-    .from("brand-documents")
-    .upload(storagePath, file, { contentType: file.type });
-  if (uploadError) return { message: uploadError.message };
+  // The file itself already went direct browser-to-Storage before this
+  // action ever runs (see the client's upload handler) -- this only ever
+  // receives the resulting storage path, never the raw file, so a large PDF
+  // deck stays well under Vercel's Function request-body limit.
+  const storagePath = formData.get("storagePath");
+  const fileName = formData.get("fileName");
+  if (typeof storagePath !== "string" || !storagePath) return { message: "Choose a file first." };
 
   const { data, error } = await supabase
     .from("brand_documents")
@@ -201,7 +200,7 @@ export async function uploadBrandDocument(
       project_id: projectId,
       source_type: "file",
       storage_path: storagePath,
-      filename: file.name,
+      filename: typeof fileName === "string" ? fileName : "document",
       uploaded_by: user.id,
     })
     .select("id")

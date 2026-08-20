@@ -1173,6 +1173,11 @@ function MediaPickerDialog({
   const formRef = useRef<HTMLFormElement>(null);
   const router = useRouter();
   const [, startDeleteTransition] = useTransition();
+  // Surfaces a too-large/direct-upload-failed file before the Server Action
+  // ever runs (uploadFilesWithPosters rejects it client-side) -- shown
+  // alongside state?.message, which only ever covers the DB-side half of
+  // the upload now that the file itself uploads direct to Storage.
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
@@ -1199,7 +1204,10 @@ function MediaPickerDialog({
               onChange={(e) => {
                 const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
-                if (files.length > 0) uploadFilesWithPosters(action, files);
+                setUploadError(null);
+                if (files.length > 0) {
+                  uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+                }
               }}
             />
             <Button
@@ -1212,7 +1220,9 @@ function MediaPickerDialog({
             >
               {pending ? "Uploading..." : "Upload New Asset"}
             </Button>
-            {state?.message && <p className="mt-2 text-xs text-error">{state.message}</p>}
+            {(uploadError || state?.message) && (
+              <p className="mt-2 text-xs text-error">{uploadError || state?.message}</p>
+            )}
           </form>
         )}
 

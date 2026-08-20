@@ -179,10 +179,18 @@ export async function uploadContentAsset(
   _state: UploadContentAssetState,
   formData: FormData,
 ): Promise<UploadContentAssetState> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  // The file itself already went direct browser-to-Storage (see
+  // uploadFilesWithPosters in lib/video-poster.ts) before this action ever
+  // runs -- this only ever receives the resulting storage path, never the
+  // raw file, so it stays well under Vercel's Function request-body limit
+  // regardless of how large the actual upload was.
+  const storagePath = formData.get("storagePath");
+  const mediaTypeRaw = formData.get("mediaType");
+  const fileName = formData.get("fileName");
+  if (typeof storagePath !== "string" || !storagePath) {
     return { message: "Choose a file to upload." };
   }
+  const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
 
   const supabase = await createClient();
   const {
@@ -194,18 +202,6 @@ export async function uploadContentAsset(
     .from("stories")
     .select("*", { count: "exact", head: true })
     .eq("project_id", projectId);
-
-  const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-  const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(storagePath, file, { contentType: file.type });
-
-  if (uploadError) {
-    return { message: uploadError.message };
-  }
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
@@ -224,7 +220,7 @@ export async function uploadContentAsset(
   // Named from the file itself (minus extension) rather than "Untitled
   // story" -- these arrive as standalone assets, not something the user is
   // about to rename immediately the way a freshly created empty item is.
-  const name = file.name.replace(/\.[^./]+$/, "").trim() || "Untitled";
+  const name = (typeof fileName === "string" ? fileName : "").replace(/\.[^./]+$/, "").trim() || "Untitled";
 
   const { data: story, error: storyError } = await supabase
     .from("stories")
@@ -326,10 +322,17 @@ export async function uploadStoryFrame(
   _state: UploadStoryFrameState,
   formData: FormData,
 ): Promise<UploadStoryFrameState> {
-  const files = formData.getAll("file").filter((f): f is File => f instanceof File && f.size > 0);
-  if (files.length === 0) {
+  // The file itself already went direct browser-to-Storage (see
+  // uploadFilesWithPosters in lib/video-poster.ts) before this action ever
+  // runs -- this only ever receives the resulting storage path, never the
+  // raw file, so it stays well under Vercel's Function request-body limit
+  // regardless of how large the actual upload was.
+  const storagePath = formData.get("storagePath");
+  const mediaTypeRaw = formData.get("mediaType");
+  if (typeof storagePath !== "string" || !storagePath) {
     return { message: "Choose a file to upload." };
   }
+  const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
 
   const supabase = await createClient();
   const {
@@ -342,49 +345,33 @@ export async function uploadStoryFrame(
     .select("*", { count: "exact", head: true })
     .eq("story_id", storyId);
 
-  let position = startingCount ?? 0;
+  const position = startingCount ?? 0;
 
-  for (const file of files) {
-    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
-    const { error: uploadError } = await supabase.storage
-      .from("project-media")
-      .upload(storagePath, file, { contentType: file.type });
+  const { data: mediaAsset, error: insertError } = await supabase
+    .from("media_assets")
+    .insert({
+      project_id: projectId,
+      storage_path: storagePath,
+      media_type: mediaType,
+      uploaded_by: user.id,
+    })
+    .select("id")
+    .single();
 
-    if (uploadError) {
-      return { message: uploadError.message };
-    }
+  if (insertError || !mediaAsset) {
+    return { message: insertError?.message ?? "Failed to save media." };
+  }
 
-    const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
+  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
-    const { data: mediaAsset, error: insertError } = await supabase
-      .from("media_assets")
-      .insert({
-        project_id: projectId,
-        storage_path: storagePath,
-        media_type: mediaType,
-        uploaded_by: user.id,
-      })
-      .select("id")
-      .single();
+  const { error: frameError } = await supabase
+    .from("story_frames")
+    .insert({ story_id: storyId, media_asset_id: mediaAsset.id, position });
 
-    if (insertError || !mediaAsset) {
-      return { message: insertError?.message ?? "Failed to save media." };
-    }
-
-    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
-
-    const { error: frameError } = await supabase
-      .from("story_frames")
-      .insert({ story_id: storyId, media_asset_id: mediaAsset.id, position });
-
-    if (frameError) {
-      return { message: frameError.message };
-    }
-
-    position += 1;
+  if (frameError) {
+    return { message: frameError.message };
   }
 
   revalidatePath(`/projects/${projectId}/stories`);

@@ -138,32 +138,24 @@ export async function deleteBriefTask(projectId: string, taskId: string): Promis
   return { success: true };
 }
 
-// Shared by every path that creates an "image" brief_task_item -- a real
-// upload (addBriefTaskImage) and a pasted URL (addBriefTaskLink) end up
-// with the exact same brief_attachments + brief_task_items rows, so they're
-// indistinguishable afterward: same editable object, same "Edit Image"
-// flow, no link-shaped item ever created for either path.
-async function createBriefImageItem(
+// Shared by every path that creates an "image" brief_task_item, once the
+// bytes already live at `storagePath` in the brief-media bucket -- a real
+// upload (addBriefTaskImage, direct browser-to-Storage, see below) and a
+// pasted URL (addBriefTaskLink, createBriefImageItem's own server-side
+// fetch-then-upload) end up with the exact same brief_attachments +
+// brief_task_items rows, so they're indistinguishable afterward: same
+// editable object, same "Edit Image" flow, no link-shaped item ever
+// created for either path.
+async function insertBriefImageItem(
   projectId: string,
   taskId: string,
   section: BriefItemSection,
   notes: string,
   position: number,
-  fileBytes: File | Buffer,
-  contentType: string,
+  storagePath: string,
   fileName: string,
 ): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
   const supabase = await createClient();
-  const extFromName = fileName.includes(".") ? fileName.split(".").pop() : undefined;
-  const ext = extFromName || contentType.split("/").pop();
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("brief-media")
-    .upload(storagePath, fileBytes, { contentType });
-  if (uploadError) {
-    return { success: false, message: uploadError.message };
-  }
 
   const { data: attachment, error: attachmentError } = await supabase
     .from("brief_attachments")
@@ -191,6 +183,37 @@ async function createBriefImageItem(
 
   revalidatePath(`/projects/${projectId}/brief`);
   return { success: true, itemId: item?.id, attachmentId: attachment.id, label: fileName };
+}
+
+// Only reached from addBriefTaskLink now -- fetching an arbitrary external
+// URL happens server-side by necessity (there's no client File involved at
+// all), so this is the one real upload path that's still an exception to
+// "the browser uploads direct to Storage." The bytes here are always
+// small/moderate (a single web image), nowhere near Vercel's Function
+// request-body limit.
+async function createBriefImageItem(
+  projectId: string,
+  taskId: string,
+  section: BriefItemSection,
+  notes: string,
+  position: number,
+  fileBytes: Buffer,
+  contentType: string,
+  fileName: string,
+): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
+  const supabase = await createClient();
+  const extFromName = fileName.includes(".") ? fileName.split(".").pop() : undefined;
+  const ext = extFromName || contentType.split("/").pop();
+  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from("brief-media")
+    .upload(storagePath, fileBytes, { contentType });
+  if (uploadError) {
+    return { success: false, message: uploadError.message };
+  }
+
+  return insertBriefImageItem(projectId, taskId, section, notes, position, storagePath, fileName);
 }
 
 // og:image (checked both attribute orders) first, then twitter:image, then
@@ -345,11 +368,23 @@ export async function addBriefTaskImage(
   position: number,
   formData: FormData,
 ): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  // The file itself already went direct browser-to-Storage before this
+  // action ever runs (see the client's upload handler) -- this only ever
+  // receives the resulting storage path, never the raw file.
+  const storagePath = formData.get("storagePath");
+  const fileName = formData.get("fileName");
+  if (typeof storagePath !== "string" || !storagePath) {
     return { success: false, message: "No file provided." };
   }
-  return createBriefImageItem(projectId, taskId, section, notes, position, file, file.type, file.name);
+  return insertBriefImageItem(
+    projectId,
+    taskId,
+    section,
+    notes,
+    position,
+    storagePath,
+    typeof fileName === "string" ? fileName : "image",
+  );
 }
 
 // Edits an already-added link/image item's note -- previously notes could

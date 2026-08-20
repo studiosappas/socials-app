@@ -32,6 +32,8 @@ import { UndoIcon } from "../grid/grid-board";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskStatus, BriefTaskType } from "@/types/database";
 
 export type BriefTaskItem = {
@@ -738,8 +740,19 @@ function ItemSection({
     setImageError(undefined);
     setImagePending(true);
     startTransition(async () => {
+      // The file itself goes direct browser-to-Storage (brief-media bucket,
+      // same as this app's other uploads) before the action ever runs --
+      // bypasses Vercel's Function request-body limit entirely.
+      const path = newStoragePath(projectId, pendingFile.name);
+      const uploaded = await uploadFileDirect("brief-media", path, pendingFile);
+      if ("error" in uploaded) {
+        setImagePending(false);
+        setImageError(uploaded.error);
+        return;
+      }
       const formData = new FormData();
-      formData.set("file", pendingFile);
+      formData.set("storagePath", uploaded.path);
+      formData.set("fileName", fileName);
       const result = await addBriefTaskImage(projectId, taskId, section, notes, position, formData);
       setImagePending(false);
       if (!result.success) {
@@ -906,7 +919,19 @@ function ItemSection({
                 type="file"
                 accept="image/*"
                 className="hidden"
-                onChange={(e) => setPendingFile(e.target.files?.[0] ?? null)}
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  if (file) {
+                    const sizeCheck = validateUploadSize(file);
+                    if (!sizeCheck.ok) {
+                      setImageError(sizeCheck.message);
+                      e.target.value = "";
+                      return;
+                    }
+                  }
+                  setImageError(undefined);
+                  setPendingFile(file);
+                }}
               />
               <input ref={imageNotesRef} placeholder="Notes" className={notesInputClass} />
               <Button

@@ -29,6 +29,8 @@ import {
 import { saveMediaAssetAnnotation, saveMediaAssetPosterAnnotation } from "@/lib/actions/media";
 import { updatePostCoverTransform } from "@/lib/actions/grid";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import { saveAs } from "file-saver";
@@ -682,12 +684,29 @@ function ReplaceAssetPopover({
     });
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+
+    const sizeCheck = validateUploadSize(file);
+    if (!sizeCheck.ok) {
+      setError(sizeCheck.message);
+      return;
+    }
+
+    setPending(true);
+    setError(undefined);
+    const path = newStoragePath(projectId, file.name);
+    const uploaded = await uploadFileDirect("project-media", path, file);
+    if ("error" in uploaded) {
+      setPending(false);
+      setError(uploaded.error);
+      return;
+    }
     const formData = new FormData();
-    formData.set("file", file);
+    formData.set("storagePath", uploaded.path);
+    formData.set("mediaType", file.type.startsWith("video/") ? "video" : "image");
     runReplace(formData);
   }
 
@@ -766,6 +785,9 @@ function UploadAssetTile({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Surfaces a too-large/direct-upload-failed file before the Server Action
+  // ever runs (uploadFilesWithPosters rejects it client-side).
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (state?.success) onUploaded();
@@ -784,7 +806,10 @@ function UploadAssetTile({
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           e.target.value = "";
-          if (files.length > 0) uploadFilesWithPosters(action, files);
+          setUploadError(null);
+          if (files.length > 0) {
+            uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+          }
         }}
       />
       <button
@@ -796,7 +821,9 @@ function UploadAssetTile({
       >
         {pending ? "…" : "+"}
       </button>
-      {state?.message && <p className="text-xs text-error">{state.message}</p>}
+      {(uploadError || state?.message) && (
+        <p className="text-xs text-error">{uploadError || state?.message}</p>
+      )}
     </form>
   );
 }

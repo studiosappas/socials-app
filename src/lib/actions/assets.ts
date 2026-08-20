@@ -52,18 +52,13 @@ function parseFields(formData: FormData): ParsedFields {
 
 // Manual, not automatic -- there's no provider integration to pull a cover
 // from the folder's actual contents, so this is the only way a collection
-// gets a real cover instead of the placeholder icon.
-async function uploadCoverIfPresent(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  projectId: string,
-  formData: FormData,
-): Promise<string | null> {
-  const coverFile = formData.get("cover");
-  if (!(coverFile instanceof File) || coverFile.size === 0) return null;
-  const ext = coverFile.name.includes(".") ? coverFile.name.split(".").pop() : undefined;
-  const path = `${projectId}/asset-collections/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-  const { error } = await supabase.storage.from("project-media").upload(path, coverFile, { contentType: coverFile.type });
-  return error ? null : path;
+// gets a real cover instead of the placeholder icon. The cover itself
+// already went direct browser-to-Storage before this action ever runs (see
+// asset-board.tsx's handleSubmit) -- this only ever receives the resulting
+// storage path, never the raw file.
+function coverStoragePathFrom(formData: FormData): string | null {
+  const path = formData.get("cover_storage_path");
+  return typeof path === "string" && path ? path : null;
 }
 
 export async function addAssetCollection(
@@ -80,7 +75,7 @@ export async function addAssetCollection(
   const fields = parseFields(formData);
   if (!fields.ok) return { message: fields.message };
 
-  const coverStoragePath = await uploadCoverIfPresent(supabase, projectId, formData);
+  const coverStoragePath = coverStoragePathFrom(formData);
 
   const { error } = await supabase.from("asset_collections").insert({
     project_id: projectId,
@@ -112,7 +107,7 @@ export async function updateAssetCollection(
 
   // Only replaces the cover if a new file was actually picked -- otherwise
   // the existing one (if any) stays exactly as it was.
-  const coverStoragePath = await uploadCoverIfPresent(supabase, projectId, formData);
+  const coverStoragePath = coverStoragePathFrom(formData);
 
   const update: {
     folder_url: string;

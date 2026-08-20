@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { upsertLandingContent, resetLandingContent, uploadLandingImage } from "@/lib/actions/landing-admin";
 import { landingMediaUrl } from "@/lib/landing-media-url";
 import { LANDING_CONTENT_KEYS, type LandingContent, type LandingContentKey } from "@/lib/landing/content-context";
+import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
+import { validateUploadSize } from "@/lib/upload-limits";
 import type { Json } from "@/types/database";
 
 // One label per content key, in the same order they appear in the
@@ -25,6 +27,9 @@ const LABELS: Record<LandingContentKey, string> = {
   DEMO_MEDIA_LIBRARY_ITEMS: "Find Stage — Media Library Items",
   DEMO_SEARCH_MATCH_IDS: "Find Stage — Matched Item IDs",
   DEMO_SEARCH_INSPIRATION_IMAGE: "Find Stage — Inspiration Image",
+  DEMO_WORKSPACE_TILES: "Create Stage — Lead-in Tiles",
+  DEMO_BRIEF_TASK: "Create Stage — Brief Task",
+  DEMO_GRID_ROWS: "Create Stage — Grid Rows",
   DEMO_BRAND_DOCUMENTS: "Intelligence Stage — Brand Documents",
   DEMO_SPECTRUM: "Intelligence Stage — Brand Spectrum",
   DEMO_BRAND_ACCORDION: "Intelligence Stage — AI-Learned Fields",
@@ -75,8 +80,24 @@ function ImageUploader() {
     if (!file) return;
     setUploading(true);
     setMessage(undefined);
+
+    const sizeCheck = validateUploadSize(file);
+    if (!sizeCheck.ok) {
+      setMessage(sizeCheck.message);
+      setUploading(false);
+      return;
+    }
+
+    const storagePath = newStoragePath("uploads", file.name);
+    const uploaded = await uploadFileDirect("landing-media", storagePath, file);
+    if ("error" in uploaded) {
+      setMessage(uploaded.error);
+      setUploading(false);
+      return;
+    }
+
     const formData = new FormData();
-    formData.set("file", file);
+    formData.set("storagePath", uploaded.path);
     const result = await uploadLandingImage(formData);
     if (result.path) {
       setPath(result.path);

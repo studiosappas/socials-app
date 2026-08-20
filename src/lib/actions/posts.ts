@@ -156,10 +156,17 @@ export async function uploadPostAsset(
   _state: UploadPostAssetState,
   formData: FormData,
 ): Promise<UploadPostAssetState> {
-  const files = formData.getAll("file").filter((f): f is File => f instanceof File && f.size > 0);
-  if (files.length === 0) {
+  // The file itself already went direct browser-to-Storage (see
+  // uploadFilesWithPosters in lib/video-poster.ts) before this action ever
+  // runs -- this only ever receives the resulting storage path, never the
+  // raw file, so it stays well under Vercel's Function request-body limit
+  // regardless of how large the actual upload was.
+  const storagePath = formData.get("storagePath");
+  const mediaTypeRaw = formData.get("mediaType");
+  if (typeof storagePath !== "string" || !storagePath) {
     return { message: "Choose a file to upload." };
   }
+  const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
 
   const supabase = await createClient();
   const {
@@ -172,49 +179,33 @@ export async function uploadPostAsset(
     .select("*", { count: "exact", head: true })
     .eq("post_id", postId);
 
-  let position = startingCount ?? 0;
+  const position = startingCount ?? 0;
 
-  for (const file of files) {
-    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
-    const { error: uploadError } = await supabase.storage
-      .from("project-media")
-      .upload(storagePath, file, { contentType: file.type });
+  const { data: mediaAsset, error: insertError } = await supabase
+    .from("media_assets")
+    .insert({
+      project_id: projectId,
+      storage_path: storagePath,
+      media_type: mediaType,
+      uploaded_by: user.id,
+    })
+    .select("id")
+    .single();
 
-    if (uploadError) {
-      return { message: uploadError.message };
-    }
+  if (insertError || !mediaAsset) {
+    return { message: insertError?.message ?? "Failed to save media." };
+  }
 
-    const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
+  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
-    const { data: mediaAsset, error: insertError } = await supabase
-      .from("media_assets")
-      .insert({
-        project_id: projectId,
-        storage_path: storagePath,
-        media_type: mediaType,
-        uploaded_by: user.id,
-      })
-      .select("id")
-      .single();
+  const { error: assetError } = await supabase
+    .from("post_assets")
+    .insert({ post_id: postId, media_asset_id: mediaAsset.id, position });
 
-    if (insertError || !mediaAsset) {
-      return { message: insertError?.message ?? "Failed to save media." };
-    }
-
-    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
-
-    const { error: assetError } = await supabase
-      .from("post_assets")
-      .insert({ post_id: postId, media_asset_id: mediaAsset.id, position });
-
-    if (assetError) {
-      return { message: assetError.message };
-    }
-
-    position += 1;
+  if (assetError) {
+    return { message: assetError.message };
   }
 
   await syncPostType(supabase, postId);
@@ -255,32 +246,28 @@ export async function replacePostAsset(
   const supabase = await createClient();
 
   const existingMediaAssetId = String(formData.get("media_asset_id") ?? "").trim();
-  const file = formData.get("file");
+  // The file itself already went direct browser-to-Storage before this
+  // action ever runs (see ReplaceAssetPopover.handleFileChange) -- this only
+  // ever receives the resulting storage path, never the raw file.
+  const newStoragePathValue = formData.get("storagePath");
+  const mediaTypeRaw = formData.get("mediaType");
 
   let newMediaAssetId: string;
 
   if (existingMediaAssetId) {
     newMediaAssetId = existingMediaAssetId;
-  } else if (file instanceof File && file.size > 0) {
+  } else if (typeof newStoragePathValue === "string" && newStoragePathValue) {
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return { message: "You must be logged in." };
 
-    const mediaType: MediaType = file.type.startsWith("video/") ? "video" : "image";
-    const ext = file.name.includes(".") ? file.name.split(".").pop() : undefined;
-    const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("project-media")
-      .upload(storagePath, file, { contentType: file.type });
-    if (uploadError) return { message: uploadError.message };
-
+    const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
     const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
     const { data: mediaAsset, error: insertError } = await supabase
       .from("media_assets")
-      .insert({ project_id: projectId, storage_path: storagePath, media_type: mediaType, uploaded_by: user.id })
+      .insert({ project_id: projectId, storage_path: newStoragePathValue, media_type: mediaType, uploaded_by: user.id })
       .select("id")
       .single();
     if (insertError || !mediaAsset) return { message: insertError?.message ?? "Failed to save media." };

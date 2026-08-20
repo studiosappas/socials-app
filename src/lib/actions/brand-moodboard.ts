@@ -8,48 +8,45 @@ type ActionResult = { success: boolean; message?: string };
 
 const FONT_EXTENSIONS = new Set(["ttf", "otf", "woff", "woff2"]);
 
-// Same upload shape as grid.ts's uploadMedia -- files live in the same
-// project-media bucket every other project asset already uses, just tagged
-// with a moodboard category instead of becoming a Grid/post media_asset.
+// The file itself already went direct browser-to-Storage (see
+// direct-upload.ts's uploadFileDirect, called from brand-moodboard-dialog.tsx)
+// before this action ever runs -- bypasses Vercel's hard, non-configurable
+// ~4.5MB Function request-body limit that a FormData-through-this-action
+// upload was previously bound by. This only ever receives the resulting
+// storagePath + the original fileName (for the label default and the font
+// extension check below), never the raw file.
 //
 // fontMeta is only ever passed for category "font" -- everything else in
 // this app trusts file.type/extension with zero server-side validation, but
 // a font file that isn't actually a font just silently fails to render
 // anywhere it's used (FontFace().load() rejects), so this is the one
-// deliberate exception: reject before the upload if the extension isn't a
-// real font format.
+// deliberate exception: reject if the extension isn't a real font format.
 export async function uploadMoodboardItem(
   projectId: string,
   category: BrandMoodboardCategory,
   label: string,
-  formData: FormData,
+  storagePath: string,
+  fileName: string,
   fontMeta?: { fontFamily: string; fontWeight: string; fontStyle: string },
 ): Promise<ActionResult> {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  if (!storagePath) {
     return { success: false, message: "Choose a file to upload." };
   }
 
-  const ext = file.name.includes(".") ? file.name.split(".").pop()?.toLowerCase() : undefined;
+  const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : undefined;
 
   if (category === "font" && (!ext || !FONT_EXTENSIONS.has(ext))) {
     return { success: false, message: "Unsupported font file -- use .woff, .woff2, .ttf, or .otf." };
   }
 
   const supabase = await createClient();
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(storagePath, file, { contentType: file.type });
-  if (uploadError) return { success: false, message: uploadError.message };
 
   const { error } = await supabase.from("brand_moodboard_items").insert({
     project_id: projectId,
     category,
     kind: "file",
     storage_path: storagePath,
-    label: label.trim() || file.name,
+    label: label.trim() || fileName,
     ...(fontMeta
       ? { font_family: fontMeta.fontFamily, font_weight: fontMeta.fontWeight, font_style: fontMeta.fontStyle }
       : {}),

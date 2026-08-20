@@ -502,6 +502,9 @@ function UploadAssetsZone({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragDepth = useRef(0);
+  // Surfaces a too-large/direct-upload-failed file before the Server Action
+  // ever runs (uploadFilesWithPosters rejects it client-side).
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (state?.success) onUploaded();
@@ -512,7 +515,10 @@ function UploadAssetsZone({
     const files = Array.from(fileList).filter(
       (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
     );
-    if (files.length > 0) uploadFilesWithPosters(action, files);
+    setUploadError(null);
+    if (files.length > 0) {
+      uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+    }
   }
 
   if (!canManage) {
@@ -569,7 +575,9 @@ function UploadAssetsZone({
         </span>
       </button>
       {children}
-      {state?.message && <p className="col-span-full text-xs text-error">{state.message}</p>}
+      {(uploadError || state?.message) && (
+        <p className="col-span-full text-xs text-error">{uploadError || state?.message}</p>
+      )}
     </div>
   );
 }
