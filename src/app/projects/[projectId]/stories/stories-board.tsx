@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useActionState, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   bulkDeleteStories,
@@ -73,14 +73,17 @@ export function StoriesBoard({
   const [sharing, startSharing] = useTransition();
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  function handleToggleSelect(storyId: string) {
+  // useCallback (stable, empty deps) so StoryCard's React.memo below
+  // actually takes effect for every card instead of re-rendering all of
+  // them whenever StoriesBoard re-renders for an unrelated reason.
+  const handleToggleSelect = useCallback((storyId: string) => {
     setSelectedStoryIds((prev) => {
       const next = new Set(prev);
       if (next.has(storyId)) next.delete(storyId);
       else next.add(storyId);
       return next;
     });
-  }
+  }, []);
 
   function handleCancelSelection() {
     setSelectionMode(false);
@@ -97,14 +100,14 @@ export function StoriesBoard({
   const [bulkMoveDialogOpen, setBulkMoveDialogOpen] = useState(false);
   const [, startBulkAction] = useTransition();
 
-  function handleToggleBulkSelect(storyId: string) {
+  const handleToggleBulkSelect = useCallback((storyId: string) => {
     setBulkSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(storyId)) next.delete(storyId);
       else next.add(storyId);
       return next;
     });
-  }
+  }, []);
 
   function handleCancelBulkSelection() {
     setBulkSelectedIds(new Set());

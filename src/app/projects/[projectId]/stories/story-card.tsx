@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { memo, useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteStory, moveStoryToFolder } from "@/lib/actions/stories";
@@ -10,7 +10,12 @@ import type { ContentFolderItem, StoryFileItem } from "./stories-board";
 
 type MenuView = "root" | "move";
 
-export function StoryCard({
+// memo: one of these renders per Content card in the grid, and without it
+// every card re-rendered whenever StoriesBoard re-rendered for any reason
+// -- see the perf investigation this was added for. onToggleSelect/
+// onToggleBulkSelect are stabilized via useCallback at the call site
+// (stories-board.tsx) so this actually takes effect.
+export const StoryCard = memo(function StoryCard({
   projectId,
   storyId,
   name,
@@ -306,7 +311,7 @@ export function StoryCard({
       )}
     </div>
   );
-}
+});
 
 // Drive-style "click a file to see it full-size" preview -- unlike the
 // crop-oriented Lightbox shared by the Client Review/Shared Preview flows
