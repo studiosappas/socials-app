@@ -1,8 +1,7 @@
 ﻿import { createClient } from "@/lib/supabase/server";
 import { getShareLinksData } from "@/lib/data/share-links";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { StoriesBoard } from "./stories-board";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export default async function StoriesPage({
   params,
@@ -67,14 +66,7 @@ export default async function StoriesPage({
     ),
   );
 
-  const { data: signedUrls } = pathList.length
-    ? await supabase.storage.from("project-media").createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", pathList);
 
   // Frames arrive already ordered by `position` (the query above), so each
   // story's `files` array here is in the same order the editor shows them --

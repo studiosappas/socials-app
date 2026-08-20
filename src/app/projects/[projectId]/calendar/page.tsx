@@ -12,8 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-board";
 import { getProjectMemberOptions } from "@/lib/data/post-comments";
 import { mergeWorkspaceSettings } from "@/lib/account-settings";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 
 export default async function CalendarPage({
   params,
@@ -162,15 +161,7 @@ export default async function CalendarPage({
     if (p) pathSet.add(p);
   }
 
-  const pathList = Array.from(pathSet);
-  const { data: signedUrls } = pathList.length
-    ? await supabase.storage.from("project-media").createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(pathSet));
 
   const thumbnailByPost = new Map<string, string | null>();
   const assetsByPost = new Map<string, string[]>();
