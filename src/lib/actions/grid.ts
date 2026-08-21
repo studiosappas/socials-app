@@ -347,6 +347,13 @@ export async function reorderGridPosts(
 // own content and survives being moved to a different grid cell -- see the
 // schema comment on posts.cover_transform for why this replaced the old
 // grid_slots-keyed version.
+// Not revalidating /grid -- both callers (GridSlot's own crop overlay,
+// Post Editor's SortableAsset crop) already apply the new transform
+// optimistically client-side before this resolves, so a background
+// re-render here would only re-sign (and cause the browser to re-fetch)
+// every OTHER thumbnail on the board for a crop that already looks correct.
+// A real future navigation to /grid still picks up the change regardless,
+// since staleTimes.dynamic is 0 -- see next.config.ts.
 export async function updatePostCoverTransform(
   projectId: string,
   postId: string,
@@ -362,6 +369,4 @@ export async function updatePostCoverTransform(
   if (error) {
     throw new Error(error.message);
   }
-
-  revalidatePath(`/projects/${projectId}/grid`);
 }
