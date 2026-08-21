@@ -36,6 +36,8 @@ type SharedProps = {
   today: string;
   tomorrow: string;
   autoExpandComments: boolean;
+  onTaskDeleteStart: (id: string) => void;
+  onTaskDeleteFailed: (task: TaskItem, message: string) => void;
 };
 
 export function BoardView(props: SharedProps) {
@@ -59,6 +61,8 @@ function DesktopBoard({
   today,
   tomorrow,
   autoExpandComments,
+  onTaskDeleteStart,
+  onTaskDeleteFailed,
 }: SharedProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
@@ -108,6 +112,8 @@ function DesktopBoard({
                         onStatusChange={(status) => onStatusChange(task.id, status)}
                         onOpenLinkedContent={() => onOpenLinkedContent(task)}
                         autoExpandComments={autoExpandComments}
+                        onDeleteStart={onTaskDeleteStart}
+                        onDeleteFailed={onTaskDeleteFailed}
                       />
                     )}
                   </DraggableTaskCard>
@@ -171,6 +177,8 @@ function MobileBoard({
   today,
   tomorrow,
   autoExpandComments,
+  onTaskDeleteStart,
+  onTaskDeleteFailed,
 }: SharedProps) {
   const [activeTab, setActiveTab] = useState<TaskStatus>("todo");
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -238,6 +246,8 @@ function MobileBoard({
                         onStatusChange={(status) => onStatusChange(task.id, status)}
                         onOpenLinkedContent={() => onOpenLinkedContent(task)}
                         autoExpandComments={autoExpandComments}
+                        onDeleteStart={onTaskDeleteStart}
+                        onDeleteFailed={onTaskDeleteFailed}
                       />
                     )}
                   </div>

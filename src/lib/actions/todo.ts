@@ -6,7 +6,7 @@ import { getTaskComments, type TaskCommentItem } from "@/lib/data/tasks";
 import { notifyMentions } from "@/lib/notifications";
 import type { TaskStatus } from "@/types/database";
 
-export type TaskFormState = { message?: string; success?: boolean } | undefined;
+export type TaskFormState = { message?: string; success?: boolean; taskId?: string } | undefined;
 
 function normalizeDueDate(formData: FormData): string | null {
   const raw = formData.get("due_date");
@@ -36,18 +36,23 @@ export async function createTask(
   // a personal (no-project) task ignores whatever assignee_id was posted.
   const assigneeId = projectId ? normalizeOptional(formData, "assignee_id") : null;
 
-  const { error } = await supabase.from("tasks").insert({
-    user_id: user.id,
-    project_id: projectId,
-    title,
-    notes: String(formData.get("notes") ?? ""),
-    due_date: normalizeDueDate(formData),
-    assignee_id: assigneeId,
-  });
+  const { data, error } = await supabase
+    .from("tasks")
+    .insert({
+      user_id: user.id,
+      project_id: projectId,
+      title,
+      notes: String(formData.get("notes") ?? ""),
+      due_date: normalizeDueDate(formData),
+      assignee_id: assigneeId,
+    })
+    .select("id")
+    .single();
 
   if (error) return { message: error.message };
-  revalidatePath("/tasks");
-  return { success: true };
+  // Not revalidating -- its one caller (NewTaskDialog) already inserts the
+  // new task optimistically and reconciles the real id returned here.
+  return { success: true, taskId: data?.id };
 }
 
 export async function updateTask(
@@ -91,10 +96,15 @@ export async function updateTaskAssignee(taskId: string, assigneeId: string | nu
 }
 
 // Not revalidating -- its one caller (task-detail.tsx's handleDelete)
-// already calls router.refresh() itself right after this resolves.
-export async function deleteTask(taskId: string) {
+// already hides the task optimistically before this runs, and only
+// restores it + surfaces a toast if the delete actually failed.
+export async function deleteTask(
+  taskId: string,
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
-  await supabase.from("tasks").delete().eq("id", taskId);
+  const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+  if (error) return { success: false, message: error.message };
+  return { success: true };
 }
 
 export async function addTaskComment(
