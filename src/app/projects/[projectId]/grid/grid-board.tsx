@@ -874,6 +874,10 @@ const GridSlot = memo(function GridSlot({
 
   const [cropMode, setCropMode] = useState(false);
   const [contentMenuOpen, setContentMenuOpen] = useState(false);
+  // Stable regardless of how often this slot re-renders (see the
+  // dnd-kit note below) -- setContentMenuOpen is itself stable, so an
+  // empty-deps useCallback here never breaks GridSlotBody's memo.
+  const handleToggleMenu = useCallback(() => setContentMenuOpen((v) => !v), []);
   const contentMenuRef = useOutsideClick<HTMLDivElement>(contentMenuOpen, () => setContentMenuOpen(false));
   const [, startDeleteTransition] = useTransition();
   const [prevSlot, setPrevSlot] = useState(slot);
@@ -919,6 +923,19 @@ const GridSlot = memo(function GridSlot({
     })();
   }, [canManage, demoMode, projectId, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
 
+  // Warms the intercepted Post Editor route's RSC payload (its own
+  // page.tsx runs a dozen-plus sequential Supabase queries + signs the
+  // whole project's media library) as soon as this tile is on screen,
+  // instead of only starting that fetch the instant the user clicks --
+  // router.push has no prefetch of its own, so without this every click
+  // was a fully cold navigation. Keyed on postId (not re-run on every
+  // drag-triggered re-render) since prefetch is a one-time warm, not
+  // something to repeat.
+  useEffect(() => {
+    if (!slot.postId || demoMode) return;
+    router.prefetch(`/projects/${projectId}/posts/${slot.postId}`);
+  }, [slot.postId, projectId, demoMode, router]);
+
   // dnd-kit's PointerSensor listens on this same element, and its pointerdown
   // handling suppresses the browser's native "dblclick" synthesis -- so
   // single-vs-double click is disambiguated manually here (via elapsed time
@@ -958,36 +975,58 @@ const GridSlot = memo(function GridSlot({
     }, DOUBLE_CLICK_WINDOW_MS);
   }
 
-  async function handleSaveCrop(next: GridCoverTransform) {
-    if (!slot.postId) return;
-    const postId = slot.postId;
-    const previousTransform = effectiveTransform;
-    setOverrideTransform(next);
-    setCropMode(false);
-    // The crop itself is applied above (real, visible) -- demoMode skips
-    // persisting/undo-redo, same reasoning as the drag-and-drop branches.
-    if (demoMode) return;
-    try {
-      await updatePostCoverTransform(projectId, postId, next);
-      pushCommand({
-        label: "Crop",
-        undo: async () => {
-          setOverrideTransform(previousTransform);
-          await updatePostCoverTransform(projectId, postId, previousTransform);
-        },
-        redo: async () => {
-          setOverrideTransform(next);
-          await updatePostCoverTransform(projectId, postId, next);
-        },
-      });
-    } catch (error) {
-      console.error("Failed to save crop:", error);
-      setOverrideTransform(undefined);
-      router.refresh();
-    }
-  }
+  // useCallback below (not plain functions) -- these are passed as props
+  // into GridSlotBody's memo() boundary, so a fresh closure every render
+  // (which happens on every dnd-kit-driven re-render of THIS component,
+  // not just when something the user cares about changed -- see the note
+  // on GridSlotBody itself) would defeat that memo for every slot on the
+  // board on every pointer-move frame during any drag, not just this one.
+  const handleSaveCrop = useCallback(
+    async (next: GridCoverTransform) => {
+      if (!slot.postId) return;
+      const postId = slot.postId;
+      const previousTransform = effectiveTransform;
+      setOverrideTransform(next);
+      setCropMode(false);
+      // The crop itself is applied above (real, visible) -- demoMode skips
+      // persisting/undo-redo, same reasoning as the drag-and-drop branches.
+      if (demoMode) return;
+      try {
+        await updatePostCoverTransform(projectId, postId, next);
+        pushCommand({
+          label: "Crop",
+          undo: async () => {
+            setOverrideTransform(previousTransform);
+            await updatePostCoverTransform(projectId, postId, previousTransform);
+          },
+          redo: async () => {
+            setOverrideTransform(next);
+            await updatePostCoverTransform(projectId, postId, next);
+          },
+        });
+      } catch (error) {
+        console.error("Failed to save crop:", error);
+        setOverrideTransform(undefined);
+        router.refresh();
+      }
+    },
+    [slot.postId, effectiveTransform, demoMode, projectId, pushCommand, router],
+  );
 
-  function handleDeletePost() {
+  const handleCancelCrop = useCallback(() => setCropMode(false), []);
+
+  const handleEditContent = useCallback(() => {
+    setContentMenuOpen(false);
+    if (demoMode) return;
+    router.push(`/projects/${projectId}/posts/${slot.postId}`);
+  }, [demoMode, projectId, slot.postId, router]);
+
+  const handleOpenCropFromMenu = useCallback(() => {
+    setContentMenuOpen(false);
+    setCropMode(true);
+  }, []);
+
+  const handleDeletePost = useCallback(() => {
     if (!slot.postId) return;
     const postId = slot.postId;
     setContentMenuOpen(false);
@@ -1011,9 +1050,9 @@ const GridSlot = memo(function GridSlot({
         router.refresh();
       }
     });
-  }
+  }, [slot.postId, projectId, startDeleteTransition, router]);
 
-  function handleRemoveRow() {
+  const handleRemoveRow = useCallback(() => {
     setContentMenuOpen(false);
     if (!confirm("Remove this row? This can't be undone.")) return;
     onRequestRemoveRow();
@@ -1025,7 +1064,7 @@ const GridSlot = memo(function GridSlot({
         router.refresh();
       }
     });
-  }
+  }, [onRequestRemoveRow, projectId, rowId, startDeleteTransition, router]);
 
   return (
     <div
@@ -1051,12 +1090,83 @@ const GridSlot = memo(function GridSlot({
           : "outline outline-1 outline-offset-[-1px] outline-transparent"
       }`}
     >
+      <GridSlotBody
+        slot={effectiveSlot}
+        transform={effectiveTransform}
+        canManage={canManage}
+        selectionMode={selectionMode}
+        selected={selected}
+        demoMode={demoMode}
+        cropMode={cropMode}
+        contentMenuOpen={contentMenuOpen}
+        contentMenuRef={contentMenuRef}
+        onToggleMenu={handleToggleMenu}
+        onEditContent={handleEditContent}
+        onOpenCropFromMenu={handleOpenCropFromMenu}
+        onDeletePost={handleDeletePost}
+        onRemoveRow={handleRemoveRow}
+        onSaveCrop={handleSaveCrop}
+        onCancelCrop={handleCancelCrop}
+      />
+    </div>
+  );
+});
+
+// Split out of GridSlot so dnd-kit's own per-frame re-renders of the
+// dragged item's SIBLINGS (useSortable subscribes every sortable slot to
+// the shared DndContext, so all of them re-render as `transform` updates
+// on every pointer move during a drag -- memo() on GridSlot itself can't
+// prevent this, since it's driven by an internal hook/context subscription,
+// not by GridSlot's own props) don't also force React to reconcile the
+// expensive part of every tile -- the image, badges, ⋮ menu, and crop
+// overlay -- on every one of those frames. GridSlot's outer wrapper (the
+// transform-styled div) still legitimately re-renders every frame; this is
+// the part that doesn't need to, and now won't, as long as its own props
+// stay reference-stable (see the useCallback wrapping every handler passed
+// in above).
+const GridSlotBody = memo(function GridSlotBody({
+  slot,
+  transform,
+  canManage,
+  selectionMode,
+  selected,
+  demoMode,
+  cropMode,
+  contentMenuOpen,
+  contentMenuRef,
+  onToggleMenu,
+  onEditContent,
+  onOpenCropFromMenu,
+  onDeletePost,
+  onRemoveRow,
+  onSaveCrop,
+  onCancelCrop,
+}: {
+  slot: GridBoardSlot;
+  transform: GridCoverTransform | null;
+  canManage: boolean;
+  selectionMode: boolean;
+  selected: boolean;
+  demoMode: boolean;
+  cropMode: boolean;
+  contentMenuOpen: boolean;
+  contentMenuRef: React.RefObject<HTMLDivElement | null>;
+  onToggleMenu: () => void;
+  onEditContent: () => void;
+  onOpenCropFromMenu: () => void;
+  onDeletePost: () => void;
+  onRemoveRow: () => void;
+  onSaveCrop: (next: GridCoverTransform) => void;
+  onCancelCrop: () => void;
+}) {
+  return (
+    <>
       {/* overflow-hidden lives on this inner wrapper (not the slot root) so
           it only ever clips the image -- the ⋮ menu below is a sibling, not
           a descendant, so it can render outside the tile's own bounds
           instead of being cropped by it. */}
       <div className={`absolute inset-0 flex items-center justify-center ${cropMode ? "" : "overflow-hidden"}`}>
-        {effectiveSlot.thumbnailUrl ? (
+        {slot.thumbnailUrl ? (
           // Always a static <img>, even when the cover is a video -- this is
           // the video's poster frame (captured client-side at upload time),
           // never the video file itself. Grid never plays/autoplays video.
@@ -1071,15 +1181,15 @@ const GridSlot = memo(function GridSlot({
             // still replays the animate-settle-in entrance whenever the
             // cover asset genuinely changes (upload/crop/replace), just not
             // on an unrelated re-sign.
-            key={effectiveSlot.coverMediaAssetId ?? effectiveSlot.id}
-            src={effectiveSlot.thumbnailUrl}
+            key={slot.coverMediaAssetId ?? slot.id}
+            src={slot.thumbnailUrl}
             alt=""
             loading="lazy"
             className="h-full w-full animate-settle-in object-cover"
             draggable={false}
-            style={coverTransformStyle(effectiveTransform)}
+            style={coverTransformStyle(transform)}
           />
-        ) : effectiveSlot.coverMediaType === "video" ? (
+        ) : slot.coverMediaType === "video" ? (
           // A video cover with no poster yet (e.g. uploaded before this
           // feature existed, or poster capture failed) -- still distinct
           // from a truly empty slot.
@@ -1096,7 +1206,7 @@ const GridSlot = memo(function GridSlot({
           <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
         )}
       </div>
-      {effectiveSlot.coverMediaType === "video" && (
+      {slot.coverMediaType === "video" && (
         <span
           title="Video"
           className="absolute bottom-1 left-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-[9px] text-white"
@@ -1112,7 +1222,7 @@ const GridSlot = memo(function GridSlot({
           instead -- same "one small badge, top-left" language, just a
           different moment (there's no reason to see the scheduled-date
           badge and the selection circle at once). */}
-      {selectionMode && effectiveSlot.postId ? (
+      {selectionMode && slot.postId ? (
         <span
           title={selected ? "Deselect" : "Select"}
           className="absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full"
@@ -1129,18 +1239,18 @@ const GridSlot = memo(function GridSlot({
           )}
         </span>
       ) : (
-        effectiveSlot.scheduledDate && (
+        slot.scheduledDate && (
           <span
-            title={`Scheduled for ${effectiveSlot.scheduledDate}`}
+            title={`Scheduled for ${slot.scheduledDate}`}
             className="absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
           >
             <ScheduledIcon className="h-2.5 w-2.5" />
           </span>
         )
       )}
-      {effectiveSlot.assetCount > 1 && (
+      {slot.assetCount > 1 && (
         <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
-          {effectiveSlot.assetCount}
+          {slot.assetCount}
         </span>
       )}
       {canManage && (
@@ -1149,7 +1259,7 @@ const GridSlot = memo(function GridSlot({
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              setContentMenuOpen((v) => !v);
+              onToggleMenu();
             }}
             title="Slot options"
             className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
@@ -1161,34 +1271,28 @@ const GridSlot = memo(function GridSlot({
               onClick={(e) => e.stopPropagation()}
               className="absolute right-0 top-7 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
-              {effectiveSlot.postId && !demoMode && (
+              {slot.postId && !demoMode && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setContentMenuOpen(false);
-                    router.push(`/projects/${projectId}/posts/${effectiveSlot.postId}`);
-                  }}
+                  onClick={onEditContent}
                   className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Edit Content
                 </button>
               )}
-              {effectiveSlot.thumbnailUrl && (
+              {slot.thumbnailUrl && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setContentMenuOpen(false);
-                    setCropMode(true);
-                  }}
+                  onClick={onOpenCropFromMenu}
                   className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Crop Image
                 </button>
               )}
-              {effectiveSlot.postId && !demoMode && (
+              {slot.postId && !demoMode && (
                 <button
                   type="button"
-                  onClick={handleDeletePost}
+                  onClick={onDeletePost}
                   className="w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Delete Content
@@ -1197,7 +1301,7 @@ const GridSlot = memo(function GridSlot({
               {!demoMode && (
                 <button
                   type="button"
-                  onClick={handleRemoveRow}
+                  onClick={onRemoveRow}
                   className="w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Remove Row
@@ -1207,15 +1311,15 @@ const GridSlot = memo(function GridSlot({
           )}
         </div>
       )}
-      {cropMode && effectiveSlot.thumbnailUrl && (
+      {cropMode && slot.thumbnailUrl && (
         <GridCropOverlay
-          imageUrl={effectiveSlot.thumbnailUrl}
-          initialTransform={effectiveTransform}
-          onSave={handleSaveCrop}
-          onCancel={() => setCropMode(false)}
+          imageUrl={slot.thumbnailUrl}
+          initialTransform={transform}
+          onSave={onSaveCrop}
+          onCancel={onCancelCrop}
         />
       )}
-    </div>
+    </>
   );
 });
 
