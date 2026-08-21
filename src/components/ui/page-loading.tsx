@@ -25,8 +25,11 @@ import { FlowerLoader } from "./flower-loader";
 // opening feels instant," not a page-shape guess.
 export function PageLoading({ title }: { title?: string }) {
   return (
-    <div className="flex min-h-[40vh] flex-col gap-6">
+    <div className="flex h-full min-h-[50vh] flex-col gap-6">
       {title && <h1 className="text-xs font-semibold tracking-wide uppercase text-muted">{title}</h1>}
+      {/* flex-1 (not the title's own height) is what actually gets centered
+          in -- the symbol should sit in the middle of the remaining content
+          area, not hug directly under the title. */}
       <div className="flex flex-1 items-center justify-center">
         <FlowerLoader />
       </div>
