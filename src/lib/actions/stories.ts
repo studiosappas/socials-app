@@ -360,7 +360,11 @@ export async function updateStory(
   return { success: true };
 }
 
-export async function addStoryFrame(projectId: string, storyId: string, mediaAssetId: string) {
+export async function addStoryFrame(
+  projectId: string,
+  storyId: string,
+  mediaAssetId: string,
+): Promise<{ success: true; frameId: string } | { success: false; message: string }> {
   const supabase = await createClient();
 
   const { count } = await supabase
@@ -368,20 +372,23 @@ export async function addStoryFrame(projectId: string, storyId: string, mediaAss
     .select("*", { count: "exact", head: true })
     .eq("story_id", storyId);
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("story_frames")
-    .insert({ story_id: storyId, media_asset_id: mediaAssetId, position: count ?? 0 });
+    .insert({ story_id: storyId, media_asset_id: mediaAssetId, position: count ?? 0 })
+    .select("id")
+    .single();
 
-  if (error) {
-    throw new Error(error.message);
+  if (error || !data) {
+    return { success: false, message: error?.message ?? "Failed to add frame." };
   }
 
   // Not revalidating this action's own route (/stories/[storyId]) -- its
-  // one caller (story-editor.tsx's "Add from library" click) already calls
-  // router.refresh() itself right after this resolves. /stories (the list)
-  // is a genuinely different route, kept as-is (a new frame can change
-  // that story's list thumbnail).
+  // one caller (story-editor.tsx's "Add from library" click) already shows
+  // the new frame optimistically and reconciles the real id returned here.
+  // /stories (the list) is a genuinely different route, kept as-is (a new
+  // frame can change that story's list thumbnail).
   revalidatePath(`/projects/${projectId}/stories`);
+  return { success: true, frameId: data.id };
 }
 
 export type UploadStoryFrameState = { message?: string; success?: boolean } | undefined;

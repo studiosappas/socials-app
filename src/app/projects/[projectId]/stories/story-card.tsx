@@ -58,6 +58,10 @@ export const StoryCard = memo(function StoryCard({
   const [downloading, setDownloading] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [deleted, setDeleted] = useState(false);
+  // Moving out of the current view (a different folder, or Unfiled) makes
+  // this card disappear here too -- same "gone from this list" shape as
+  // delete, just via a different reason.
+  const [moved, setMoved] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => {
     setMenuOpen(false);
     setMenuView("root");
@@ -73,7 +77,7 @@ export const StoryCard = memo(function StoryCard({
     router.prefetch(href);
   }, [href, router]);
 
-  if (deleted) return null;
+  if (deleted || moved) return null;
 
   function handleDelete() {
     setMenuOpen(false);
@@ -93,8 +97,18 @@ export const StoryCard = memo(function StoryCard({
   function handleMove(folderId: string | null) {
     setMenuOpen(false);
     setMenuView("root");
+    setMoved(true);
     startTransition(async () => {
-      await moveStoryToFolder(projectId, storyId, folderId);
+      const result = await moveStoryToFolder(projectId, storyId, folderId);
+      if (!result.success) {
+        console.error("Failed to move story:", result.message);
+        setMoved(false);
+        router.refresh();
+        return;
+      }
+      // Still refresh on success -- the underlying `stories` prop's
+      // folderId is now stale, and a later navigation into the target
+      // folder (without a hard reload) needs it to be current.
       router.refresh();
     });
   }

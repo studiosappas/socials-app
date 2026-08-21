@@ -246,12 +246,30 @@ export function StoryEditor({
               <button
                 key={item.id}
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  // Optimistic insert -- mediaAssetId/url/mediaType are
+                  // already known client-side (it's picked from the media
+                  // library, not a fresh upload), so the new frame can show
+                  // immediately with a temp id, then get patched to the
+                  // real id once the insert resolves. Reverts (removes the
+                  // placeholder) and surfaces a toast if the insert fails.
+                  const tempId = `temp-${item.id}-${Date.now()}`;
+                  setOrderedFrames((current) => [
+                    ...current,
+                    { frameId: tempId, mediaAssetId: item.id, url: item.url, mediaType: item.mediaType, linkUrl: null },
+                  ]);
                   startTransition(async () => {
-                    await addStoryFrame(projectId, story.id, item.id);
-                    router.refresh();
-                  })
-                }
+                    const result = await addStoryFrame(projectId, story.id, item.id);
+                    if (result.success) {
+                      setOrderedFrames((current) =>
+                        current.map((f) => (f.frameId === tempId ? { ...f, frameId: result.frameId } : f)),
+                      );
+                    } else {
+                      setOrderedFrames((current) => current.filter((f) => f.frameId !== tempId));
+                      showError(result.message ?? "Couldn't add that frame.");
+                    }
+                  });
+                }}
                 className="aspect-[9/16] overflow-hidden rounded-none border border-border"
               >
                 {item.url && item.mediaType === "image" && (
