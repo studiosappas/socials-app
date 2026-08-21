@@ -62,12 +62,20 @@ type EligibleAsset = { id: string; storagePath: string; projectId: string };
 async function getEligibleImages(
   supabase: SupabaseClient<Database>,
   excludeIds: string[],
+  projectId: string | null,
 ): Promise<EligibleAsset[]> {
-  const { data, error } = await supabase
+  let query = supabase
     .from("media_assets")
     .select("id, storage_path, project_id, archived")
     .eq("media_type", "image")
     .is("thumbnail_storage_path", null);
+  // Optional: scopes to one specific project -- lets an admin deliberately
+  // test against a real, known project (e.g. "run 5 from OPEN CHAPTER")
+  // instead of a batch just picking up whichever rows happen to sort
+  // first, which is how an unrelated project's old placeholder assets
+  // ended up in the very first test run.
+  if (projectId) query = query.eq("project_id", projectId);
+  const { data, error } = await query;
   if (error) throw new Error(`Couldn't load media assets: ${error.message}`);
   const excludeSet = new Set(excludeIds);
   return (data ?? [])
@@ -84,7 +92,7 @@ export async function getThumbnailBackfillStatus(): Promise<ThumbnailBackfillSta
   const supabase = await requireAdminServiceClient();
   const projects = await getAllProjects(supabase);
   const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
-  const eligible = await getEligibleImages(supabase, []);
+  const eligible = await getEligibleImages(supabase, [], null);
 
   const missingByProject = new Map<string, number>();
   for (const asset of eligible) {
@@ -122,11 +130,12 @@ export type ThumbnailBackfillBatchResult = {
 export async function runThumbnailBackfillBatch(
   batchSize: number,
   excludeIds: string[],
+  projectId: string | null = null,
 ): Promise<ThumbnailBackfillBatchResult> {
   const supabase = await requireAdminServiceClient();
   const projects = await getAllProjects(supabase);
   const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
-  const eligible = await getEligibleImages(supabase, excludeIds);
+  const eligible = await getEligibleImages(supabase, excludeIds, projectId);
   const batch = eligible.slice(0, Math.max(1, batchSize));
 
   const succeeded: ThumbnailBackfillBatchResult["succeeded"] = [];

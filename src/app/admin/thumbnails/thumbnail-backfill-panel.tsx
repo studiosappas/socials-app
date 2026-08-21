@@ -28,6 +28,13 @@ type SucceededItem = { id: string; projectName: string; originalBytes: number; t
 
 export function ThumbnailBackfillPanel({ initialStatus }: { initialStatus: ThumbnailBackfillStatus }) {
   const [status] = useState(initialStatus);
+  // null = every project. Defaults to "All projects" but lets an admin
+  // deliberately scope a test batch to one known, real project (e.g.
+  // OPEN CHAPTER or Coconut Love) instead of whichever rows the query
+  // happens to return first -- which is how the very first test run
+  // ended up pulling 5 old placeholder assets from an unrelated test
+  // project instead of real production images.
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [phase, setPhase] = useState<"idle" | "busy" | "test-done" | "done">("idle");
   const [excludeIds, setExcludeIds] = useState<string[]>([]);
   const [succeeded, setSucceeded] = useState<SucceededItem[]>([]);
@@ -36,14 +43,32 @@ export function ThumbnailBackfillPanel({ initialStatus }: { initialStatus: Thumb
   const [progressNote, setProgressNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const selectedProjectMissing = selectedProjectId
+    ? (status.byProject.find((p) => p.projectId === selectedProjectId)?.missing ?? 0)
+    : status.totalMissing;
+
+  function handleSelectProject(projectId: string | null) {
+    setSelectedProjectId(projectId);
+    // A new project selection is a fresh run against a different set of
+    // rows -- carrying over a previous project's excluded/failed ids
+    // would make no sense here.
+    setPhase("idle");
+    setExcludeIds([]);
+    setSucceeded([]);
+    setFailed([]);
+    setError(null);
+    setProgressNote(null);
+    setRemaining(projectId ? (status.byProject.find((p) => p.projectId === projectId)?.missing ?? 0) : status.totalMissing);
+  }
+
   async function runOneBatch(batchSize: number, currentExclude: string[]): Promise<ThumbnailBackfillBatchResult> {
-    return runThumbnailBackfillBatch(batchSize, currentExclude);
+    return runThumbnailBackfillBatch(batchSize, currentExclude, selectedProjectId);
   }
 
   async function handleTestBatch() {
     setError(null);
     setPhase("busy");
-    setProgressNote(`Processing a test batch of ${TEST_BATCH_SIZE}…`);
+    setProgressNote(`Processing a test batch of ${Math.min(TEST_BATCH_SIZE, selectedProjectMissing)}…`);
     try {
       const result = await runOneBatch(TEST_BATCH_SIZE, excludeIds);
       setSucceeded(result.succeeded);
@@ -66,7 +91,7 @@ export function ThumbnailBackfillPanel({ initialStatus }: { initialStatus: Thumb
     let allSucceeded = succeeded;
     let allFailed = failed;
     let totalAttempted = succeeded.length + failed.length;
-    const grandTotal = status.totalMissing;
+    const grandTotal = selectedProjectMissing;
 
     try {
       // Loops client-side, one small batch per call, rather than one huge
@@ -121,12 +146,29 @@ export function ThumbnailBackfillPanel({ initialStatus }: { initialStatus: Thumb
         </ul>
       </div>
 
+      <label className="flex flex-col gap-1.5 text-xs text-muted">
+        Test/process a specific project first (recommended), or run across all of them
+        <select
+          value={selectedProjectId ?? ""}
+          onChange={(e) => handleSelectProject(e.target.value || null)}
+          disabled={phase === "busy"}
+          className="rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+        >
+          <option value="">All projects ({status.totalMissing} images)</option>
+          {status.byProject.map((p) => (
+            <option key={p.projectId} value={p.projectId}>
+              {p.projectName} ({p.missing} images)
+            </option>
+          ))}
+        </select>
+      </label>
+
       {error && <p className="text-sm text-error">{error}</p>}
       {progressNote && <p className="text-sm text-muted">{progressNote}</p>}
 
       {phase === "idle" && (
         <Button type="button" variant="primary" radius="none" onClick={handleTestBatch}>
-          Run test batch ({Math.min(TEST_BATCH_SIZE, status.totalMissing)} images)
+          Run test batch ({Math.min(TEST_BATCH_SIZE, selectedProjectMissing)} images)
         </Button>
       )}
 
