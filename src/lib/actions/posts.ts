@@ -8,6 +8,7 @@ import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/ta
 import { deriveAutoTaskTitle } from "@/lib/task-title";
 import { getPostPageData, type PostPageData } from "@/lib/data/posts";
 import { syncPostType } from "@/lib/post-type";
+import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
@@ -196,6 +197,13 @@ export async function uploadPostAsset(
     return { message: "Choose a file to upload." };
   }
   const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
+  // Same "already uploaded direct, this is just the resulting path" shape
+  // as storagePath/poster above -- see uploadFilesWithPosters' own
+  // generateImageThumbnailBlob call, and grid.ts's uploadMedia (the
+  // original, now-shared version of this fallback pattern).
+  const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
+  let thumbnailStoragePath =
+    typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
   const {
@@ -212,6 +220,14 @@ export async function uploadPostAsset(
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
+  // The browser already tried -- this only runs when that failed (e.g. a
+  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
+  // server-thumbnail.ts's own comment for the full reasoning.
+  if (!thumbnailStoragePath && mediaType === "image") {
+    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+    thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
+  }
+
   const { data: mediaAsset, error: insertError } = await supabase
     .from("media_assets")
     .insert({
@@ -219,6 +235,7 @@ export async function uploadPostAsset(
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
+      thumbnail_storage_path: thumbnailStoragePath,
     })
     .select("id")
     .single();
@@ -294,9 +311,26 @@ export async function replacePostAsset(
     const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
     const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
+    // Unlike uploadPostAsset above, this specific upload UI
+    // (ReplaceAssetPopover.handleFileChange) never attempts client-side
+    // thumbnail generation at all -- it calls uploadFileDirect straight,
+    // not the shared uploadFilesWithPosters helper -- so this always runs
+    // for a new image here, not just as a fallback for a client failure.
+    let thumbnailStoragePath: string | null = null;
+    if (mediaType === "image") {
+      const serverThumb = await generateServerThumbnail(supabase, "project-media", newStoragePathValue, projectId);
+      thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
+    }
+
     const { data: mediaAsset, error: insertError } = await supabase
       .from("media_assets")
-      .insert({ project_id: projectId, storage_path: newStoragePathValue, media_type: mediaType, uploaded_by: user.id })
+      .insert({
+        project_id: projectId,
+        storage_path: newStoragePathValue,
+        media_type: mediaType,
+        uploaded_by: user.id,
+        thumbnail_storage_path: thumbnailStoragePath,
+      })
       .select("id")
       .single();
     if (insertError || !mediaAsset) return { message: insertError?.message ?? "Failed to save media." };

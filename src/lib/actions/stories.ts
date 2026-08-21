@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
+import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaType, StoryStatus } from "@/types/database";
 
 // Same reasoning as fetchPostForModal in lib/actions/posts.ts -- lets the
@@ -191,6 +192,13 @@ export async function uploadContentAsset(
     return { message: "Choose a file to upload." };
   }
   const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
+  // Same "already uploaded direct, this is just the resulting path" shape
+  // as storagePath/poster above -- see uploadFilesWithPosters' own
+  // generateImageThumbnailBlob call, and grid.ts's uploadMedia (the
+  // original, now-shared version of this fallback pattern).
+  const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
+  let thumbnailStoragePath =
+    typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
   const {
@@ -205,9 +213,23 @@ export async function uploadContentAsset(
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
+  // The browser already tried -- this only runs when that failed (e.g. a
+  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
+  // server-thumbnail.ts's own comment for the full reasoning.
+  if (!thumbnailStoragePath && mediaType === "image") {
+    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+    thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
+  }
+
   const { data: mediaAsset, error: mediaError } = await supabase
     .from("media_assets")
-    .insert({ project_id: projectId, storage_path: storagePath, media_type: mediaType, uploaded_by: user.id })
+    .insert({
+      project_id: projectId,
+      storage_path: storagePath,
+      media_type: mediaType,
+      uploaded_by: user.id,
+      thumbnail_storage_path: thumbnailStoragePath,
+    })
     .select("id")
     .single();
 
@@ -339,6 +361,13 @@ export async function uploadStoryFrame(
     return { message: "Choose a file to upload." };
   }
   const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
+  // Same "already uploaded direct, this is just the resulting path" shape
+  // as storagePath/poster above -- see uploadFilesWithPosters' own
+  // generateImageThumbnailBlob call, and grid.ts's uploadMedia (the
+  // original, now-shared version of this fallback pattern).
+  const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
+  let thumbnailStoragePath =
+    typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
   const {
@@ -355,6 +384,14 @@ export async function uploadStoryFrame(
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
+  // The browser already tried -- this only runs when that failed (e.g. a
+  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
+  // server-thumbnail.ts's own comment for the full reasoning.
+  if (!thumbnailStoragePath && mediaType === "image") {
+    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+    thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
+  }
+
   const { data: mediaAsset, error: insertError } = await supabase
     .from("media_assets")
     .insert({
@@ -362,6 +399,7 @@ export async function uploadStoryFrame(
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
+      thumbnail_storage_path: thumbnailStoragePath,
     })
     .select("id")
     .single();
