@@ -4,6 +4,7 @@ import { memo, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import {
   addBriefTaskFrame,
@@ -178,11 +179,12 @@ export function BriefBoard({
       return;
     }
     // "Generate Design" (source: "asset") edits a freshly-created media_asset
-    // that isn't part of `tasks` yet -- there's no local item to patch, so
-    // this one case still needs the refresh to pick up wherever that new
-    // asset surfaces next.
+    // that isn't part of `tasks` yet -- same as handleGenerateDesign's own
+    // reasoning above, nothing on THIS page ever displays this asset (it
+    // only surfaces later on Grid, which saveMediaAssetAnnotation already
+    // revalidates independently), so refreshing Brief's own route here
+    // achieved nothing and was pure waste.
     setEditingImage(null);
-    router.refresh();
   }
 
   return (
@@ -349,13 +351,11 @@ const TaskCard = memo(function TaskCard({
   // a click didn't visibly do anything until the round-trip + router.refresh
   // landed. On a slow connection (or if the save silently failed, which
   // went unsurfaced before this) that read as "the button doesn't work."
-  const [prevServerType, setPrevServerType] = useState(task.contentTypes[0] ?? "post");
-  const [optimisticType, setOptimisticType] = useState<BriefTaskType>(prevServerType);
-  if ((task.contentTypes[0] ?? "post") !== prevServerType) {
-    setPrevServerType(task.contentTypes[0] ?? "post");
-    setOptimisticType(task.contentTypes[0] ?? "post");
-  }
-  const selectedType: BriefTaskType = optimisticType;
+  const {
+    value: selectedType,
+    set: setOptimisticType,
+    reset: resetOptimisticType,
+  } = useOptimisticOverride<BriefTaskType>(task.contentTypes[0] ?? "post");
 
   // No router.refresh() on success -- optimisticType already shows the
   // correct final value, and setBriefTaskTypes no longer revalidates its
@@ -364,12 +364,11 @@ const TaskCard = memo(function TaskCard({
   function handleSelectType(type: BriefTaskType) {
     if (type === selectedType) return;
     setTypeError(undefined);
-    const previous = selectedType;
     setOptimisticType(type);
     startTransition(async () => {
       const result = await setBriefTaskTypes(projectId, task.id, [type]);
       if (!result.success) {
-        setOptimisticType(previous);
+        resetOptimisticType();
         setTypeError(result.message ?? "Couldn't change the type.");
       }
     });
@@ -377,25 +376,22 @@ const TaskCard = memo(function TaskCard({
 
   // Same optimistic pair/rollback shape as the Post Type pills above.
   const [statusError, setStatusError] = useState<string | undefined>();
-  const [prevServerStatus, setPrevServerStatus] = useState(task.status);
-  const [optimisticStatus, setOptimisticStatus] = useState<BriefTaskStatus>(prevServerStatus);
-  if (task.status !== prevServerStatus) {
-    setPrevServerStatus(task.status);
-    setOptimisticStatus(task.status);
-  }
-  const currentStatus: BriefTaskStatus = optimisticStatus;
+  const {
+    value: currentStatus,
+    set: setOptimisticStatus,
+    reset: resetOptimisticStatus,
+  } = useOptimisticOverride<BriefTaskStatus>(task.status);
 
   // No router.refresh() on success -- same reasoning as handleSelectType
   // above.
   function handleSetStatus(next: BriefTaskStatus) {
     if (next === currentStatus) return;
     setStatusError(undefined);
-    const previous = currentStatus;
     setOptimisticStatus(next);
     startTransition(async () => {
       const result = await setBriefTaskStatus(projectId, task.id, task.name, next);
       if (!result.success) {
-        setOptimisticStatus(previous);
+        resetOptimisticStatus();
         setStatusError(result.message ?? "Couldn't change the status.");
       }
     });

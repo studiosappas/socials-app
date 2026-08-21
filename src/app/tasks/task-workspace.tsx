@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import { Toolbar, type ViewMode, type StatusView } from "./toolbar";
 import { ListView } from "./list-view";
 import { BoardView } from "./board-view";
@@ -31,15 +32,8 @@ export function TaskWorkspace({
   const [, startTransition] = useTransition();
 
   // Optimistic override so status/assignee changes render immediately
-  // instead of waiting on the server round trip -- same "reset when the
-  // server prop actually changes" pattern as Grid's own overrideRows.
-  const [prevTasks, setPrevTasks] = useState(tasks);
-  const [overrideTasks, setOverrideTasks] = useState<TaskItem[] | null>(null);
-  if (tasks !== prevTasks) {
-    setPrevTasks(tasks);
-    setOverrideTasks(null);
-  }
-  const effectiveTasks = overrideTasks ?? tasks;
+  // instead of waiting on the server round trip.
+  const { value: effectiveTasks, set: setOverrideTasks } = useOptimisticOverride(tasks);
 
   const [view, setView] = useState<ViewMode>("list");
   const [statusView, setStatusView] = useState<StatusView>("active");

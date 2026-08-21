@@ -25,6 +25,7 @@ import {
 } from "@/lib/actions/calendar";
 import { deletePost } from "@/lib/actions/posts";
 import { deleteStoryFromCalendar } from "@/lib/actions/stories";
+import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { MentionField } from "@/components/ui/mention-input";
@@ -161,18 +162,8 @@ export function CalendarBoard({
   // Optimistic override so scheduling an item renders immediately instead of
   // waiting for the server round-trip + router.refresh() — otherwise the
   // calendar visibly snaps back to the old date for a beat after drop.
-  const [prevCells, setPrevCells] = useState(cells);
-  const [prevUnscheduled, setPrevUnscheduled] = useState(unscheduled);
-  const [overrideCells, setOverrideCells] = useState<CalendarCell[] | null>(null);
-  const [overrideUnscheduled, setOverrideUnscheduled] = useState<CalendarItem[] | null>(null);
-  if (cells !== prevCells || unscheduled !== prevUnscheduled) {
-    setPrevCells(cells);
-    setPrevUnscheduled(unscheduled);
-    setOverrideCells(null);
-    setOverrideUnscheduled(null);
-  }
-  const effectiveCells = overrideCells ?? cells;
-  const effectiveUnscheduled = overrideUnscheduled ?? unscheduled;
+  const { value: effectiveCells, set: setOverrideCells } = useOptimisticOverride(cells);
+  const { value: effectiveUnscheduled, set: setOverrideUnscheduled } = useOptimisticOverride(unscheduled);
 
   function handleDragStart(event: DragStartEvent) {
     setActiveItem((event.active.data.current?.item as CalendarItem | undefined) ?? null);
@@ -257,7 +248,10 @@ export function CalendarBoard({
         }
       });
     },
-    [effectiveCells, projectId, router, startTransition],
+    // setOverrideCells is stable (useOptimisticOverride memoizes it via
+    // useCallback) -- eslint can't see through the custom hook to know
+    // that, but it's included here since it genuinely is a dependency.
+    [effectiveCells, projectId, router, startTransition, setOverrideCells],
   );
 
   // Stable references for the rest of DayCell's callback props, same
