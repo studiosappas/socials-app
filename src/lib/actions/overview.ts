@@ -344,7 +344,10 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
 // Not revalidating its own route -- its one caller
 // (BrandKnowledgeOrbit.handleDelete) always calls router.refresh() itself
 // right after this resolves.
-export async function deleteBrandDocument(projectId: string, documentId: string) {
+export async function deleteBrandDocument(
+  projectId: string,
+  documentId: string,
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
 
   const { data: doc } = await supabase
@@ -356,7 +359,13 @@ export async function deleteBrandDocument(projectId: string, documentId: string)
   if (doc?.storage_path) {
     await supabase.storage.from("brand-documents").remove([doc.storage_path]);
   }
-  await supabase.from("brand_documents").delete().eq("id", documentId);
+  const { error } = await supabase.from("brand_documents").delete().eq("id", documentId);
+  if (error) return { success: false, message: error.message };
+
+  // Not revalidating -- its one caller (BrandIntelligenceSection's
+  // handleDelete) already hides the tile optimistically before this runs,
+  // and only calls router.refresh() on failure to resync.
+  return { success: true };
 }
 
 async function brandContextLines(
