@@ -14,7 +14,9 @@ import {
   useSensors,
   type DragStartEvent,
   type DragEndEvent,
+  type Modifier,
 } from "@dnd-kit/core";
+import { getEventCoordinates } from "@dnd-kit/utilities";
 import {
   createPostForDate,
   createStoryForDate,
@@ -68,6 +70,34 @@ function contentTypeLabel(item: CalendarItem): string {
   const raw = item.label || "post";
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
+
+// dnd-kit's own DragOverlay always sizes and positions its wrapper to match
+// the ORIGINAL dragged element's rect (see PositionedOverlay in
+// @dnd-kit/core), then only translates it by how far the pointer has moved
+// since drag start -- it never re-centers on the cursor. That's invisible
+// on Grid, where every tile is the same fixed size as its own overlay
+// preview, but Calendar's chips vary a lot: a compact pill in the collapsed
+// row vs. a full-width, much taller tile in the expanded row and the
+// Drafts panel, against ONE small fixed-size pill overlay. Whatever the
+// difference is between "top-left of the tile you actually grabbed" and
+// "top-left of the small overlay pill" becomes a constant offset for the
+// entire drag -- exactly the "doesn't stay attached to the cursor / jumps
+// to an offset" bug. This is dnd-kit's own documented fix (equivalent to
+// @dnd-kit/modifiers' snapCenterToCursor, reimplemented inline rather than
+// adding a dependency for one ~10-line function): it adjusts the transform
+// so the overlay's CENTER tracks the cursor every frame, regardless of how
+// large the original element was or where within it you clicked.
+const centerOverlayOnCursor: Modifier = ({ activatorEvent, draggingNodeRect, transform }) => {
+  if (!draggingNodeRect || !activatorEvent) return transform;
+  const activatorCoordinates = getEventCoordinates(activatorEvent);
+  if (!activatorCoordinates) return transform;
+  return {
+    ...transform,
+    x: transform.x + (activatorCoordinates.x - draggingNodeRect.left) - draggingNodeRect.width / 2,
+    y: transform.y + (activatorCoordinates.y - draggingNodeRect.top) - draggingNodeRect.height / 2,
+  };
+};
+const CALENDAR_DRAG_MODIFIERS = [centerOverlayOnCursor];
 
 export function CalendarBoard({
   projectId,
@@ -315,6 +345,7 @@ export function CalendarBoard({
         // resolves to whichever droppable's center is nearest instead, far
         // more forgiving for dropping onto a small calendar cell.
         collisionDetection={closestCenter}
+        modifiers={CALENDAR_DRAG_MODIFIERS}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveItem(null)}
@@ -435,14 +466,22 @@ export function CalendarBoard({
 
         <DragOverlay dropAnimation={null}>
           {activeItem && (
-            <div className="flex w-fit items-center gap-2 rounded-full border border-foreground bg-background px-2.5 py-1 text-[11px] shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
-              <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
-                {activeItem.thumbnailUrl && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={activeItem.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
-                )}
-              </span>
-              <span className="truncate">{activeItem.label}</span>
+            // dnd-kit's own overlay wrapper is sized to match whichever
+            // source element was actually dragged (a small chip or a much
+            // larger expanded tile) -- this inner wrapper fills that box and
+            // centers the fixed-size pill within it, so the pill itself
+            // lands exactly on the cursor (which centerOverlayOnCursor above
+            // now targets), regardless of the source element's own size.
+            <div className="flex h-full w-full items-center justify-center">
+              <div className="flex w-fit items-center gap-2 rounded-full border border-foreground bg-background px-2.5 py-1 text-[11px] shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+                <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
+                  {activeItem.thumbnailUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={activeItem.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+                  )}
+                </span>
+                <span className="truncate">{activeItem.label}</span>
+              </div>
             </div>
           )}
         </DragOverlay>
