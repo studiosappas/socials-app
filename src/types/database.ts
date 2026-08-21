@@ -264,6 +264,12 @@ export interface Database {
           preview_storage_path: string | null;
           annotation_json: object | null;
           poster_storage_path: string | null;
+          // A small generated JPEG, distinct from preview_storage_path (an
+          // edited/annotated flatten) and poster_storage_path (a video's
+          // cover frame) -- see src/lib/image-thumbnail.ts. Null for
+          // anything uploaded before this existed; every read site falls
+          // back to the full original in that case.
+          thumbnail_storage_path: string | null;
           folder_id: string | null;
           generated_by_ai: boolean;
           archived: boolean;
@@ -275,6 +281,7 @@ export interface Database {
           media_type?: MediaType;
           uploaded_by: string;
           poster_storage_path?: string | null;
+          thumbnail_storage_path?: string | null;
           folder_id?: string | null;
           annotation_json?: object | null;
           generated_by_ai?: boolean;
@@ -286,6 +293,7 @@ export interface Database {
           preview_storage_path?: string | null;
           annotation_json?: object | null;
           poster_storage_path?: string | null;
+          thumbnail_storage_path?: string | null;
           folder_id?: string | null;
           generated_by_ai?: boolean;
           archived?: boolean;

@@ -3,6 +3,7 @@
 import { startTransition } from "react";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
+import { generateImageThumbnailBlob } from "@/lib/image-thumbnail";
 
 // Grabs a still frame from a video file for use as a Grid-safe poster image,
 // entirely client-side (an offscreen <video> + <canvas>, never uploaded or
@@ -166,6 +167,23 @@ export async function uploadFilesWithPosters(
       const poster = await generateVideoPosterBlob(file);
       if (poster) {
         formData.set("poster", new File([poster], "poster.jpg", { type: "image/jpeg" }));
+      }
+    } else {
+      // A small generated JPEG for on-screen tiles -- see
+      // src/lib/image-thumbnail.ts. Best-effort: if generation or its own
+      // upload fails for any reason, thumbnailStoragePath is just omitted
+      // and every read site already falls back to the full original.
+      const thumbBlob = await generateImageThumbnailBlob(file);
+      if (thumbBlob) {
+        const thumbPath = newStoragePath(projectId, "thumb.jpg");
+        const thumbUploaded = await uploadFileDirect(
+          "project-media",
+          thumbPath,
+          new File([thumbBlob], "thumb.jpg", { type: "image/jpeg" }),
+        );
+        if (!("error" in thumbUploaded)) {
+          formData.set("thumbnailStoragePath", thumbUploaded.path);
+        }
       }
     }
     // useActionState's dispatch expects to run inside a transition (that's

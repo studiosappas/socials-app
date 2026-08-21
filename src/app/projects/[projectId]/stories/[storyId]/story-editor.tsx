@@ -256,7 +256,7 @@ export function StoryEditor({
               >
                 {item.url && item.mediaType === "image" && (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.url} alt="" className="h-full w-full object-cover" />
+                  <img src={item.url} alt="" loading="lazy" className="h-full w-full object-cover" />
                 )}
                 {item.url && item.mediaType === "video" && (
                   <video src={item.url} className="h-full w-full object-cover" muted />
@@ -285,7 +285,7 @@ function FramePreview({ frame }: { frame: StoryFrameItem }) {
     <>
       {frame.url && frame.mediaType === "image" && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={frame.url} alt="" className="h-full w-full object-cover" draggable={false} />
+        <img src={frame.url} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
       )}
       {frame.url && frame.mediaType === "video" && (
         <video src={frame.url} className="h-full w-full object-cover" muted />

@@ -31,7 +31,7 @@ export function MediaThumbPreview({
     <div className={`relative h-full w-full overflow-hidden ${className}`}>
       {item.url && item.mediaType === "image" && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={item.url} alt="" className="h-full w-full object-cover" draggable={false} />
+        <img src={item.url} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
       )}
       {item.url && item.mediaType === "video" && (
         <video src={item.url} className="h-full w-full object-cover" muted />

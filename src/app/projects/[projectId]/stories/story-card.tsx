@@ -134,7 +134,7 @@ export const StoryCard = memo(function StoryCard({
       >
         {thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumbnailUrl} alt="" className="h-full w-full object-cover" />
+          <img src={thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
         ) : (
           <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
         )}

@@ -230,6 +230,12 @@ create table public.media_assets (
   -- a <video> element for its cover -- null for images, and null for videos
   -- uploaded before this column existed.
   poster_storage_path text,
+  -- A small generated JPEG for on-screen thumbnails (Grid tiles, the Media
+  -- Library sidebar) -- distinct from preview_storage_path (an edited/
+  -- annotated flatten, still full-size) and poster_storage_path (a video's
+  -- cover frame). Null for anything uploaded before this existed; every
+  -- read site falls back to the full original in that case.
+  thumbnail_storage_path text,
   -- True only for a design created by Brief's "Generate Design" -- purely
   -- cosmetic (a small badge in Media Library), never gates anything: a
   -- generated asset is edited/saved/used exactly like a manual upload the

@@ -511,7 +511,7 @@ export function CalendarBoard({
               <span className="min-h-0 flex-1 overflow-hidden">
                 {item.thumbnailUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+                  <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
                 ) : (
                   <span className="flex h-full w-full items-center justify-center bg-black/[.04] text-muted">
                     {item.itemType === "story" ? "📖" : "🖼"}
@@ -1008,7 +1008,7 @@ const CompactItemChip = memo(function CompactItemChip({ item }: { item: Calendar
         <span className="h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full bg-black/10 sm:h-4 sm:w-4">
           {item.thumbnailUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+            <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
           ) : (
             <span className="flex h-full w-full items-center justify-center text-[7px]">
               {item.itemType === "story" ? "📖" : "🖼"}
@@ -1095,6 +1095,7 @@ const ExpandedItemTile = memo(function ExpandedItemTile({
           <img
             src={item.thumbnailUrl}
             alt=""
+            loading="lazy"
             className={`h-full w-full object-cover ${published ? "opacity-70" : ""}`}
             draggable={false}
           />
@@ -1270,7 +1271,7 @@ function CalendarItemRow({ item }: { item: CalendarItem }) {
       <div className="h-16 w-16 shrink-0 overflow-hidden border border-border sm:h-20 sm:w-20">
         {item.thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+          <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
         ) : (
           <div className="flex h-full w-full items-center justify-center bg-black/[.04] text-2xl text-muted">
             {item.itemType === "story" ? "📖" : "🖼"}
@@ -1555,7 +1556,7 @@ function ItemChip({
           <div className="relative aspect-square overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30">
             {item.thumbnailUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+              <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
             ) : (
               <div className="flex h-full w-full items-center justify-center bg-black/[.04] text-muted">
                 {item.itemType === "story" ? "📖" : "🖼"}
@@ -1612,7 +1613,7 @@ function ItemChip({
         <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
           {item.thumbnailUrl && (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+            <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
           )}
         </span>
         <span className="truncate">{item.label}</span>
