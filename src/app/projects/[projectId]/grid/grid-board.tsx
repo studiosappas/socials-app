@@ -1062,7 +1062,16 @@ const GridSlot = memo(function GridSlot({
           // never the video file itself. Grid never plays/autoplays video.
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            key={effectiveSlot.thumbnailUrl}
+            // Keyed on the asset's own identity, not the signed URL string
+            // -- a signed URL gets a fresh token every time it's re-minted
+            // even for the exact same file (see signed-url-cache.ts's own
+            // reasoning), and keying on it would force React to unmount and
+            // remount this <img> (a full fresh decode/paint, even when the
+            // browser has the bytes cached) every time that happened. This
+            // still replays the animate-settle-in entrance whenever the
+            // cover asset genuinely changes (upload/crop/replace), just not
+            // on an unrelated re-sign.
+            key={effectiveSlot.coverMediaAssetId ?? effectiveSlot.id}
             src={effectiveSlot.thumbnailUrl}
             alt=""
             loading="lazy"

@@ -49,7 +49,11 @@ export async function updatePost(
   const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
   const caption = String(formData.get("caption") ?? "");
 
-  const { data: before } = await supabase.from("posts").select("status, post_type").eq("id", postId).single();
+  const { data: before } = await supabase
+    .from("posts")
+    .select("status, post_type, scheduled_date")
+    .eq("id", postId)
+    .single();
 
   // post_type: adding/replacing/removing media auto-suggests the right
   // value (lib/post-type.ts's syncPostType, called from those actions), but
@@ -125,9 +129,24 @@ export async function updatePost(
   // handleSave), and revalidating it would force a full refetch of this
   // page's ~10 queries plus a freshly re-signed URL for every asset
   // thumbnail, which is exactly the "reload" flash this was rewritten to
-  // avoid. Grid/Tasks still show this post's caption/status, so they still
-  // need to reflect the change whenever next visited.
-  revalidatePath(`/projects/${projectId}/grid`);
+  // avoid.
+  //
+  // /grid is narrower still: GridBoardSlot only ever reads this post's
+  // scheduled_date (the day badge) -- caption/notes/status/review_status/
+  // post_type aren't rendered on a Grid tile at all. Revalidating it
+  // unconditionally on every save (including one open in Post Editor as an
+  // intercepted-route modal ON TOP of Grid, where /grid is still the
+  // mounted route underneath) meant a pure caption edit re-signed every
+  // thumbnail on the whole board for a field Grid never displays. Only
+  // do it when the one field Grid actually cares about changed.
+  const scheduledDateChanged = (before?.scheduled_date ?? null) !== (scheduledDate ? scheduledDate : null);
+  if (scheduledDateChanged) {
+    revalidatePath(`/projects/${projectId}/grid`);
+  }
+  // /tasks legitimately depends on caption/post_type/scheduled_date (the
+  // auto-task's derived title/due date) and status (auto-complete), so it
+  // stays unconditional -- unlike /grid, most fields this action touches
+  // actually do feed Tasks' own display.
   revalidatePath("/tasks");
   return undefined;
 }
