@@ -64,6 +64,15 @@ export const StoryCard = memo(function StoryCard({
   });
   const href = `/projects/${projectId}/stories/${storyId}`;
 
+  // Warms the intercepted Story editor route's RSC payload as soon as this
+  // card is on screen, same fix already proven for Grid tiles -> Post
+  // Editor (grid-board.tsx). getStoryPageData runs several sequential
+  // Supabase queries; without a prefetch, opening a story was a fully cold
+  // navigation every time.
+  useEffect(() => {
+    router.prefetch(href);
+  }, [href, router]);
+
   if (deleted) return null;
 
   function handleDelete() {
