@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
 import { Toolbar, type ViewMode, type StatusView } from "./toolbar";
 import { ListView } from "./list-view";
 import { BoardView } from "./board-view";
@@ -29,7 +28,6 @@ export function TaskWorkspace({
   tomorrow: string;
   autoExpandComments: boolean;
 }) {
-  const router = useRouter();
   const [, startTransition] = useTransition();
 
   // Optimistic override so status/assignee changes render immediately
@@ -64,7 +62,6 @@ export function TaskWorkspace({
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, status } : t)));
     startTransition(async () => {
       await updateTaskStatus(taskId, status);
-      router.refresh();
     });
   }
 
@@ -74,7 +71,6 @@ export function TaskWorkspace({
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, assignee: assignee ?? null } : t)));
     startTransition(async () => {
       await updateTaskAssignee(taskId, assigneeId);
-      router.refresh();
     });
   }
 

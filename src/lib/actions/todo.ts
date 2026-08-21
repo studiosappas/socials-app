@@ -74,22 +74,27 @@ export async function updateTask(
   return { success: true };
 }
 
+// Not revalidating -- its one caller (task-workspace.tsx's
+// handleStatusChange) already applies the change optimistically via
+// overrideTasks before this action ever runs.
 export async function updateTaskStatus(taskId: string, status: TaskStatus) {
   const supabase = await createClient();
   await supabase.from("tasks").update({ status, updated_at: new Date().toISOString() }).eq("id", taskId);
-  revalidatePath("/tasks");
 }
 
+// Not revalidating -- same reasoning as updateTaskStatus above
+// (task-workspace.tsx's handleAssigneeChange already applies this
+// optimistically via overrideTasks).
 export async function updateTaskAssignee(taskId: string, assigneeId: string | null) {
   const supabase = await createClient();
   await supabase.from("tasks").update({ assignee_id: assigneeId, updated_at: new Date().toISOString() }).eq("id", taskId);
-  revalidatePath("/tasks");
 }
 
+// Not revalidating -- its one caller (task-detail.tsx's handleDelete)
+// already calls router.refresh() itself right after this resolves.
 export async function deleteTask(taskId: string) {
   const supabase = await createClient();
   await supabase.from("tasks").delete().eq("id", taskId);
-  revalidatePath("/tasks");
 }
 
 export async function addTaskComment(
@@ -125,7 +130,10 @@ export async function addTaskComment(
     });
   }
 
-  revalidatePath("/tasks");
+  // Not revalidating -- its one caller (task-detail.tsx's
+  // handleSubmitComment) already shows the new comment optimistically and
+  // re-fetches the real thread directly via fetchTaskComments, independent
+  // of any full-page revalidation.
   return { success: true };
 }
 
