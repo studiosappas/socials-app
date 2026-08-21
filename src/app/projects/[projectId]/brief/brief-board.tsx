@@ -357,6 +357,10 @@ const TaskCard = memo(function TaskCard({
   }
   const selectedType: BriefTaskType = optimisticType;
 
+  // No router.refresh() on success -- optimisticType already shows the
+  // correct final value, and setBriefTaskTypes no longer revalidates its
+  // own route either, since there was nothing left for a refresh to
+  // usefully bring back.
   function handleSelectType(type: BriefTaskType) {
     if (type === selectedType) return;
     setTypeError(undefined);
@@ -367,9 +371,7 @@ const TaskCard = memo(function TaskCard({
       if (!result.success) {
         setOptimisticType(previous);
         setTypeError(result.message ?? "Couldn't change the type.");
-        return;
       }
-      router.refresh();
     });
   }
 
@@ -383,6 +385,8 @@ const TaskCard = memo(function TaskCard({
   }
   const currentStatus: BriefTaskStatus = optimisticStatus;
 
+  // No router.refresh() on success -- same reasoning as handleSelectType
+  // above.
   function handleSetStatus(next: BriefTaskStatus) {
     if (next === currentStatus) return;
     setStatusError(undefined);
@@ -393,12 +397,15 @@ const TaskCard = memo(function TaskCard({
       if (!result.success) {
         setOptimisticStatus(previous);
         setStatusError(result.message ?? "Couldn't change the status.");
-        return;
       }
-      router.refresh();
     });
   }
 
+  // No router.refresh() -- the generated design isn't part of `tasks`/
+  // items at all, nothing on this page displays it, and onEditImage below
+  // already opens the annotation editor with the real result data
+  // (mediaAssetId/imageUrl/annotationJson) passed directly, not read back
+  // from a page prop.
   function handleGenerateDesign() {
     setGenerateError(undefined);
     setGenerating(true);
@@ -415,16 +422,16 @@ const TaskCard = memo(function TaskCard({
         imageUrl: result.imageUrl,
         annotationJson: result.annotationJson ?? null,
       });
-      router.refresh();
     });
   }
 
+  // No router.refresh() -- the task name field is an uncontrolled input
+  // (defaultValue) that already shows the typed text once this blurs.
   function handleNameBlur() {
     const value = nameRef.current?.value.trim();
     if (!value || value === task.name) return;
     startTransition(async () => {
       await renameBriefTask(projectId, task.id, value);
-      router.refresh();
     });
   }
 
@@ -441,7 +448,10 @@ const TaskCard = memo(function TaskCard({
     // Every field already saves itself on blur / on its own Add action --
     // this button's job is to commit whatever field is still mid-edit (blur
     // it) and give the user an explicit, visible confirmation that nothing
-    // is left unsaved.
+    // is left unsaved. No router.refresh() -- this isn't gated by any
+    // mutation of its own, so there's nothing for a fresh page render to
+    // bring back; it was forcing a full Brief refetch on every click purely
+    // for the "Saved." toast below.
     const active = document.activeElement;
     if (active instanceof HTMLElement && containerRef.current?.contains(active)) {
       active.blur();
@@ -450,7 +460,6 @@ const TaskCard = memo(function TaskCard({
     setTimeout(() => {
       setSaving(false);
       setSaved(true);
-      router.refresh();
       setTimeout(() => setSaved(false), 1500);
     }, 150);
   }
@@ -876,11 +885,12 @@ function ItemSection({
     });
   }
 
+  // No router.refresh() -- an uncontrolled textarea already shows the
+  // typed notes.
   function handleNotesBlur(itemId: string, value: string, original: string) {
     if (value.trim() === original) return;
     startTransition(async () => {
       await updateBriefTaskItemNotes(projectId, itemId, value);
-      router.refresh();
     });
   }
 
@@ -1154,11 +1164,12 @@ function FrameSection({
   const [, startTransition] = useTransition();
   const [adding, setAdding] = useState(false);
 
+  // No router.refresh() on either blur handler below -- both fields are
+  // uncontrolled inputs that already show their typed value.
   function handleLabelBlur(frameId: string, value: string, original: string) {
     if (value.trim() === original || !value.trim()) return;
     startTransition(async () => {
       await renameBriefTaskFrame(projectId, frameId, value);
-      router.refresh();
     });
   }
 
@@ -1166,7 +1177,6 @@ function FrameSection({
     if (value === original) return;
     startTransition(async () => {
       await updateBriefTaskFrameBody(projectId, frameId, value);
-      router.refresh();
     });
   }
 

@@ -56,7 +56,10 @@ export async function createBriefTask(
     return { success: false, message: frameError.message };
   }
 
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating this action's own route -- its only caller
+  // (brief-board.tsx's handleAddTask, and its undo/redo commands) already
+  // calls router.refresh() itself right after, since there's no optimistic
+  // insertion of a new task card yet.
   return { success: true, taskId: task.id };
 }
 
@@ -71,7 +74,10 @@ export async function renameBriefTask(
     .update({ name: name.trim() || "Task" })
     .eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- the task name field is an uncontrolled input
+  // (defaultValue) that already shows the typed text, and nothing else on
+  // the page reads task.name, so there was nothing for a fresh render to
+  // usefully bring back.
   return { success: true };
 }
 
@@ -83,7 +89,9 @@ export async function setBriefTaskTypes(
   const supabase = await createClient();
   const { error } = await supabase.from("brief_tasks").update({ content_types: contentTypes }).eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- brief-board.tsx's Post Type pills already apply
+  // this optimistically (optimisticType) before this call and roll back on
+  // failure, so the UI is already showing the correct final state either way.
   return { success: true };
 }
 
@@ -127,7 +135,9 @@ export async function setBriefTaskStatus(
     );
   }
 
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- brief-board.tsx's Status pills already apply this
+  // optimistically (optimisticStatus) before this call and roll back on
+  // failure, same reasoning as setBriefTaskTypes above.
   return { success: true };
 }
 
@@ -135,7 +145,9 @@ export async function deleteBriefTask(projectId: string, taskId: string): Promis
   const supabase = await createClient();
   const { error } = await supabase.from("brief_tasks").delete().eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its callers (handleDelete, and the "Add task"
+  // undo command) already call router.refresh() themselves right after,
+  // since no optimistic removal of the task card exists yet.
   return { success: true };
 }
 
@@ -182,7 +194,10 @@ async function insertBriefImageItem(
     .single();
   if (itemError) return { success: false, message: itemError.message };
 
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- every caller chain (addBriefTaskImage,
+  // addBriefTaskLink's image path) ends at a client handler that already
+  // calls router.refresh() itself, since no optimistic item insertion
+  // exists yet.
   return { success: true, itemId: item?.id, attachmentId: attachment.id, label: fileName };
 }
 
@@ -256,7 +271,9 @@ async function createBriefLinkItem(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its one caller (addBriefTaskLink's plain-link
+  // fallback) ends at a client handler that already calls router.refresh()
+  // itself.
   return { success: true, itemId: data?.id };
 }
 
@@ -357,7 +374,8 @@ export async function restoreBriefTaskItem(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- called from undo (of Remove) and redo (of Add),
+  // both of which already call router.refresh() themselves right after.
   return { success: true, itemId: data?.id };
 }
 
@@ -394,7 +412,8 @@ export async function updateBriefTaskItemNotes(projectId: string, itemId: string
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").update({ notes: notes.trim() }).eq("id", itemId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- an uncontrolled textarea (defaultValue) already
+  // shows the typed notes, same reasoning as renameBriefTask above.
   return { success: true };
 }
 
@@ -402,7 +421,8 @@ export async function removeBriefTaskItem(projectId: string, itemId: string): Pr
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").delete().eq("id", itemId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- every caller (delete, and undo of Add) already
+  // calls router.refresh() itself, since no optimistic removal exists yet.
   return { success: true };
 }
 
@@ -440,7 +460,9 @@ export async function addBriefTaskFrame(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its callers (handleAddFrame, and the "Remove
+  // Frame" undo command) already call router.refresh() themselves right
+  // after, since no optimistic insertion of a new frame box exists yet.
   return { success: true, frameId: frame?.id, label, position: insertPosition };
 }
 
@@ -462,7 +484,8 @@ export async function restoreBriefTaskFrame(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- called from undo (of Remove Frame) and redo (of
+  // Add Frame), both of which already call router.refresh() themselves.
   return { success: true, frameId: data?.id };
 }
 
@@ -477,7 +500,8 @@ export async function renameBriefTaskFrame(
     .update({ label: label.trim() || "Text" })
     .eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- an uncontrolled input (defaultValue) already
+  // shows the typed label.
   return { success: true };
 }
 
@@ -489,7 +513,8 @@ export async function updateBriefTaskFrameBody(
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_frames").update({ body }).eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- an uncontrolled textarea (defaultValue) already
+  // shows the typed body text.
   return { success: true };
 }
 
@@ -497,7 +522,9 @@ export async function removeBriefTaskFrame(projectId: string, frameId: string): 
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_frames").delete().eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- every caller (delete, and undo of Add Frame)
+  // already calls router.refresh() itself, since no optimistic removal
+  // exists yet.
   return { success: true };
 }
 
