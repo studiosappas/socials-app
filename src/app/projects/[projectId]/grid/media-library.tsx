@@ -101,13 +101,20 @@ export function MediaLibrary({
   // Optimistic overlay so a new upload appears (via a local blob URL --
   // instant, no network round trip needed to show it) and a delete
   // disappears the moment it's requested, instead of waiting on
-  // uploadMedia/bulkDeleteMedia's full round trip (which still revalidates
-  // this route in the background for the undo/redo auto-track effect below
-  // to keep working) to land. Same reset-on-prop-change guard as Grid's own
-  // overrideRows.
+  // uploadMedia/bulkDeleteMedia's full round trip to land. Neither action
+  // revalidates this route anymore (see grid.ts's own comments) -- delete
+  // needs no further reconciliation (the optimistic removal already is the
+  // final state), and upload reconciles its placeholder directly from the
+  // action's own return value below, not from a page refresh. Same reset-
+  // on-prop-change guard as Grid's own overrideRows.
   const [prevItems, setPrevItems] = useState(items);
   const [overrideItems, setOverrideItems] = useState<MediaLibraryItem[] | null>(null);
   const pendingBlobUrlsRef = useRef<Set<string>>(new Set());
+  // Declared here (not down by the items-diffing effect that owns its
+  // "reset to false" line) so every effect referencing it -- including the
+  // upload-reconciliation effect below -- sees a single, unambiguous
+  // declaration-before-use ordering.
+  const suppressAutoTrackRef = useRef(false);
   if (items !== prevItems) {
     setPrevItems(items);
     setOverrideItems(null);
@@ -132,11 +139,63 @@ export function MediaLibrary({
   // files as separate fire-and-forget action calls sharing one action-state),
   // so this drops back to the real server list entirely rather than risk
   // leaving a fake entry behind.
+  //
+  // On success, state.clientTempId identifies exactly which optimistic
+  // placeholder this particular resolved call belongs to (see the
+  // clientTempId injection in the upload handler below) -- reconciled in
+  // place (swap in the real id/storagePath, keep the already-showing blob
+  // URL) rather than clearing the whole override, which would otherwise
+  // flash every OTHER still-in-flight optimistic upload back to nothing
+  // for a beat.
   useEffect(() => {
     if (state?.message) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setOverrideItems(null);
       showError(state.message);
+      return;
+    }
+    if (state?.id && state.clientTempId) {
+      const tempId = state.clientTempId;
+      const realId = state.id;
+      const realStoragePath = state.storagePath;
+      const realPosterStoragePath = state.posterStoragePath ?? null;
+      const matched = effectiveItems.find((i) => i.id === tempId);
+      if (matched) {
+        setOverrideItems((current) =>
+          (current ?? effectiveItems).map((i) =>
+            i.id === tempId
+              ? { ...i, id: realId, storagePath: realStoragePath, posterStoragePath: realPosterStoragePath }
+              : i,
+          ),
+        );
+        // The generic items-diffing effect below can't see this reconciled
+        // item (it only ever watches the real server `items` prop, which
+        // this never touches -- see grid.ts's own no-revalidation comment),
+        // so this is the one place a fresh upload gets its own undo command.
+        if (!demoMode && realStoragePath) {
+          const mediaType = matched.mediaType;
+          const current = { id: realId };
+          pushCommand({
+            label: "Add media",
+            undo: async () => {
+              suppressAutoTrackRef.current = true;
+              await deleteMedia(projectId, current.id);
+              router.refresh();
+            },
+            redo: async () => {
+              suppressAutoTrackRef.current = true;
+              const result = await restoreMediaAsset(projectId, {
+                storagePath: realStoragePath,
+                mediaType,
+                posterStoragePath: realPosterStoragePath,
+              });
+              if ("message" in result) throw new Error(result.message);
+              current.id = result.id;
+              router.refresh();
+            },
+          });
+        }
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -173,10 +232,10 @@ export function MediaLibrary({
     const idSet = new Set(ids);
     setOverrideItems(effectiveItems.filter((item) => !idSet.has(item.id)));
     setSelectedIds(new Set());
-    // No router.refresh() on success -- bulkDeleteMedia already revalidates
-    // this route server-side, so its own response already carries the fresh
-    // data; refreshing again would just redo that same round trip a second
-    // time for nothing the optimistic removal above hasn't already shown.
+    // No router.refresh() on success -- the optimistic removal above is
+    // already the complete final state (bulkDeleteMedia no longer
+    // revalidates this route either, see its own comment), so a refresh
+    // would only redo the same round trip for nothing new to show.
     startBulkDelete(async () => {
       try {
         await bulkDeleteMedia(projectId, ids);
@@ -210,18 +269,18 @@ export function MediaLibrary({
     });
   }
 
-  // Undo/redo of add/delete both round-trip through server actions that
-  // change `items` (a new row appears/disappears once revalidatePath lands),
-  // so this diff is what turns a spontaneous upload into an undoable "Add
-  // media" command -- there's no other signal available client-side, since
-  // uploadMedia's action state only ever returns an error message, never the
-  // created row's id. suppressAutoTrackRef opts a command-driven items
-  // change (an undo restoring a deleted asset, or a redo re-uploading one)
-  // out of ALSO being auto-detected here, which would otherwise double it up
-  // as a second, redundant "Add media" entry on top of the command already
-  // being replayed.
+  // A fresh upload gets its own "Add media" command directly from the
+  // reconciliation effect above (it knows the real id/paths immediately,
+  // no page refresh needed). This effect instead catches the OTHER way
+  // `items` can gain a row this component didn't already know about --
+  // most notably a "redo" of a previously-undone upload (restoreMediaAsset
+  // + router.refresh(), see below), which needs its own new command so a
+  // SECOND undo/redo can act on it. suppressAutoTrackRef (declared above)
+  // opts a command-driven items change (that redo, or an undo restoring a
+  // deleted asset) out of ALSO being auto-detected here, which would
+  // otherwise double it up as a second, redundant "Add media" entry on top
+  // of the command already being replayed.
   const prevItemIdsRef = useRef(new Set(items.map((i) => i.id)));
-  const suppressAutoTrackRef = useRef(false);
   useEffect(() => {
     if (demoMode) return;
     const prevIds = prevItemIdsRef.current;
@@ -285,10 +344,12 @@ export function MediaLibrary({
               if (files.length === 0) return;
 
               // Instant thumbnail from the file the browser already has in
-              // memory -- no network round trip needed to show it, unlike
-              // waiting for uploadMedia's DB insert + this route's own
-              // revalidation to land. Superseded automatically once the
-              // real item arrives (see the reset-on-prop-change guard above).
+              // memory -- no network round trip needed to show it. The
+              // item's own id doubles as the correlation token
+              // (clientTempId, injected below) that lets the effect above
+              // match this exact placeholder to its real, persisted
+              // counterpart once uploadMedia resolves -- no page refresh
+              // needed to reconcile it.
               const optimistic = files.map((file) => {
                 const url = URL.createObjectURL(file);
                 pendingBlobUrlsRef.current.add(url);
@@ -303,16 +364,29 @@ export function MediaLibrary({
               });
               setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
 
-              uploadFilesWithPosters(projectId, action, files, (fileName, message) => {
-                setUploadError(message);
-                const failed = optimistic.find((o) => o.file.name === fileName);
-                if (!failed) return;
-                pendingBlobUrlsRef.current.delete(failed.item.url!);
-                URL.revokeObjectURL(failed.item.url!);
-                setOverrideItems((current) =>
-                  (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
-                );
-              });
+              uploadFilesWithPosters(
+                projectId,
+                (formData) => {
+                  // uploadFilesWithPosters sets fileName on every call --
+                  // used only to find which optimistic placeholder this
+                  // particular FormData belongs to before dispatching.
+                  const fileName = formData.get("fileName");
+                  const match = optimistic.find((o) => o.file.name === fileName);
+                  if (match) formData.set("clientTempId", match.item.id);
+                  action(formData);
+                },
+                files,
+                (fileName, message) => {
+                  setUploadError(message);
+                  const failed = optimistic.find((o) => o.file.name === fileName);
+                  if (!failed) return;
+                  pendingBlobUrlsRef.current.delete(failed.item.url!);
+                  URL.revokeObjectURL(failed.item.url!);
+                  setOverrideItems((current) =>
+                    (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
+                  );
+                },
+              );
             }}
           />
           <Button
