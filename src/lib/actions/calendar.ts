@@ -113,7 +113,11 @@ export async function createPostForDate(projectId: string, date: string): Promis
     dueDate: date,
   });
 
-  revalidatePath(`/projects/${projectId}/calendar`);
+  // Not revalidating /calendar (its own route) -- every caller (the
+  // right-click context menu and DayDetailDialog's own create handler)
+  // already calls router.refresh() itself right after, since no
+  // optimistic insertion of the new post exists yet. /grid and /tasks are
+  // genuinely different routes, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath("/tasks");
   return post.id;
@@ -147,7 +151,9 @@ export async function createStoryForDate(projectId: string, date: string): Promi
 
   if (user) await logActivity(supabase, projectId, user.id, "created a story");
 
-  revalidatePath(`/projects/${projectId}/calendar`);
+  // Not revalidating /calendar -- same reasoning as createPostForDate
+  // above (every caller already calls router.refresh() itself). /stories
+  // is a genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/stories`);
   return story.id;
 }
