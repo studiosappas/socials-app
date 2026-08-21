@@ -1065,6 +1065,7 @@ const GridSlot = memo(function GridSlot({
             key={effectiveSlot.thumbnailUrl}
             src={effectiveSlot.thumbnailUrl}
             alt=""
+            loading="lazy"
             className="h-full w-full animate-settle-in object-cover"
             draggable={false}
             style={coverTransformStyle(effectiveTransform)}

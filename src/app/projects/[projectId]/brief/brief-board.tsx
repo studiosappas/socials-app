@@ -1079,7 +1079,7 @@ function ImageItemChip({
           <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
             {item.thumbnailUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+              <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
             ) : (
               <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
             )}

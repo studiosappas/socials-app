@@ -73,6 +73,14 @@ export async function uploadMedia(
     return { message: "Choose a file to upload." };
   }
   const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
+  // Same "already uploaded direct, this is just the resulting path" shape
+  // as storagePath/poster above -- see uploadFilesWithPosters' own
+  // generateImageThumbnailBlob call. Undefined for anything uploaded before
+  // this existed, or if generation/its own upload failed -- every read site
+  // already falls back to the full original in that case.
+  const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
+  const thumbnailStoragePath =
+    typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
   const {
@@ -89,6 +97,7 @@ export async function uploadMedia(
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
+      thumbnail_storage_path: thumbnailStoragePath,
     })
     .select("id")
     .single();

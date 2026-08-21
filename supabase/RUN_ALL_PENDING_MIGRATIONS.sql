@@ -1319,6 +1319,16 @@ alter table public.brand_moodboard_items add column if not exists font_style tex
 update storage.buckets set file_size_limit = 52428800
 where id in ('project-media', 'brief-media', 'brand-documents', 'avatars', 'landing-media');
 
+-- ---------- Real Grid thumbnails ----------
+-- Grid was rendering every tile (and every Media Library sidebar item) from
+-- the full original upload -- with the 50MB ceiling above, that meant
+-- downloading a full-size file just to show a small tile. New uploads now
+-- also generate and store a small JPEG here; existing assets stay null and
+-- keep showing their original until re-uploaded (see src/lib/grid-data.ts's
+-- coverDisplayPath and grid/page.tsx's mediaLibrary mapping for the
+-- thumbnail-over-original fallback logic).
+alter table public.media_assets add column if not exists thumbnail_storage_path text;
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

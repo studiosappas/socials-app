@@ -623,7 +623,7 @@ function FolderTile({
         <div className="relative min-h-0 flex-1 overflow-hidden">
           {folder.coverUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={folder.coverUrl} alt="" className="h-full w-full object-cover" />
+            <img src={folder.coverUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
           ) : (
             <div className="flex h-full w-full items-center justify-center">
               <FolderIcon className="h-8 w-8 text-muted/60" />

@@ -8,6 +8,12 @@ export type GridSlotWithPath = {
   slotId: string;
   postId: string | null;
   coverStoragePath: string | null;
+  // What Grid's own on-screen tile should actually render -- prefers the
+  // small generated thumbnail over the (possibly 10s of MB) original when
+  // one exists. Deliberately a SEPARATE field from coverStoragePath: the
+  // export/export-pdf routes download coverStoragePath directly for the
+  // real output file and must keep getting full quality, never this.
+  coverDisplayPath: string | null;
   coverMediaType: "image" | "video" | null;
   // The cover's own media_assets row + its raw (never-a-poster) storage
   // path -- only needed so a video with no poster yet can offer a
@@ -112,7 +118,21 @@ export async function getGridRowsWithCoverPaths(
     posterByMediaId.set(row.id, row.poster_storage_path ?? null);
   }
 
+  // Isolated the same way as preview/poster above -- thumbnail_storage_path
+  // is a new column that may not exist yet on a not-yet-migrated database.
+  // A missing/failed lookup here just means the display path falls back to
+  // the full original (see resolvedDisplayPath below), never a broken grid.
+  const { data: thumbnailRows } = mediaAssetIds.length
+    ? await supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", mediaAssetIds)
+    : { data: [] };
+  const thumbnailByMediaId = new Map<string, string | null>();
+  for (const r of thumbnailRows ?? []) {
+    const row = r as { id: string; thumbnail_storage_path: string | null };
+    thumbnailByMediaId.set(row.id, row.thumbnail_storage_path ?? null);
+  }
+
   const coverPathByPost = new Map<string, string | null>();
+  const coverDisplayPathByPost = new Map<string, string | null>();
   const coverTypeByPost = new Map<string, "image" | "video" | null>();
   const coverMediaIdByPost = new Map<string, string | null>();
   const coverOriginalPathByPost = new Map<string, string | null>();
@@ -120,11 +140,22 @@ export async function getGridRowsWithCoverPaths(
   for (const pa of postAssets ?? []) {
     const media = pa.media_assets as { id: string; storage_path: string; media_type: "image" | "video" } | null;
     if (!coverPathByPost.has(pa.post_id)) {
+      const previewPath = media ? previewByMediaId.get(media.id) : null;
       const resolvedPath =
         media?.media_type === "video"
           ? (posterByMediaId.get(media.id) ?? null)
-          : ((media ? previewByMediaId.get(media.id) : null) || media?.storage_path) ?? null;
+          : (previewPath || media?.storage_path) ?? null;
+      // Same resolution as resolvedPath (an edited preview always wins --
+      // it's already a flattened, reasonably-sized export, not the raw
+      // upload), except an image with neither prefers the small generated
+      // thumbnail over the full original. Video already resolves to its
+      // (small) poster either way, so display and export paths match there.
+      const resolvedDisplayPath =
+        media?.media_type === "video"
+          ? resolvedPath
+          : (previewPath || (media ? thumbnailByMediaId.get(media.id) : null) || media?.storage_path) ?? null;
       coverPathByPost.set(pa.post_id, resolvedPath);
+      coverDisplayPathByPost.set(pa.post_id, resolvedDisplayPath);
       coverTypeByPost.set(pa.post_id, media?.media_type ?? null);
       coverMediaIdByPost.set(pa.post_id, media?.id ?? null);
       coverOriginalPathByPost.set(pa.post_id, media?.storage_path ?? null);
@@ -145,6 +176,7 @@ export async function getGridRowsWithCoverPaths(
       slotId: slot.id,
       postId: slot.post_id,
       coverStoragePath: slot.post_id ? coverPathByPost.get(slot.post_id) ?? null : null,
+      coverDisplayPath: slot.post_id ? coverDisplayPathByPost.get(slot.post_id) ?? null : null,
       coverMediaType: slot.post_id ? coverTypeByPost.get(slot.post_id) ?? null : null,
       coverMediaAssetId: slot.post_id ? coverMediaIdByPost.get(slot.post_id) ?? null : null,
       coverOriginalPath: slot.post_id ? coverOriginalPathByPost.get(slot.post_id) ?? null : null,

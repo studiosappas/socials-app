@@ -83,6 +83,17 @@ export default async function GridPage({
   const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
+  // Isolated the same way -- thumbnail_storage_path is a new column that
+  // may not exist yet on a not-yet-migrated database. A missing/failed
+  // lookup here just means the library sidebar shows full originals until
+  // the migration runs, never a broken page.
+  const { data: thumbnailRows } = assetIds.length
+    ? await supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", assetIds)
+    : { data: [] };
+  const thumbnailPathByAssetId = new Map(
+    (thumbnailRows ?? []).map((r) => [r.id, (r as { thumbnail_storage_path: string | null }).thumbnail_storage_path]),
+  );
+
   // Which assets already occupy a slot on the Grid, for the always-visible
   // "already on the Grid" badge on the media library -- scoped to posts
   // that actually have a grid_slots row (not just any post in the
@@ -98,10 +109,15 @@ export default async function GridPage({
   const usedInGridIds = new Set((gridAssetRows ?? []).map((r) => r.media_asset_id));
 
   const allPaths = new Set<string>();
-  for (const asset of mediaAssets ?? []) allPaths.add(asset.storage_path);
+  for (const asset of mediaAssets ?? []) {
+    allPaths.add(asset.storage_path);
+    const thumb = thumbnailPathByAssetId.get(asset.id);
+    if (thumb) allPaths.add(thumb);
+  }
   for (const row of gridRowsWithPaths) {
     for (const slot of row.slots) {
       if (slot.coverStoragePath) allPaths.add(slot.coverStoragePath);
+      if (slot.coverDisplayPath) allPaths.add(slot.coverDisplayPath);
       if (slot.coverOriginalPath) allPaths.add(slot.coverOriginalPath);
     }
   }
@@ -113,7 +129,11 @@ export default async function GridPage({
     slots: row.slots.map((slot) => ({
       id: slot.slotId,
       postId: slot.postId,
-      thumbnailUrl: slot.coverStoragePath ? urlByPath.get(slot.coverStoragePath) ?? null : null,
+      // The small generated thumbnail when one exists, not the (possibly
+      // 10s of MB) original -- coverStoragePath itself stays full quality
+      // for the export/export-pdf routes, which read grid-data.ts's own
+      // return value directly rather than this page's mapped GridBoardRow.
+      thumbnailUrl: slot.coverDisplayPath ? urlByPath.get(slot.coverDisplayPath) ?? null : null,
       coverMediaType: slot.coverMediaType,
       coverMediaAssetId: slot.coverMediaAssetId,
       coverOriginalUrl: slot.coverOriginalPath ? urlByPath.get(slot.coverOriginalPath) ?? null : null,
@@ -123,9 +143,14 @@ export default async function GridPage({
     })),
   }));
 
-  const mediaLibrary: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => ({
+  const mediaLibrary: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => {
+    const thumbPath = thumbnailPathByAssetId.get(asset.id);
+    return {
     id: asset.id,
-    url: urlByPath.get(asset.storage_path) ?? null,
+    // Same thumbnail-over-original preference as the grid slots above --
+    // this sidebar renders every library asset at once, so it's the other
+    // place a full-size original for a small tile mattered most.
+    url: (thumbPath ? urlByPath.get(thumbPath) : undefined) ?? urlByPath.get(asset.storage_path) ?? null,
     mediaType: asset.media_type,
     // Kept alongside the signed url (not just the url) so an undone delete
     // can restore this exact asset without re-uploading -- see
@@ -134,7 +159,8 @@ export default async function GridPage({
     posterStoragePath: asset.poster_storage_path ?? null,
     usedInGrid: usedInGridIds.has(asset.id),
     folderId: folderIdByAssetId.get(asset.id) ?? null,
-  }));
+    };
+  });
 
   const shareData = await getShareLinksData(supabase, projectId);
 
