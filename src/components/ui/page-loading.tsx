@@ -1,3 +1,5 @@
+import { FlowerLoader } from "./flower-loader";
+
 // The one shared full-page loading shell, replacing 16 individually-tuned
 // page skeletons. Those all tried to visually approximate their real
 // destination page -- a grid of tiles, a list of rows, a form -- which
@@ -12,10 +14,10 @@
 // requested, before any data has loaded: the persistent app chrome (the
 // surrounding layout.tsx, already mounted, untouched by this file) stays
 // exactly as it was, and the destination's page title is static per-route
-// knowledge, not a guess about content. Everything else is a small,
-// neutral loading affordance -- never a placeholder shaped like a grid,
-// card, list, or form, so there is nothing for the real content to visibly
-// replace.
+// knowledge, not a guess about content. Everything else is the branded
+// FlowerLoader motion mark, centered in the remaining content area --
+// never a placeholder shaped like a grid, card, list, or form, so there is
+// nothing for the real content to visibly replace.
 //
 // Deliberately not used by the Post/Story editor's intercepted-modal
 // loaders (@modal/(.)posts, @modal/(.)stories) -- those mount the real
@@ -25,12 +27,8 @@ export function PageLoading({ title }: { title?: string }) {
   return (
     <div className="flex min-h-[40vh] flex-col gap-6">
       {title && <h1 className="text-xs font-semibold tracking-wide uppercase text-muted">{title}</h1>}
-      <div className="flex items-center gap-2 text-xs tracking-wide text-muted uppercase">
-        <span
-          aria-hidden="true"
-          className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
-        />
-        <span>Loading…</span>
+      <div className="flex flex-1 items-center justify-center">
+        <FlowerLoader />
       </div>
     </div>
   );
