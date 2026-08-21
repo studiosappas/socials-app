@@ -1155,7 +1155,6 @@ function SpectrumSlider({
   defaultValue: number;
   disabled: boolean;
 }) {
-  const router = useRouter();
   const [, startTransition] = useTransition();
   const [value, setValue] = useState(defaultValue);
   // React batches the onChange->setValue update with whatever event fires
@@ -1184,11 +1183,15 @@ function SpectrumSlider({
     latestValueRef.current = next;
   }
 
+  // No router.refresh() -- `value` (state, set in handleChange above)
+  // already shows the dragged position correctly and permanently, with or
+  // without a fresh page render; updateSpectrumValue no longer revalidates
+  // its own route either, since there was nothing left for a refresh to
+  // usefully bring back here.
   function commit() {
     const next = latestValueRef.current;
     startTransition(async () => {
       await updateSpectrumValue(projectId, name, next);
-      router.refresh();
     });
   }
 

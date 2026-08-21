@@ -80,7 +80,12 @@ export async function updateSpectrumValue(
     .upsert({ project_id: projectId, ...patch, updated_at: new Date().toISOString() });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- the slider's own local
+  // `value` state (overview-panels.tsx's SpectrumSlider) already shows the
+  // dragged position correctly and permanently, with or without this;
+  // revalidating /projects/[projectId] here only forced a full fresh page
+  // render to be bundled into this action's own response before it could
+  // resolve, for a value the UI was already showing correctly.
   return { success: true };
 }
 
@@ -110,7 +115,10 @@ export async function generateBrandSummary(projectId: string): Promise<OverviewA
     .upsert({ project_id: projectId, ai_summary: result.text, updated_at: new Date().toISOString() });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- its one caller
+  // (BrandIntelligenceSection.handleRefreshAi) already calls
+  // router.refresh() itself right after this resolves, so this was purely
+  // redundant: the same fresh render, minted twice.
   return { success: true };
 }
 
@@ -169,7 +177,10 @@ export async function suggestPersonalitySpectrum(projectId: string): Promise<Ove
   });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- its callers
+  // (BrandSpectrumPanel.handleSuggestSpectrum, refreshBrandIntelligence)
+  // already bring back fresh data themselves (router.refresh() / their own
+  // revalidation), same reasoning as generateBrandSummary above.
   return { success: true };
 }
 
@@ -207,7 +218,11 @@ export async function uploadBrandDocument(
     .single();
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- its one caller
+  // (BrandKnowledgeDialog) always follows a successful upload with
+  // onUploaded(documentId), which triggers handleIntelligenceRefresh ->
+  // refreshBrandIntelligence -> router.refresh(), so the document list
+  // gets a fresh render regardless of anything revalidated here.
   return { success: true, documentId: data?.id };
 }
 
@@ -239,10 +254,16 @@ export async function addBrandLink(
     .single();
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- same reasoning as uploadBrandDocument above (its
+  // one caller, the same BrandKnowledgeDialog, triggers the same
+  // onUploaded -> refreshBrandIntelligence -> router.refresh() chain).
   return { success: true, documentId: data?.id };
 }
 
+// Not revalidating anywhere in this function -- both of its callers already
+// bring back fresh data themselves: BrandKnowledgeDialog.handleAnalyze
+// calls router.refresh() right after, and refreshBrandIntelligence (which
+// also calls this internally) has its own client-side refresh chain too.
 export async function analyzeBrandDocument(projectId: string, documentId: string) {
   const supabase = await createClient();
 
@@ -261,7 +282,6 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
       .from("brand_documents")
       .update({ ai_analysis: "Links are used as context automatically -- no separate analysis needed." })
       .eq("id", documentId);
-    revalidatePath(`/projects/${projectId}`);
     return;
   }
 
@@ -276,7 +296,6 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
       .from("brand_documents")
       .update({ ai_analysis: "Only PDF analysis is supported right now." })
       .eq("id", documentId);
-    revalidatePath(`/projects/${projectId}`);
     return;
   }
 
@@ -291,9 +310,11 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
 
   const analysis = "error" in result ? result.error : result.text;
   await supabase.from("brand_documents").update({ ai_analysis: analysis }).eq("id", documentId);
-  revalidatePath(`/projects/${projectId}`);
 }
 
+// Not revalidating its own route -- its one caller
+// (BrandKnowledgeOrbit.handleDelete) always calls router.refresh() itself
+// right after this resolves.
 export async function deleteBrandDocument(projectId: string, documentId: string) {
   const supabase = await createClient();
 
@@ -307,7 +328,6 @@ export async function deleteBrandDocument(projectId: string, documentId: string)
     await supabase.storage.from("brand-documents").remove([doc.storage_path]);
   }
   await supabase.from("brand_documents").delete().eq("id", documentId);
-  revalidatePath(`/projects/${projectId}`);
 }
 
 async function brandContextLines(
@@ -381,7 +401,9 @@ export async function generateBrandSections(projectId: string): Promise<Overview
   });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- same reasoning as generateBrandSummary above (both
+  // callers, handleRefreshAi and refreshBrandIntelligence, already bring
+  // back fresh data themselves).
   return { success: true };
 }
 
@@ -449,7 +471,8 @@ export async function generateAiInsights(projectId: string): Promise<OverviewAct
   });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- its one caller (AiRecommendationsPanel.handleRefresh)
+  // already calls router.refresh() itself right after this resolves.
   return { success: true };
 }
 
@@ -482,6 +505,8 @@ export async function refreshBrandIntelligence(
     link: `/projects/${projectId}`,
   });
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- its one caller (BrandIntelligenceSection's
+  // handleIntelligenceRefresh) already calls router.refresh() itself right
+  // after this resolves.
   return { success: true };
 }
