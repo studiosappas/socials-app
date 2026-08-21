@@ -1,14 +1,5 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/page-loading";
 
-export default function TeamSettingsLoading() {
-  return (
-    <div className="flex flex-col gap-6">
-      <Skeleton className="h-6 w-24" />
-      <div className="flex flex-col gap-2">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-12 w-full" />
-        ))}
-      </div>
-    </div>
-  );
+export default function SettingsTeamLoading() {
+  return <PageLoading title="Team & Permissions" />;
 }

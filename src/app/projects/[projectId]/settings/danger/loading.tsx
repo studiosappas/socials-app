@@ -1,10 +1,5 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/page-loading";
 
-export default function DangerSettingsLoading() {
-  return (
-    <div className="flex flex-col gap-4">
-      <Skeleton className="h-6 w-28" />
-      <Skeleton className="h-24 w-full" />
-    </div>
-  );
+export default function SettingsDangerLoading() {
+  return <PageLoading title="Danger Zone" />;
 }

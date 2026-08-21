@@ -1,15 +1,10 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/page-loading";
 
-// Full-page fallback for a direct navigation/hard refresh to this route
-// (the common case is the intercepted @modal version, which already has
-// its own loading.tsx) -- same getPostPageData fetch, same reasoning.
-export default function PostPageLoading() {
-  return (
-    <div className="flex flex-col gap-4">
-      <Skeleton className="aspect-[4/5] w-full max-w-xs" />
-      <Skeleton className="h-3 w-2/3" />
-      <Skeleton className="h-3 w-1/2" />
-      <Skeleton className="h-20 w-full" />
-    </div>
-  );
+// The full-page fallback route (direct navigation/hard reload) -- the
+// intercepted-modal version at @modal/(.)posts/[postId]/loading.tsx keeps
+// its own richer <Modal>-shelled loader, since that's a soft navigation
+// where the modal chrome itself is what needs to feel instant. This one
+// never has a post caption to show yet, only that it's a post.
+export default function PostEditorPageLoading() {
+  return <PageLoading title="Post" />;
 }

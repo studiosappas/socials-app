@@ -1,14 +1,5 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/page-loading";
 
-export default function ActivitySettingsLoading() {
-  return (
-    <div className="flex flex-col gap-4">
-      <Skeleton className="h-6 w-32" />
-      <div className="flex flex-col gap-2">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <Skeleton key={i} className="h-8 w-full" />
-        ))}
-      </div>
-    </div>
-  );
+export default function SettingsActivityLoading() {
+  return <PageLoading title="Activity Log" />;
 }
