@@ -36,69 +36,75 @@ export async function getPostPageData(
 ): Promise<PostPageData | null> {
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // This used to be ~15 sequential `await`s -- each one its own network
+  // round trip, one after another, before the intercepted Post Editor
+  // modal could render at all (see grid-board.tsx's own prefetch comment,
+  // which is the other half of this fix: warming this route ahead of the
+  // click doesn't help if the route itself is this slow to resolve once
+  // requested). Grouped into dependency "waves" run with Promise.all
+  // instead -- same queries, same isolation-per-column reasoning as
+  // before (each comment below still applies to its own query), just
+  // concurrent within each wave rather than one-at-a-time.
+  const [
+    userResult,
+    postResult,
+    timeRowResult,
+    reviewStatusRowResult,
+    coverTransformRowResult,
+    postAssetsResult,
+    linksResult,
+    allMediaAssetsResult,
+    carouselPostsResult,
+    members,
+    brandMoodboard,
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("posts").select("id, post_type, caption, notes, scheduled_date, status").eq("id", postId).single(),
+    // Isolated from the main post select -- scheduled_time is a new column
+    // that may not exist yet on a not-yet-migrated database (same reasoning
+    // as preview_storage_path/annotation_json below).
+    supabase.from("posts").select("scheduled_time").eq("id", postId).maybeSingle(),
+    // Isolated the same way -- review_status is what Client Review's
+    // review-link submissions write to, and what the "Approval Status"
+    // field reads/writes manually.
+    supabase.from("posts").select("review_status").eq("id", postId).maybeSingle(),
+    // Isolated the same way -- the one canonical cover crop, same column
+    // Grid's own crop tool reads/writes.
+    supabase.from("posts").select("cover_transform").eq("id", postId).maybeSingle(),
+    supabase
+      .from("post_assets")
+      .select("id, position, media_assets(id, storage_path, media_type)")
+      .eq("post_id", postId)
+      .order("position"),
+    supabase.from("post_links").select("id, url, label").eq("post_id", postId),
+    supabase
+      .from("media_assets")
+      .select("id, storage_path, media_type")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
+    // Same "already used in a carousel" lookup as Grid's own media library
+    // (grid/page.tsx) -- kept as two plain queries rather than a joined
+    // filter, matching this file's existing isolated-lookup style.
+    supabase.from("posts").select("id").eq("project_id", projectId).eq("post_type", "carousel"),
+    getProjectMemberOptions(supabase, projectId),
+    // Reuses Brand Moodboard's own project-scoped, RLS-backed fetch --
+    // the post editor's font picker just derives its custom-font list from
+    // the same source Brief's does.
+    getBrandMoodboard(supabase, projectId),
+  ]);
 
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
-
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
-
-  const { data: post } = await supabase
-    .from("posts")
-    .select("id, post_type, caption, notes, scheduled_date, status")
-    .eq("id", postId)
-    .single();
+  const user = userResult.data.user;
+  const post = postResult.data;
+  const timeRow = timeRowResult.data;
+  const reviewStatusRow = reviewStatusRowResult.data;
+  const coverTransformRow = coverTransformRowResult.data;
+  const postAssets = postAssetsResult.data;
+  const links = linksResult.data;
+  const allMediaAssets = allMediaAssetsResult.data;
+  const carouselPosts = carouselPostsResult.data;
+  const customFonts = deriveCustomFontFaces(brandMoodboard);
 
   if (!post) return null;
-
-  // Isolated from the select above -- scheduled_time is a new column that
-  // may not exist yet on a not-yet-migrated database (same reasoning as
-  // preview_storage_path/annotation_json below).
-  const { data: timeRow } = await supabase
-    .from("posts")
-    .select("scheduled_time")
-    .eq("id", postId)
-    .maybeSingle();
-
-  // Isolated the same way -- review_status is what Client Review's
-  // review-link submissions write to, and what the new "Approval Status"
-  // field below reads/writes manually.
-  const { data: reviewStatusRow } = await supabase
-    .from("posts")
-    .select("review_status")
-    .eq("id", postId)
-    .maybeSingle();
-
-  // Isolated the same way -- the one canonical cover crop, same column
-  // Grid's own crop tool reads/writes.
-  const { data: coverTransformRow } = await supabase
-    .from("posts")
-    .select("cover_transform")
-    .eq("id", postId)
-    .maybeSingle();
-
-  const { data: postAssets } = await supabase
-    .from("post_assets")
-    .select("id, position, media_assets(id, storage_path, media_type)")
-    .eq("post_id", postId)
-    .order("position");
-
-  const { data: links } = await supabase
-    .from("post_links")
-    .select("id, url, label")
-    .eq("post_id", postId);
-
-  const { data: allMediaAssets } = await supabase
-    .from("media_assets")
-    .select("id, storage_path, media_type")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: false });
 
   // Isolated from the select above -- archived is a newer column that may
   // not exist yet on a not-yet-migrated database, and a plain .eq() filter
@@ -106,24 +112,21 @@ export async function getPostPageData(
   // `data` is read) the instant it doesn't exist, wiping out the whole
   // library instead of just not filtering archived assets out yet.
   const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
-  const { data: archivedRows } = allMediaIdsForArchiveCheck.length
-    ? await supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
-    : { data: [] };
+  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
+
+  const [{ data: membership }, { data: archivedRows }, { data: carouselAssetRows }] = await Promise.all([
+    supabase.from("project_members").select("role").eq("project_id", projectId).eq("user_id", user!.id).single(),
+    allMediaIdsForArchiveCheck.length
+      ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
+      : Promise.resolve({ data: [] }),
+    carouselPostIds.length
+      ? supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const canManage = membership?.role === "owner" || membership?.role === "admin";
   const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
-
-  // Same "already used in a carousel" lookup as Grid's own media library
-  // (grid/page.tsx) -- kept as two plain queries rather than a joined
-  // filter, matching this file's existing isolated-lookup style.
-  const { data: carouselPosts } = await supabase
-    .from("posts")
-    .select("id")
-    .eq("project_id", projectId)
-    .eq("post_type", "carousel");
-  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
-  const { data: carouselAssetRows } = carouselPostIds.length
-    ? await supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
-    : { data: [] };
   const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
 
   // Fetched independently, same reasoning as Grid's cover_transform/
@@ -140,12 +143,24 @@ export async function getPostPageData(
     if (media) allMediaIds.add(media.id);
   }
   for (const asset of mediaAssets ?? []) allMediaIds.add(asset.id);
-  const { data: previewRows } = allMediaIds.size
-    ? await supabase
-        .from("media_assets")
-        .select("id, preview_storage_path, annotation_json")
-        .in("id", Array.from(allMediaIds))
-    : { data: [] };
+
+  const [{ data: previewRows }, { data: posterRows }] = await Promise.all([
+    allMediaIds.size
+      ? supabase.from("media_assets").select("id, preview_storage_path, annotation_json").in("id", Array.from(allMediaIds))
+      : Promise.resolve({ data: [] }),
+    // Isolated the same way as preview_storage_path above (a still-pending
+    // migration should only mean video covers aren't shown yet, not that
+    // the whole post editor breaks). Without this, the post editor's own
+    // asset strip had nothing pointing at a video's manually-picked/
+    // annotated cover at all -- it always showed the raw <video> element
+    // instead (see AssetPreview in post-editor.tsx), so picking a cover
+    // frame changed Grid but looked like nothing happened here, even
+    // though the save succeeded.
+    allMediaIds.size
+      ? supabase.from("media_assets").select("id, poster_storage_path").in("id", Array.from(allMediaIds))
+      : Promise.resolve({ data: [] }),
+  ]);
+
   const previewByMediaId = new Map<string, { previewPath: string | null; annotationJson: object | null }>();
   for (const r of previewRows ?? []) {
     previewByMediaId.set(r.id, {
@@ -154,16 +169,6 @@ export async function getPostPageData(
     });
   }
 
-  // Isolated the same way as preview_storage_path above (a still-pending
-  // migration should only mean video covers aren't shown yet, not that the
-  // whole post editor breaks). Without this, the post editor's own asset
-  // strip had nothing pointing at a video's manually-picked/annotated cover
-  // at all -- it always showed the raw <video> element instead (see
-  // AssetPreview in post-editor.tsx), so picking a cover frame changed Grid
-  // but looked like nothing happened here, even though the save succeeded.
-  const { data: posterRows } = allMediaIds.size
-    ? await supabase.from("media_assets").select("id, poster_storage_path").in("id", Array.from(allMediaIds))
-    : { data: [] };
   const posterPathByMediaId = new Map<string, string | null>();
   for (const r of posterRows ?? []) {
     posterPathByMediaId.set(r.id, (r as { id: string; poster_storage_path: string | null }).poster_storage_path ?? null);
@@ -223,14 +228,6 @@ export async function getPostPageData(
     url: l.url,
     label: l.label,
   }));
-
-  const members = await getProjectMemberOptions(supabase, projectId);
-
-  // Reuses Brand Moodboard's own project-scoped, RLS-backed fetch (already
-  // isolated/graceful on its own) -- the post editor's font picker just
-  // derives its custom-font list from the same source Brief's does.
-  const brandMoodboard = await getBrandMoodboard(supabase, projectId);
-  const customFonts = deriveCustomFontFaces(brandMoodboard);
 
   return {
     post: {
