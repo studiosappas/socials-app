@@ -44,6 +44,14 @@ export function MediaThumbPreview({
           <GridUsageIcon className="h-2.5 w-2.5" />
         </span>
       )}
+      {item.pending && (
+        <div
+          title="Uploading — not ready to use yet"
+          className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35 backdrop-blur-[1px]"
+        >
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+        </div>
+      )}
     </div>
   );
 }
@@ -164,7 +172,13 @@ export function MediaLibrary({
         setOverrideItems((current) =>
           (current ?? effectiveItems).map((i) =>
             i.id === tempId
-              ? { ...i, id: realId, storagePath: realStoragePath, posterStoragePath: realPosterStoragePath }
+              ? {
+                  ...i,
+                  id: realId,
+                  storagePath: realStoragePath,
+                  posterStoragePath: realPosterStoragePath,
+                  pending: false,
+                }
               : i,
           ),
         );
@@ -359,6 +373,10 @@ export function MediaLibrary({
                     id: `optimistic-${crypto.randomUUID()}`,
                     url,
                     mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
+                    // Shown immediately, but not draggable/selectable until
+                    // the reconciliation effect below clears this once
+                    // uploadMedia's insert actually resolves.
+                    pending: true,
                   } satisfies MediaLibraryItem,
                 };
               });
@@ -548,12 +566,17 @@ function MediaThumb({
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `media-${item.id}`,
     data: { mediaAssetId: item.id, item },
+    // Still uploading -- not a real, persisted asset yet, so it can't be
+    // dropped onto a Grid slot (assignMediaToSlot needs a real
+    // media_assets row to reference). dnd-kit never starts a drag at all
+    // when disabled, so there's no drop event to separately guard.
+    disabled: item.pending,
   });
 
   return (
     <div
       className={`group relative aspect-square min-w-0 touch-none overflow-hidden border border-border transition-[opacity,border-color] duration-150 ${
-        isDragging ? "cursor-grabbing opacity-30" : "cursor-grab hover:border-foreground/30"
+        isDragging ? "cursor-grabbing opacity-30" : item.pending ? "cursor-default" : "cursor-grab hover:border-foreground/30"
       }`}
     >
       <div ref={setNodeRef} {...listeners} {...attributes} className="absolute inset-0">
@@ -565,12 +588,13 @@ function MediaThumb({
           e.stopPropagation();
           onToggleSelect();
         }}
-        title={selected ? "Deselect" : "Select"}
+        disabled={item.pending}
+        title={item.pending ? "Uploading…" : selected ? "Deselect" : "Select"}
         // pointer-coarse: touch has no hover state to reveal this with, so
         // it's always shown there (matching the picker dialog's own
         // always-visible delete button, which already handles this same
         // case) -- desktop keeps the existing hover-only reveal unchanged.
-        className={`absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100 ${
+        className={`absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100 disabled:pointer-events-none ${
           selected ? "opacity-100" : "opacity-0"
         }`}
       >
