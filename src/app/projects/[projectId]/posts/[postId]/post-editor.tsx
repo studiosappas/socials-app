@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
+import { Suspense, use, useActionState, useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -106,7 +106,7 @@ export function PostEditor({
   post,
   assets,
   links,
-  mediaLibrary,
+  mediaLibraryPromise,
   canManage,
   currentUserId,
   members,
@@ -117,7 +117,13 @@ export function PostEditor({
   post: PostRecord;
   assets: PostAssetItem[];
   links: PostLinkItem[];
-  mediaLibrary: MediaLibraryItem[];
+  // Unresolved on purpose -- the whole-project media library is the one
+  // part of the old data fetch that scaled with total project media count,
+  // not with this post's own asset count. Only AddFromLibrarySection and
+  // ReplaceAssetPopover below actually consume it (via use()), each
+  // suspending in its own small boundary, so the primary editor (post
+  // fields, asset carousel, links, save) never waits on it.
+  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
   canManage: boolean;
   currentUserId: string;
   members: ProjectMemberOption[];
@@ -125,6 +131,7 @@ export function PostEditor({
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
+  const { showError } = useToast();
   const [prevAssets, setPrevAssets] = useState(assets);
   const [orderedAssets, setOrderedAssets] = useState(assets);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
@@ -148,6 +155,88 @@ export function PostEditor({
     setOverrideCoverTransform(undefined);
   }
   const effectiveCoverTransform = overrideCoverTransform !== undefined ? overrideCoverTransform : post.coverTransform;
+
+  // Optimistic insert -- item.url/mediaType are already known client-side
+  // (picked from the already-loaded media library, not a fresh upload), so
+  // the new tile can show immediately with a temp postAssetId, then get
+  // patched to the real id once addPostAsset resolves. Reverts (removes the
+  // placeholder) and surfaces a toast if the insert fails.
+  function handleAddFromLibrary(item: MediaLibraryItem) {
+    const tempId = `temp-${item.id}-${Date.now()}`;
+    const optimisticAsset: PostAssetItem = {
+      postAssetId: tempId,
+      mediaAssetId: item.id,
+      url: item.url,
+      originalUrl: item.url,
+      annotationJson: null,
+      mediaType: item.mediaType as "image" | "video",
+      posterUrl: null,
+    };
+    setOrderedAssets((current) => [...current, optimisticAsset]);
+    startTransition(async () => {
+      const result = await addPostAsset(projectId, post.id, item.id);
+      if (result.success) {
+        setOrderedAssets((current) =>
+          current.map((a) => (a.postAssetId === tempId ? { ...a, postAssetId: result.postAssetId } : a)),
+        );
+      } else {
+        setOrderedAssets((current) => current.filter((a) => a.postAssetId !== tempId));
+        showError(result.message ?? "Couldn't add that asset.");
+      }
+    });
+  }
+
+  // Removes the tile immediately; only reverts + resyncs if the delete
+  // actually failed.
+  function handleRemoveAsset(postAssetId: string) {
+    const before = orderedAssets;
+    setOrderedAssets((current) => current.filter((a) => a.postAssetId !== postAssetId));
+    startTransition(async () => {
+      const result = await removePostAsset(projectId, post.id, postAssetId);
+      if (!result.success) {
+        setOrderedAssets(before);
+        showError(result.message ?? "Couldn't remove that asset.");
+        router.refresh();
+      }
+    });
+  }
+
+  // Swapping in a library pick (not a fresh upload) is optimistic for the
+  // same reason as handleAddFromLibrary above -- url/mediaType are already
+  // known client-side. Replacing the cover also resets its saved crop
+  // server-side (the new image may be framed completely differently), so
+  // this clears the local override the same way handleAnnotationSaved does
+  // for an edited cover.
+  function handleReplaceFromLibrary(postAssetId: string, item: MediaLibraryItem, isCover: boolean) {
+    const before = orderedAssets;
+    setOrderedAssets((current) =>
+      current.map((a) =>
+        a.postAssetId === postAssetId
+          ? {
+              ...a,
+              mediaAssetId: item.id,
+              url: item.url,
+              originalUrl: item.url,
+              annotationJson: null,
+              mediaType: item.mediaType as "image" | "video",
+              posterUrl: null,
+            }
+          : a,
+      ),
+    );
+    if (isCover) setOverrideCoverTransform(null);
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set("media_asset_id", item.id);
+      const result = await replacePostAsset(projectId, post.id, postAssetId, undefined, formData);
+      if (result?.message) {
+        setOrderedAssets(before);
+        if (isCover) setOverrideCoverTransform(undefined);
+        showError(result.message);
+        router.refresh();
+      }
+    });
+  }
 
   function handleAnnotationSaved(previewUrl: string) {
     const target = editingImage;
@@ -211,7 +300,6 @@ export function PostEditor({
   const activeAsset = orderedAssets.find((a) => a.postAssetId === activeAssetId) ?? null;
 
   const usedMediaIds = new Set(orderedAssets.map((a) => a.mediaAssetId));
-  const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
   const [downloading, setDownloading] = useState(false);
   async function handleDownloadAll() {
@@ -290,13 +378,9 @@ export function PostEditor({
                   coverTransform={effectiveCoverTransform}
                   projectId={projectId}
                   postId={post.id}
-                  mediaLibrary={mediaLibrary}
-                  onRemove={() =>
-                    startTransition(async () => {
-                      await removePostAsset(projectId, post.id, asset.postAssetId);
-                      router.refresh();
-                    })
-                  }
+                  mediaLibraryPromise={mediaLibraryPromise}
+                  onRemove={() => handleRemoveAsset(asset.postAssetId)}
+                  onReplaceFromLibrary={handleReplaceFromLibrary}
                   onEditImage={() =>
                     asset.mediaAssetId &&
                     asset.originalUrl &&
@@ -354,50 +438,15 @@ export function PostEditor({
         <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
       )}
 
-      {canManage && availableMedia.length > 0 && (
-        <section className="flex flex-col gap-2">
-          <span className={labelClass}>Add from library</span>
-          {/* Capped to roughly 9 rows on the full page, bounded by viewport
-              height too so it doesn't grow unboundedly with a project's full
-              media library. Inside the Grid/Stories popup (hideBackLink) the
-              modal itself is already space-constrained, so cap to a single
-              visible row there instead -- scrolls internally either way. */}
-          <div
-            className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
-              hideBackLink ? "max-h-48" : "max-h-[min(1000px,65vh)]"
-            }`}
-          >
-            {availableMedia.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() =>
-                  startTransition(async () => {
-                    await addPostAsset(projectId, post.id, item.id);
-                    router.refresh();
-                  })
-                }
-                className="relative aspect-[3/4] min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
-              >
-                {item.url && item.mediaType === "image" && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.url} alt="" className="h-full w-full object-cover" />
-                )}
-                {item.url && item.mediaType === "video" && (
-                  <video src={item.url} className="h-full w-full object-cover" muted />
-                )}
-                {item.usedInCarousel && (
-                  <span
-                    title="Already used in a carousel"
-                    className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
-                  >
-                    <CarouselUsageIcon className="h-2.5 w-2.5" />
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        </section>
+      {canManage && (
+        <Suspense fallback={null}>
+          <AddFromLibrarySection
+            mediaLibraryPromise={mediaLibraryPromise}
+            usedMediaIds={usedMediaIds}
+            hideBackLink={hideBackLink}
+            onAdd={handleAddFromLibrary}
+          />
+        </Suspense>
       )}
 
       <PostMainForm
@@ -429,6 +478,69 @@ export function PostEditor({
         customFonts={customFonts}
       />
     </div>
+  );
+}
+
+// Suspends on mediaLibraryPromise via use() -- isolated in its own small
+// boundary (see the <Suspense> wrapper at its call site above) so it's the
+// only part of the editor that waits on the whole-project media library,
+// instead of that blocking the primary editing surface the way the old
+// single-fetch page did.
+function AddFromLibrarySection({
+  mediaLibraryPromise,
+  usedMediaIds,
+  hideBackLink,
+  onAdd,
+}: {
+  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
+  usedMediaIds: Set<string>;
+  hideBackLink: boolean;
+  onAdd: (item: MediaLibraryItem) => void;
+}) {
+  const mediaLibrary = use(mediaLibraryPromise);
+  const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
+
+  if (availableMedia.length === 0) return null;
+
+  return (
+    <section className="flex flex-col gap-2">
+      <span className={labelClass}>Add from library</span>
+      {/* Capped to roughly 9 rows on the full page, bounded by viewport
+          height too so it doesn't grow unboundedly with a project's full
+          media library. Inside the Grid/Stories popup (hideBackLink) the
+          modal itself is already space-constrained, so cap to a single
+          visible row there instead -- scrolls internally either way. */}
+      <div
+        className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
+          hideBackLink ? "max-h-48" : "max-h-[min(1000px,65vh)]"
+        }`}
+      >
+        {availableMedia.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onAdd(item)}
+            className="relative aspect-[3/4] min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
+          >
+            {item.url && item.mediaType === "image" && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={item.url} alt="" className="h-full w-full object-cover" />
+            )}
+            {item.url && item.mediaType === "video" && (
+              <video src={item.url} className="h-full w-full object-cover" muted />
+            )}
+            {item.usedInCarousel && (
+              <span
+                title="Already used in a carousel"
+                className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
+              >
+                <CarouselUsageIcon className="h-2.5 w-2.5" />
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -471,9 +583,10 @@ function SortableAsset({
   coverTransform,
   projectId,
   postId,
-  mediaLibrary,
+  mediaLibraryPromise,
   onRemove,
   onEditImage,
+  onReplaceFromLibrary,
 }: {
   asset: PostAssetItem;
   canManage: boolean;
@@ -481,9 +594,10 @@ function SortableAsset({
   coverTransform: GridCoverTransform | null;
   projectId: string;
   postId: string;
-  mediaLibrary: MediaLibraryItem[];
+  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
   onRemove: () => void;
   onEditImage: () => void;
+  onReplaceFromLibrary: (postAssetId: string, item: MediaLibraryItem, isCover: boolean) => void;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -642,14 +756,24 @@ function SortableAsset({
         />
       )}
       {replaceOpen && (
-        <ReplaceAssetPopover
-          projectId={projectId}
-          postId={postId}
-          postAssetId={asset.postAssetId}
-          mediaLibrary={mediaLibrary.filter((m) => m.id !== asset.mediaAssetId)}
-          anchorRef={tileRef}
-          onClose={() => setReplaceOpen(false)}
-        />
+        // Its own boundary -- only mounts when the user explicitly opens
+        // Replace (several clicks into the editor), by which point
+        // mediaLibraryPromise -- kicked off back when the page itself
+        // started rendering -- has almost always already resolved, so this
+        // fallback is rarely if ever seen in practice.
+        <Suspense fallback={null}>
+          <ReplaceAssetPopover
+            projectId={projectId}
+            postId={postId}
+            postAssetId={asset.postAssetId}
+            mediaLibraryPromise={mediaLibraryPromise}
+            excludeMediaAssetId={asset.mediaAssetId}
+            isCover={isCover}
+            onReplaceFromLibrary={onReplaceFromLibrary}
+            anchorRef={tileRef}
+            onClose={() => setReplaceOpen(false)}
+          />
+        </Suspense>
       )}
     </div>
   );
@@ -671,17 +795,24 @@ function ReplaceAssetPopover({
   projectId,
   postId,
   postAssetId,
-  mediaLibrary,
+  mediaLibraryPromise,
+  excludeMediaAssetId,
+  isCover,
+  onReplaceFromLibrary,
   anchorRef,
   onClose,
 }: {
   projectId: string;
   postId: string;
   postAssetId: string;
-  mediaLibrary: MediaLibraryItem[];
+  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
+  excludeMediaAssetId: string;
+  isCover: boolean;
+  onReplaceFromLibrary: (postAssetId: string, item: MediaLibraryItem, isCover: boolean) => void;
   anchorRef: React.RefObject<HTMLElement | null>;
   onClose: () => void;
 }) {
+  const mediaLibrary = use(mediaLibraryPromise).filter((m) => m.id !== excludeMediaAssetId);
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [pending, setPending] = useState(false);
@@ -742,10 +873,15 @@ function ReplaceAssetPopover({
     runReplace(formData);
   }
 
-  function handlePickLibrary(mediaAssetId: string) {
-    const formData = new FormData();
-    formData.set("media_asset_id", mediaAssetId);
-    runReplace(formData);
+  // Optimistic -- unlike the file-upload path below, the picked item's
+  // url/mediaType are already known client-side (it's from the already-
+  // loaded media library), so this applies the swap immediately via the
+  // parent's onReplaceFromLibrary and closes right away instead of waiting
+  // on replacePostAsset's round trip. The parent handles rollback + a toast
+  // if the save actually fails.
+  function handlePickLibrary(item: MediaLibraryItem) {
+    onReplaceFromLibrary(postAssetId, item, isCover);
+    onClose();
   }
 
   if (!position) return null;
@@ -780,8 +916,7 @@ function ReplaceAssetPopover({
               <button
                 key={item.id}
                 type="button"
-                onClick={() => handlePickLibrary(item.id)}
-                disabled={pending}
+                onClick={() => handlePickLibrary(item)}
                 className="aspect-square min-w-0 overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30 disabled:opacity-60"
               >
                 {item.url && item.mediaType === "image" && (

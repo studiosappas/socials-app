@@ -6,7 +6,7 @@ import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
 
-export type PostPageData = {
+export type PostCoreData = {
   post: {
     id: string;
     post_type: PostType;
@@ -23,28 +23,24 @@ export type PostPageData = {
   };
   assets: PostAssetItem[];
   links: PostLinkItem[];
-  mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
   currentUserId: string;
   members: ProjectMemberOption[];
   customFonts: CustomFontFace[];
 };
 
-export async function getPostPageData(
+// Everything the primary editing surface actually needs to render and
+// become usable: the post's own fields, its own asset carousel (with real
+// signed URLs, not the whole project's), links, comment-mention members,
+// and the font picker's list. Deliberately does NOT include the project's
+// whole media library -- see getPostMediaLibrary below for why that's a
+// separate, non-blocking fetch now.
+export async function getPostCoreData(
   projectId: string,
   postId: string,
-): Promise<PostPageData | null> {
+): Promise<PostCoreData | null> {
   const supabase = await createClient();
 
-  // This used to be ~15 sequential `await`s -- each one its own network
-  // round trip, one after another, before the intercepted Post Editor
-  // modal could render at all (see grid-board.tsx's own prefetch comment,
-  // which is the other half of this fix: warming this route ahead of the
-  // click doesn't help if the route itself is this slow to resolve once
-  // requested). Grouped into dependency "waves" run with Promise.all
-  // instead -- same queries, same isolation-per-column reasoning as
-  // before (each comment below still applies to its own query), just
-  // concurrent within each wave rather than one-at-a-time.
   const [
     userResult,
     postResult,
@@ -53,8 +49,6 @@ export async function getPostPageData(
     coverTransformRowResult,
     postAssetsResult,
     linksResult,
-    allMediaAssetsResult,
-    carouselPostsResult,
     members,
     brandMoodboard,
   ] = await Promise.all([
@@ -77,15 +71,6 @@ export async function getPostPageData(
       .eq("post_id", postId)
       .order("position"),
     supabase.from("post_links").select("id, url, label").eq("post_id", postId),
-    supabase
-      .from("media_assets")
-      .select("id, storage_path, media_type")
-      .eq("project_id", projectId)
-      .order("created_at", { ascending: false }),
-    // Same "already used in a carousel" lookup as Grid's own media library
-    // (grid/page.tsx) -- kept as two plain queries rather than a joined
-    // filter, matching this file's existing isolated-lookup style.
-    supabase.from("posts").select("id").eq("project_id", projectId).eq("post_type", "carousel"),
     getProjectMemberOptions(supabase, projectId),
     // Reuses Brand Moodboard's own project-scoped, RLS-backed fetch --
     // the post editor's font picker just derives its custom-font list from
@@ -100,64 +85,43 @@ export async function getPostPageData(
   const coverTransformRow = coverTransformRowResult.data;
   const postAssets = postAssetsResult.data;
   const links = linksResult.data;
-  const allMediaAssets = allMediaAssetsResult.data;
-  const carouselPosts = carouselPostsResult.data;
   const customFonts = deriveCustomFontFaces(brandMoodboard);
 
   if (!post) return null;
 
-  // Isolated from the select above -- archived is a newer column that may
-  // not exist yet on a not-yet-migrated database, and a plain .eq() filter
-  // on the main select would fail (silently returning nothing, since only
-  // `data` is read) the instant it doesn't exist, wiping out the whole
-  // library instead of just not filtering archived assets out yet.
-  const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
-  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
-
-  const [{ data: membership }, { data: archivedRows }, { data: carouselAssetRows }] = await Promise.all([
-    supabase.from("project_members").select("role").eq("project_id", projectId).eq("user_id", user!.id).single(),
-    allMediaIdsForArchiveCheck.length
-      ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
-      : Promise.resolve({ data: [] }),
-    carouselPostIds.length
-      ? supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
-      : Promise.resolve({ data: [] }),
-  ]);
-
+  const { data: membership } = await supabase
+    .from("project_members")
+    .select("role")
+    .eq("project_id", projectId)
+    .eq("user_id", user!.id)
+    .single();
   const canManage = membership?.role === "owner" || membership?.role === "admin";
-  const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
-  const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
-  const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
 
-  // Fetched independently, same reasoning as Grid's cover_transform/
-  // preview_storage_path isolation in grid-data.ts: preview_storage_path/
-  // annotation_json are newer columns that may not exist yet on a
+  // Isolated from the select above -- preview_storage_path/annotation_json/
+  // poster_storage_path are newer columns that may not exist yet on a
   // not-yet-migrated database, and PostgREST fails an ENTIRE select if any
-  // requested column is missing -- folding these into the selects above
-  // once broke the whole post editor (zero assets shown) rather than just
-  // losing edit-preview data, until this was isolated the same way Grid
-  // already handles it.
-  const allMediaIds = new Set<string>();
+  // requested column is missing -- folding these into the post_assets
+  // select once broke the whole post editor (zero assets shown) rather than
+  // just losing edit-preview data, until this was isolated the same way
+  // Grid already handles it. Scoped to just this post's own asset ids, not
+  // the whole project's media library.
+  const ownMediaIds = new Set<string>();
   for (const pa of postAssets ?? []) {
     const media = pa.media_assets as { id: string } | null;
-    if (media) allMediaIds.add(media.id);
+    if (media) ownMediaIds.add(media.id);
   }
-  for (const asset of mediaAssets ?? []) allMediaIds.add(asset.id);
 
   const [{ data: previewRows }, { data: posterRows }] = await Promise.all([
-    allMediaIds.size
-      ? supabase.from("media_assets").select("id, preview_storage_path, annotation_json").in("id", Array.from(allMediaIds))
+    ownMediaIds.size
+      ? supabase.from("media_assets").select("id, preview_storage_path, annotation_json").in("id", Array.from(ownMediaIds))
       : Promise.resolve({ data: [] }),
-    // Isolated the same way as preview_storage_path above (a still-pending
-    // migration should only mean video covers aren't shown yet, not that
-    // the whole post editor breaks). Without this, the post editor's own
-    // asset strip had nothing pointing at a video's manually-picked/
-    // annotated cover at all -- it always showed the raw <video> element
-    // instead (see AssetPreview in post-editor.tsx), so picking a cover
-    // frame changed Grid but looked like nothing happened here, even
-    // though the save succeeded.
-    allMediaIds.size
-      ? supabase.from("media_assets").select("id, poster_storage_path").in("id", Array.from(allMediaIds))
+    // Without this, the post editor's own asset strip had nothing pointing
+    // at a video's manually-picked/annotated cover at all -- it always
+    // showed the raw <video> element instead (see AssetPreview below),
+    // so picking a cover frame changed Grid but looked like nothing
+    // happened here, even though the save succeeded.
+    ownMediaIds.size
+      ? supabase.from("media_assets").select("id, poster_storage_path").in("id", Array.from(ownMediaIds))
       : Promise.resolve({ data: [] }),
   ]);
 
@@ -175,13 +139,6 @@ export async function getPostPageData(
   }
 
   const allPaths = new Set<string>();
-  for (const asset of mediaAssets ?? []) {
-    allPaths.add(asset.storage_path);
-    const preview = previewByMediaId.get(asset.id)?.previewPath;
-    if (preview) allPaths.add(preview);
-    const poster = posterPathByMediaId.get(asset.id);
-    if (poster) allPaths.add(poster);
-  }
   for (const pa of postAssets ?? []) {
     const media = pa.media_assets as { id: string; storage_path: string } | null;
     if (media) {
@@ -213,16 +170,6 @@ export async function getPostPageData(
     };
   });
 
-  const mediaLibrary: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => {
-    const preview = previewByMediaId.get(asset.id)?.previewPath;
-    return {
-      id: asset.id,
-      url: preview ? urlByPath.get(preview) ?? urlByPath.get(asset.storage_path) ?? null : urlByPath.get(asset.storage_path) ?? null,
-      mediaType: asset.media_type,
-      usedInCarousel: usedInCarouselIds.has(asset.id),
-    };
-  });
-
   const postLinks: PostLinkItem[] = (links ?? []).map((l) => ({
     id: l.id,
     url: l.url,
@@ -238,10 +185,93 @@ export async function getPostPageData(
     },
     assets,
     links: postLinks,
-    mediaLibrary,
     canManage,
     currentUserId: user!.id,
     members,
     customFonts,
   };
+}
+
+// The project's whole media library, for the "Add from library" section and
+// the Replace-asset popover -- deliberately split out from getPostCoreData
+// above. This is the one query in the old getPostPageData that scaled with
+// the ENTIRE project's media count (every asset gets an archived check, a
+// preview/poster lookup, and a signed URL), not with this one post's asset
+// count -- on a project with a large library, it was the dominant cost of
+// opening the editor, and none of it is needed to render the primary
+// editing surface. Callers pass this as an unawaited promise so the
+// primary editor can render immediately; only the two actual consumers
+// (the inline "Add from library" grid, and Replace-asset, both in
+// post-editor.tsx) suspend on it, each in its own small boundary.
+export async function getPostMediaLibrary(projectId: string): Promise<MediaLibraryItem[]> {
+  const supabase = await createClient();
+
+  const [{ data: allMediaAssets }, { data: carouselPosts }] = await Promise.all([
+    supabase
+      .from("media_assets")
+      .select("id, storage_path, media_type")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
+    // Same "already used in a carousel" lookup as Grid's own media library
+    // (grid/page.tsx) -- kept as two plain queries rather than a joined
+    // filter, matching this file's existing isolated-lookup style.
+    supabase.from("posts").select("id").eq("project_id", projectId).eq("post_type", "carousel"),
+  ]);
+
+  // Isolated from the select above -- archived is a newer column that may
+  // not exist yet on a not-yet-migrated database, and a plain .eq() filter
+  // on the main select would fail (silently returning nothing, since only
+  // `data` is read) the instant it doesn't exist, wiping out the whole
+  // library instead of just not filtering archived assets out yet.
+  const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
+  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
+
+  const [{ data: archivedRows }, { data: carouselAssetRows }] = await Promise.all([
+    allMediaIdsForArchiveCheck.length
+      ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
+      : Promise.resolve({ data: [] }),
+    carouselPostIds.length
+      ? supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
+  const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
+  const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+
+  // poster_storage_path is deliberately NOT fetched here -- MediaLibraryItem
+  // only ever renders `url` (the image, or the raw <video> for a video
+  // item; see the "Add from library" grid in post-editor.tsx), never a
+  // video's poster. The original combined fetch signed poster paths for
+  // every asset in the whole library and never used them for this list --
+  // real work for nothing, only worth doing for postAssets' own
+  // PostAssetItem.posterUrl, which now lives in getPostCoreData above.
+  const allMediaIds = (mediaAssets ?? []).map((a) => a.id);
+  const { data: previewRows } = allMediaIds.length
+    ? await supabase.from("media_assets").select("id, preview_storage_path").in("id", allMediaIds)
+    : { data: [] };
+
+  const previewPathByMediaId = new Map<string, string | null>();
+  for (const r of previewRows ?? []) {
+    previewPathByMediaId.set(r.id, (r as { id: string; preview_storage_path: string | null }).preview_storage_path ?? null);
+  }
+
+  const allPaths = new Set<string>();
+  for (const asset of mediaAssets ?? []) {
+    allPaths.add(asset.storage_path);
+    const preview = previewPathByMediaId.get(asset.id);
+    if (preview) allPaths.add(preview);
+  }
+
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
+
+  return (mediaAssets ?? []).map((asset) => {
+    const preview = previewPathByMediaId.get(asset.id);
+    return {
+      id: asset.id,
+      url: preview ? urlByPath.get(preview) ?? urlByPath.get(asset.storage_path) ?? null : urlByPath.get(asset.storage_path) ?? null,
+      mediaType: asset.media_type,
+      usedInCarousel: usedInCarouselIds.has(asset.id),
+    };
+  });
 }
