@@ -1,7 +1,10 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/types/database";
 
 // NOTE: no maxDuration export here -- a "use server" file may only export
 // async functions (plus type-only exports, which are erased); exporting a
@@ -12,15 +15,19 @@ import { generateServerThumbnail } from "@/lib/server-thumbnail";
 // kept conservative (10 images/call) specifically because of this, and
 // duration can be revisited once the page itself is confirmed loading.
 
-// Runs entirely through the normal, already-authenticated app session (the
-// same createClient() every other action uses) -- deliberately NOT the
-// service-role key. That means it's bound by the exact same RLS rules as
-// every other action in the app: it can only ever touch projects the
-// logged-in admin is themselves an owner/admin member of. That's the
-// tradeoff for never needing to hand a service-role key to anyone -- if a
-// project doesn't show up here, the fix is adding this account as a member
-// of it (a normal, safe in-app action), not widening this tool's access.
-async function requireAdmin() {
+// This tool needs to see every project in the system, not just ones the
+// logged-in admin happens to be a member of (some were created from other
+// accounts entirely) -- ordinary RLS can't do that, so the actual data
+// operations below run through the service-role client instead, which
+// bypasses RLS completely.
+//
+// That means THIS check is the only thing standing between "any logged-in
+// user" and full cross-project read/write access, so it deliberately runs
+// on the normal, session-bound client (the real cookie-based identity of
+// whoever is making the request) -- never on the service-role client
+// itself, which has no concept of "who's asking" at all. The service-role
+// client is only ever constructed and returned after this passes.
+async function requireAdminServiceClient(): Promise<SupabaseClient<Database>> {
   const supabase = await createClient();
   const {
     data: { user },
@@ -29,40 +36,19 @@ async function requireAdmin() {
   const { data: profile, error } = await supabase.from("profiles").select("is_admin").eq("id", user.id).maybeSingle();
   if (error) throw new Error(`Couldn't check admin status: ${error.message}`);
   if (!profile?.is_admin) throw new Error("This tool is restricted to site admins.");
-  return supabase;
+  return createServiceRoleClient();
 }
 
-type ManagedProject = { id: string; name: string };
+type ProjectInfo = { id: string; name: string };
 
-async function getManagedProjects(supabase: Awaited<ReturnType<typeof createClient>>): Promise<ManagedProject[]> {
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) throw new Error("No logged-in user found.");
-  // Split into two plain queries instead of one embedded
-  // project_members->projects(name) select -- the embed relies on
-  // PostgREST resolving the FK relationship correctly, which is one more
-  // thing that can silently misbehave; two flat queries are easier to
-  // reason about and to blame correctly if either one fails, and errors
-  // are checked explicitly (not silently ignored) so a real failure here
-  // surfaces its actual reason instead of quietly returning zero projects.
-  const { data: memberRows, error: memberError } = await supabase
-    .from("project_members")
-    .select("project_id, role")
-    .eq("user_id", user.id)
-    .in("role", ["owner", "admin"]);
-  if (memberError) throw new Error(`Couldn't load your project memberships: ${memberError.message}`);
-
-  const projectIds = (memberRows ?? []).map((r) => r.project_id);
-  if (projectIds.length === 0) return [];
-
-  const { data: projectRows, error: projectError } = await supabase
-    .from("projects")
-    .select("id, name")
-    .in("id", projectIds);
-  if (projectError) throw new Error(`Couldn't load your projects: ${projectError.message}`);
-
-  return (projectRows ?? []).map((p) => ({ id: p.id, name: p.name ?? "Untitled project" }));
+// Every project in the database, regardless of who created it or whether
+// the logged-in admin is a member -- only possible because `supabase` here
+// is the service-role client, which bypasses the project_members-based RLS
+// every other query in this app is bound by.
+async function getAllProjects(supabase: SupabaseClient<Database>): Promise<ProjectInfo[]> {
+  const { data, error } = await supabase.from("projects").select("id, name");
+  if (error) throw new Error(`Couldn't load projects: ${error.message}`);
+  return (data ?? []).map((p) => ({ id: p.id, name: p.name ?? "Untitled project" }));
 }
 
 type EligibleAsset = { id: string; storagePath: string; projectId: string };
@@ -74,15 +60,12 @@ type EligibleAsset = { id: string; storagePath: string; projectId: string };
 // WHOLE query the instant it's missing on a not-yet-migrated database,
 // rather than just not excluding archived assets yet.
 async function getEligibleImages(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  projectIds: string[],
+  supabase: SupabaseClient<Database>,
   excludeIds: string[],
 ): Promise<EligibleAsset[]> {
-  if (projectIds.length === 0) return [];
   const { data, error } = await supabase
     .from("media_assets")
     .select("id, storage_path, project_id, archived")
-    .in("project_id", projectIds)
     .eq("media_type", "image")
     .is("thumbnail_storage_path", null);
   if (error) throw new Error(`Couldn't load media assets: ${error.message}`);
@@ -98,20 +81,21 @@ export type ThumbnailBackfillStatus = {
 };
 
 export async function getThumbnailBackfillStatus(): Promise<ThumbnailBackfillStatus> {
-  const supabase = await requireAdmin();
-  const projects = await getManagedProjects(supabase);
-  const eligible = await getEligibleImages(
-    supabase,
-    projects.map((p) => p.id),
-    [],
-  );
+  const supabase = await requireAdminServiceClient();
+  const projects = await getAllProjects(supabase);
+  const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
+  const eligible = await getEligibleImages(supabase, []);
+
   const missingByProject = new Map<string, number>();
   for (const asset of eligible) {
     missingByProject.set(asset.projectId, (missingByProject.get(asset.projectId) ?? 0) + 1);
   }
-  const byProject = projects
-    .map((p) => ({ projectId: p.id, projectName: p.name, missing: missingByProject.get(p.id) ?? 0 }))
-    .filter((p) => p.missing > 0)
+  const byProject = Array.from(missingByProject.entries())
+    .map(([projectId, missing]) => ({
+      projectId,
+      projectName: projectNameById.get(projectId) ?? "Unknown project",
+      missing,
+    }))
     .sort((a, b) => b.missing - a.missing);
   return { totalMissing: eligible.length, byProject };
 }
@@ -139,14 +123,10 @@ export async function runThumbnailBackfillBatch(
   batchSize: number,
   excludeIds: string[],
 ): Promise<ThumbnailBackfillBatchResult> {
-  const supabase = await requireAdmin();
-  const projects = await getManagedProjects(supabase);
+  const supabase = await requireAdminServiceClient();
+  const projects = await getAllProjects(supabase);
   const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
-  const eligible = await getEligibleImages(
-    supabase,
-    projects.map((p) => p.id),
-    excludeIds,
-  );
+  const eligible = await getEligibleImages(supabase, excludeIds);
   const batch = eligible.slice(0, Math.max(1, batchSize));
 
   const succeeded: ThumbnailBackfillBatchResult["succeeded"] = [];
