@@ -110,15 +110,29 @@ export default async function GridPage({
 
   const allPaths = new Set<string>();
   for (const asset of mediaAssets ?? []) {
-    allPaths.add(asset.storage_path);
     const thumb = thumbnailPathByAssetId.get(asset.id);
-    if (thumb) allPaths.add(thumb);
+    if (thumb) {
+      allPaths.add(thumb);
+    } else {
+      // Only sign the original when there's no thumbnail to prefer instead
+      // -- mediaLibrary's own url mapping below never reads the original's
+      // signed URL once a thumbnail exists, so minting one for every
+      // already-thumbnail'd asset was pure wasted Storage API work on every
+      // page load, for a URL the client would never actually use.
+      allPaths.add(asset.storage_path);
+    }
   }
   for (const row of gridRowsWithPaths) {
     for (const slot of row.slots) {
       if (slot.coverStoragePath) allPaths.add(slot.coverStoragePath);
       if (slot.coverDisplayPath) allPaths.add(slot.coverDisplayPath);
-      if (slot.coverOriginalPath) allPaths.add(slot.coverOriginalPath);
+      // coverOriginalUrl is only ever read client-side by the video poster
+      // self-heal effect (grid-board.tsx) -- an image slot never touches it
+      // at all (the crop overlay operates on thumbnailUrl; coverTransform
+      // is resolution-independent fractional data, so that's correct, not
+      // a shortcut). Signing it for every image slot was another full
+      // extra signed-URL mint per tile for a value nothing ever renders.
+      if (slot.coverOriginalPath && slot.coverMediaType === "video") allPaths.add(slot.coverOriginalPath);
     }
   }
 
