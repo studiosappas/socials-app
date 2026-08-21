@@ -7,25 +7,27 @@
 // The mark's own artwork is three paths, not four independent squares: the
 // NW and SE corner shapes are already fused into one continuous outline by
 // the connecting band, while NE and SW are separate, freestanding rounded
-// squares. To read as "four small fragments organizing into one system,
-// with the center connection forming last," the fused NW-band-SE path is
-// further split -- via two overlapping SVG clipPath rects, not new
-// geometry -- into an NW half and an SE half. Rendered together at rest
-// they exactly reconstruct the original unclipped path (the clip rects
-// overlap generously through the middle, so there's no seam), which is
-// what makes the "held" state pixel-faithful even though it's assembled
-// from four animated pieces instead of the source's three static ones.
+// squares. To read as "four pieces flowing into one system" without
+// inventing a fifth shape to represent the connection, the fused
+// NW-band-SE path is further split into an NW half and an SE half using
+// two clipPath *triangles* along the mark's own anti-diagonal (corner
+// (0,0)-(1080,0)-(0,1080) and its complement) -- a clean, non-overlapping
+// partition. Because the two clip regions never overlap, nothing is ever
+// double-rendered while the halves are offset from each other mid-motion,
+// so no stray shape can appear at their boundary; at rest the two halves
+// simply meet along that single shared seam and reconstruct the exact
+// original path, pixel for pixel.
 //
 // Choreography (one shared timeline, alternate direction for the loop):
-//   0%   fragments -- all four pieces small and pulled apart
-//   ~40% the NE/SW squares have already arrived: two of the four main
-//        units are in place
-//   ~42% the NW/SE ribbon-halves have closed most of the gap but not all
-//        of it -- four units are clustered, but not yet one connected
-//        shape
-//   ~78% the ribbon-halves finish sealing together -- the center
-//        connection/curve completes, the mark reads as whole
-//   78-100% hold on the exact, complete symbol
+//   0-60%   fragments -- all four pieces pulled apart with a clearly
+//           visible gap, drifting inward slowly
+//   60-94%  the gap closes -- this is the one deliberately emphasized
+//           moment, all four pieces' own edges/curves sliding into
+//           alignment with each other in a short, clear window (the
+//           ribbon halves seal a beat after the squares land, so the
+//           center connection reads as completing the shape rather than
+//           happening independently of it)
+//   94-100% hold on the exact, complete symbol
 // `animation-direction: alternate` then plays this in reverse for the
 // release, so there's one keyframe list per element to keep in sync, and
 // a user landing here via prefers-reduced-motion / the app's own Reduce
@@ -50,14 +52,15 @@ export function FlowerLoader({ size = 52, className = "" }: { size?: number; cla
         className="text-foreground"
       >
         <defs>
-          {/* The two clip rects overlap through the middle (350-730 on both
-              axes) so the NW-half and SE-half reconstruct the ribbon path
-              with no seam once both are at rest. */}
+          {/* Non-overlapping triangular halves along the mark's own
+              anti-diagonal -- they share only a zero-width seam, so
+              nothing is ever double-rendered while the two pieces are
+              offset from each other mid-animation. */}
           <clipPath id="fl-clip-nw" clipPathUnits="userSpaceOnUse">
-            <rect x="0" y="0" width="730" height="730" />
+            <polygon points="0,0 1080,0 0,1080" />
           </clipPath>
           <clipPath id="fl-clip-se" clipPathUnits="userSpaceOnUse">
-            <rect x="350" y="350" width="730" height="730" />
+            <polygon points="1080,0 1080,1080 0,1080" />
           </clipPath>
         </defs>
 
@@ -106,25 +109,27 @@ export function FlowerLoader({ size = 52, className = "" }: { size?: number; cla
       <span className="sr-only">Loading</span>
       <style>{`
         @keyframes flower-loader-nw {
-          0% { transform: translate(-56px, -56px); }
-          42% { transform: translate(-14px, -14px); }
-          78% { transform: translate(0, 0); }
+          0% { transform: translate(-52px, -52px); }
+          60% { transform: translate(-18px, -18px); }
+          94% { transform: translate(0, 0); }
           100% { transform: translate(0, 0); }
         }
         @keyframes flower-loader-se {
-          0% { transform: translate(56px, 56px); }
-          42% { transform: translate(14px, 14px); }
-          78% { transform: translate(0, 0); }
+          0% { transform: translate(52px, 52px); }
+          60% { transform: translate(18px, 18px); }
+          94% { transform: translate(0, 0); }
           100% { transform: translate(0, 0); }
         }
         @keyframes flower-loader-ne {
-          0% { transform: translate(88px, -88px) scale(0.78); }
-          40% { transform: translate(0, 0) scale(1); }
+          0% { transform: translate(80px, -80px) scale(0.82); }
+          60% { transform: translate(26px, -26px) scale(0.94); }
+          90% { transform: translate(0, 0) scale(1); }
           100% { transform: translate(0, 0) scale(1); }
         }
         @keyframes flower-loader-sw {
-          0% { transform: translate(-88px, 88px) scale(0.78); }
-          40% { transform: translate(0, 0) scale(1); }
+          0% { transform: translate(-80px, 80px) scale(0.82); }
+          60% { transform: translate(-26px, 26px) scale(0.94); }
+          90% { transform: translate(0, 0) scale(1); }
           100% { transform: translate(0, 0) scale(1); }
         }
       `}</style>
