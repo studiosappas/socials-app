@@ -95,7 +95,8 @@ export async function uploadMedia(
   // succeeds fine. sharp/libvips supports a much broader format set, so this
   // guarantees a thumbnail exists instead of silently leaving one missing.
   if (!thumbnailStoragePath && mediaType === "image") {
-    thumbnailStoragePath = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+    thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);

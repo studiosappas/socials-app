@@ -14,34 +14,44 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 const MAX_DIMENSION = 480;
 const JPEG_QUALITY = 82;
 
+export type ServerThumbnailResult =
+  | { ok: true; path: string; originalBytes: number; thumbnailBytes: number }
+  | { ok: false; reason: string };
+
 export async function generateServerThumbnail(
   supabase: SupabaseClient,
   bucket: string,
   originalPath: string,
   projectId: string,
-): Promise<string | null> {
+): Promise<ServerThumbnailResult> {
   try {
     const { data, error } = await supabase.storage.from(bucket).download(originalPath);
-    if (error || !data) return null;
+    if (error || !data) return { ok: false, reason: error?.message ?? "could not download the original file" };
 
     const buffer = Buffer.from(await data.arrayBuffer());
-    const resized = await sharp(buffer)
-      .rotate() // respect EXIF orientation -- a raw camera photo is often stored sideways
-      .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: JPEG_QUALITY })
-      .toBuffer();
+    let resized: Buffer;
+    try {
+      resized = await sharp(buffer)
+        .rotate() // respect EXIF orientation -- a raw camera photo is often stored sideways
+        .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: JPEG_QUALITY })
+        .toBuffer();
+    } catch (err) {
+      // A format sharp itself can't decode either (rare once the browser
+      // has already failed -- e.g. a genuinely corrupt file, or a format
+      // neither can read) -- fail closed, distinctly reported so the
+      // caller can skip it and move on instead of stopping everything.
+      return { ok: false, reason: err instanceof Error ? err.message : "image could not be decoded" };
+    }
 
     const thumbPath = `${projectId}/${crypto.randomUUID()}.jpg`;
     const { error: uploadError } = await supabase.storage
       .from(bucket)
       .upload(thumbPath, resized, { contentType: "image/jpeg" });
-    if (uploadError) return null;
+    if (uploadError) return { ok: false, reason: uploadError.message };
 
-    return thumbPath;
-  } catch {
-    // Any decode failure (corrupt file, a format sharp also can't read,
-    // etc.) -- fail closed, same as the client-side generator. The caller
-    // already falls back to the full original when this returns null.
-    return null;
+    return { ok: true, path: thumbPath, originalBytes: buffer.length, thumbnailBytes: resized.length };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : "unknown error" };
   }
 }
