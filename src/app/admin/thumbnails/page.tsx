@@ -4,11 +4,15 @@ import { Button } from "@/components/ui/button";
 import { getThumbnailBackfillStatus } from "@/lib/actions/thumbnail-backfill";
 import { ThumbnailBackfillPanel } from "./thumbnail-backfill-panel";
 
-// Same admin gate as /admin/landing (profiles.is_admin) -- but note that
-// flag only controls whether this PAGE renders; the actual backfill work
-// still runs through the normal authenticated Supabase client, so it's
-// still bound by ordinary project_members RLS underneath (see
-// thumbnail-backfill.ts's own comment).
+// Same admin gate as /admin/landing (profiles.is_admin). The actual
+// backfill work (thumbnail-backfill.ts) verifies this exact same thing
+// again itself, independently, via the normal session-bound client --
+// this page's own check is a fast, friendly early exit (shows a real
+// "Access Denied" screen instead of a stack trace), not the real security
+// boundary. Once past that second, independent check, the backfill code
+// switches to the Supabase service-role client so it can see every
+// project in the system, not just ones this admin happens to be a member
+// of -- see that file's own comment for why that's safe here specifically.
 //
 // Deliberately no maxDuration export here -- this page's own render only
 // ever runs a handful of cheap status queries (see getThumbnailBackfillStatus),
