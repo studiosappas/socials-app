@@ -26,7 +26,6 @@ import { saveRegeneratedPoster } from "@/lib/actions/media";
 import { MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
 import { GridCropOverlay, coverTransformStyle } from "./grid-crop-overlay";
-import { SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { Dialog } from "@/components/ui/dialog";
@@ -864,7 +863,21 @@ const GridSlot = memo(function GridSlot({
         draggable: !slot.postId || !canManage || selectionMode || !dragEnabled,
         droppable: !canManage || selectionMode || !dragEnabled,
       },
-      transition: SORTABLE_TRANSITION,
+      // No transition (verified against @dnd-kit/sortable's own source,
+      // useSortable's getTransition()): passing a transition here makes
+      // EVERY sortable tile carry a live CSS transition on its transform
+      // for the ENTIRE duration of any drag in this SortableContext
+      // (isSorting is true board-wide, not just for the dragged item),
+      // so every tile whose position shifts as you drag over a new spot
+      // triggers a real, concurrent CSS transition -- competing for the
+      // same main-thread/compositor time as the DragOverlay's own
+      // per-frame cursor tracking, which is what actually needs to feel
+      // instant. Already consistent with this file's DragOverlay itself
+      // (dropAnimation={null}, same "no animation competing with feel"
+      // reasoning) -- tiles now snap directly to their new slot instead
+      // of sliding, matching "prioritize direct pointer responsiveness
+      // over fancy sibling animation."
+      transition: null,
     });
 
   const style = {

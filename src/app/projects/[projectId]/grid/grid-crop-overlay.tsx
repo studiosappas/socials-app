@@ -30,13 +30,26 @@ export function GridCropOverlay({
   const [zoom, setZoom] = useState(initialTransform?.scale ?? 1);
   const [offset, setOffset] = useState({ x: initialTransform?.x ?? 0, y: initialTransform?.y ?? 0 });
   const containerRef = useRef<HTMLDivElement>(null);
-  const panRef = useRef<{ startX: number; startY: number; startOffset: { x: number; y: number } } | null>(
-    null,
-  );
+  // containerWidth/Height and cx/cy below are captured once per gesture
+  // (at pointerdown) instead of being recomputed from a fresh
+  // getBoundingClientRect() on every pointermove -- the tile's on-screen
+  // size is fixed for the whole gesture (only the CSS transform inside it
+  // changes, which doesn't affect layout), so a fresh read every move was
+  // forcing a synchronous layout reflow for no reason, on every single
+  // pointer event during the pan/zoom.
+  const panRef = useRef<{
+    startX: number;
+    startY: number;
+    startOffset: { x: number; y: number };
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
   const handleDragRef = useRef<{
     startDist: number;
     startZoom: number;
     startOffset: { x: number; y: number };
+    cx: number;
+    cy: number;
   } | null>(null);
 
   // Refs mirror the latest committable state and callbacks so the
@@ -88,14 +101,20 @@ export function GridCropOverlay({
     e.preventDefault();
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
-    panRef.current = { startX: e.clientX, startY: e.clientY, startOffset: offset };
+    const rect = containerRef.current?.getBoundingClientRect();
+    panRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startOffset: offset,
+      containerWidth: rect?.width ?? 1,
+      containerHeight: rect?.height ?? 1,
+    };
   }
 
   function handleImagePointerMove(e: React.PointerEvent<HTMLImageElement>) {
-    if (!panRef.current || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const dxFrac = (e.clientX - panRef.current.startX) / rect.width;
-    const dyFrac = (e.clientY - panRef.current.startY) / rect.height;
+    if (!panRef.current) return;
+    const dxFrac = (e.clientX - panRef.current.startX) / panRef.current.containerWidth;
+    const dyFrac = (e.clientY - panRef.current.startY) / panRef.current.containerHeight;
     setOffset(
       clampOffset(
         { x: panRef.current.startOffset.x + dxFrac, y: panRef.current.startOffset.y + dyFrac },
@@ -121,14 +140,12 @@ export function GridCropOverlay({
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
     const startDist = Math.hypot(e.clientX - cx, e.clientY - cy);
-    handleDragRef.current = { startDist, startZoom: zoom, startOffset: offset };
+    handleDragRef.current = { startDist, startZoom: zoom, startOffset: offset, cx, cy };
   }
 
   function handleCornerPointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (!handleDragRef.current || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
+    if (!handleDragRef.current) return;
+    const { cx, cy } = handleDragRef.current;
     const dist = Math.hypot(e.clientX - cx, e.clientY - cy);
     const ratio = dist / handleDragRef.current.startDist;
     const nextZoom = clamp(handleDragRef.current.startZoom * ratio, MIN_ZOOM, MAX_ZOOM);
