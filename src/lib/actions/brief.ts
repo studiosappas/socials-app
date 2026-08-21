@@ -146,9 +146,10 @@ export async function deleteBriefTask(projectId: string, taskId: string): Promis
   const supabase = await createClient();
   const { error } = await supabase.from("brief_tasks").delete().eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  // Not revalidating -- its callers (handleDelete, and the "Add task"
-  // undo command) already call router.refresh() themselves right after,
-  // since no optimistic removal of the task card exists yet.
+  // Not revalidating -- its one real caller (TaskCard's handleDelete)
+  // already hides the card optimistically before this runs, and only
+  // calls router.refresh() on failure to resync. The "Add task" undo
+  // command still refreshes on its own since undo isn't optimistic here.
   return { success: true };
 }
 
@@ -422,8 +423,10 @@ export async function removeBriefTaskItem(projectId: string, itemId: string): Pr
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").delete().eq("id", itemId);
   if (error) return { success: false, message: error.message };
-  // Not revalidating -- every caller (delete, and undo of Add) already
-  // calls router.refresh() itself, since no optimistic removal exists yet.
+  // Not revalidating -- its one real caller (ItemSection's handleRemove)
+  // already hides the item optimistically before this runs, and only
+  // calls router.refresh() on failure to resync. Redo of a prior remove
+  // still refreshes on its own since undo/redo replay isn't optimistic here.
   return { success: true };
 }
 
@@ -523,9 +526,11 @@ export async function removeBriefTaskFrame(projectId: string, frameId: string): 
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_frames").delete().eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  // Not revalidating -- every caller (delete, and undo of Add Frame)
-  // already calls router.refresh() itself, since no optimistic removal
-  // exists yet.
+  // Not revalidating -- its one real caller (FrameSection's
+  // handleRemoveFrame) already hides the frame optimistically before this
+  // runs, and only calls router.refresh() on failure to resync. Redo of a
+  // prior remove still refreshes on its own since undo/redo replay isn't
+  // optimistic here.
   return { success: true };
 }
 

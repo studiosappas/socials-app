@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useRef, useState, useTransition } from "react";
+import { memo, useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
@@ -102,30 +102,86 @@ export function BriefBoard({
   // source of truth for these thumbnails going forward.
   const [previewOverrides, setPreviewOverrides] = useState<Record<string, string>>({});
 
-  // Only builds a new task object for a task that actually HAS an
-  // overridden item -- returning the original `task`/`tasks` references for
-  // everything else. Otherwise every task in the board got a brand-new
-  // object on every render the instant previewOverrides had ANY entry,
-  // which would have defeated TaskCard's React.memo below for the whole
-  // list, not just the one task that changed.
+  // Optimistic hide-on-delete for tasks/items/frames -- same "just an
+  // exclusion set, no reset-on-prop-change needed" reasoning as
+  // previewOverrides above: hiding an id that no longer exists in a fresh
+  // `tasks` prop (because it was for-real deleted) is a harmless no-op, and
+  // rollback on a failed delete just un-hides it again.
+  const [hiddenTaskIds, setHiddenTaskIds] = useState<Set<string>>(new Set());
+  const [hiddenItemIds, setHiddenItemIds] = useState<Set<string>>(new Set());
+  const [hiddenFrameIds, setHiddenFrameIds] = useState<Set<string>>(new Set());
+
+  const hideTask = useCallback((id: string) => setHiddenTaskIds((prev) => new Set(prev).add(id)), []);
+  const unhideTask = useCallback(
+    (id: string) =>
+      setHiddenTaskIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  const hideItem = useCallback((id: string) => setHiddenItemIds((prev) => new Set(prev).add(id)), []);
+  const unhideItem = useCallback(
+    (id: string) =>
+      setHiddenItemIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  const hideFrame = useCallback((id: string) => setHiddenFrameIds((prev) => new Set(prev).add(id)), []);
+  const unhideFrame = useCallback(
+    (id: string) =>
+      setHiddenFrameIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+
+  // Only builds a new task object for a task that actually needs one --
+  // returning the original `task`/`tasks` references for everything else.
+  // Otherwise every task in the board got a brand-new object on every
+  // render the instant any override/hidden-id state had ANY entry, which
+  // would have defeated TaskCard's React.memo below for the whole list, not
+  // just the one task that changed.
   const effectiveTasks = useMemo(() => {
-    if (Object.keys(previewOverrides).length === 0) return tasks;
-    let changed = false;
-    const next = tasks.map((task) => {
-      const affected = task.items.some((item) => item.attachmentId && previewOverrides[item.attachmentId]);
-      if (!affected) return task;
+    const hasOverrides = Object.keys(previewOverrides).length > 0;
+    const hasHidden = hiddenTaskIds.size > 0 || hiddenItemIds.size > 0 || hiddenFrameIds.size > 0;
+    if (!hasOverrides && !hasHidden) return tasks;
+
+    const visibleTasks = hiddenTaskIds.size > 0 ? tasks.filter((task) => !hiddenTaskIds.has(task.id)) : tasks;
+
+    let changed = visibleTasks !== tasks;
+    const next = visibleTasks.map((task) => {
+      const itemsAffected =
+        hiddenItemIds.size > 0 && task.items.some((item) => hiddenItemIds.has(item.id));
+      const framesAffected =
+        hiddenFrameIds.size > 0 && task.frames.some((frame) => hiddenFrameIds.has(frame.id));
+      const previewAffected =
+        hasOverrides && task.items.some((item) => item.attachmentId && previewOverrides[item.attachmentId]);
+      if (!itemsAffected && !framesAffected && !previewAffected) return task;
       changed = true;
       return {
         ...task,
-        items: task.items.map((item) =>
-          item.attachmentId && previewOverrides[item.attachmentId]
-            ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
-            : item,
-        ),
+        items: task.items
+          .filter((item) => !hiddenItemIds.has(item.id))
+          .map((item) =>
+            item.attachmentId && previewOverrides[item.attachmentId]
+              ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
+              : item,
+          ),
+        frames: task.frames.filter((frame) => !hiddenFrameIds.has(frame.id)),
       };
     });
     return changed ? next : tasks;
-  }, [tasks, previewOverrides]);
+  }, [tasks, previewOverrides, hiddenTaskIds, hiddenItemIds, hiddenFrameIds]);
 
   // Board-level (not per-task) since undoing "Add Task" must survive that
   // task's own TaskCard being removed from the tree -- same reasoning as
@@ -244,6 +300,12 @@ export function BriefBoard({
           canManage={canManage}
           onEditImage={setEditingImage}
           pushCommand={pushCommand}
+          onHideTask={hideTask}
+          onUnhideTask={unhideTask}
+          onHideItem={hideItem}
+          onUnhideItem={unhideItem}
+          onHideFrame={hideFrame}
+          onUnhideFrame={unhideFrame}
         />
       ))}
 
@@ -326,12 +388,24 @@ const TaskCard = memo(function TaskCard({
   canManage,
   onEditImage,
   pushCommand,
+  onHideTask,
+  onUnhideTask,
+  onHideItem,
+  onUnhideItem,
+  onHideFrame,
+  onUnhideFrame,
 }: {
   projectId: string;
   task: BriefTaskData;
   canManage: boolean;
   onEditImage: (image: EditingImage) => void;
   pushCommand: (command: UndoableCommand) => void;
+  onHideTask: (id: string) => void;
+  onUnhideTask: (id: string) => void;
+  onHideItem: (id: string) => void;
+  onUnhideItem: (id: string) => void;
+  onHideFrame: (id: string) => void;
+  onUnhideFrame: (id: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -434,9 +508,14 @@ const TaskCard = memo(function TaskCard({
   function handleDelete() {
     setMenuOpen(false);
     if (!confirm(`Delete "${task.name}"? This can't be undone.`)) return;
+    onHideTask(task.id);
     startTransition(async () => {
-      await deleteBriefTask(projectId, task.id);
-      router.refresh();
+      const result = await deleteBriefTask(projectId, task.id);
+      if (!result.success) {
+        console.error("Failed to delete task:", result.message);
+        onUnhideTask(task.id);
+        router.refresh();
+      }
     });
   }
 
@@ -553,6 +632,8 @@ const TaskCard = memo(function TaskCard({
             canManage={canManage}
             onEditImage={onEditImage}
             pushCommand={pushCommand}
+            onHideItem={onHideItem}
+            onUnhideItem={onUnhideItem}
           />
           <ItemSection
             title="Images"
@@ -563,6 +644,8 @@ const TaskCard = memo(function TaskCard({
             canManage={canManage}
             onEditImage={onEditImage}
             pushCommand={pushCommand}
+            onHideItem={onHideItem}
+            onUnhideItem={onUnhideItem}
           />
           <ItemSection
             title="Products"
@@ -573,6 +656,8 @@ const TaskCard = memo(function TaskCard({
             canManage={canManage}
             onEditImage={onEditImage}
             pushCommand={pushCommand}
+            onHideItem={onHideItem}
+            onUnhideItem={onUnhideItem}
           />
 
           <FrameSection
@@ -583,6 +668,8 @@ const TaskCard = memo(function TaskCard({
             frames={task.frames.filter((f) => f.section === "frames")}
             canManage={canManage}
             pushCommand={pushCommand}
+            onHideFrame={onHideFrame}
+            onUnhideFrame={onUnhideFrame}
           />
           <FrameSection
             title="Text"
@@ -592,6 +679,8 @@ const TaskCard = memo(function TaskCard({
             frames={task.frames.filter((f) => f.section === "text")}
             canManage={canManage}
             pushCommand={pushCommand}
+            onHideFrame={onHideFrame}
+            onUnhideFrame={onUnhideFrame}
           />
 
           {canManage && (
@@ -692,6 +781,8 @@ function ItemSection({
   canManage,
   onEditImage,
   pushCommand,
+  onHideItem,
+  onUnhideItem,
 }: {
   title: string;
   projectId: string;
@@ -701,6 +792,8 @@ function ItemSection({
   canManage: boolean;
   onEditImage: (image: EditingImage) => void;
   pushCommand: (command: UndoableCommand) => void;
+  onHideItem: (id: string) => void;
+  onUnhideItem: (id: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -850,9 +943,15 @@ function ItemSection({
 
   function handleRemove(itemId: string) {
     const item = items.find((i) => i.id === itemId);
+    onHideItem(itemId);
     startTransition(async () => {
-      await removeBriefTaskItem(projectId, itemId);
-      router.refresh();
+      const result = await removeBriefTaskItem(projectId, itemId);
+      if (!result.success) {
+        console.error("Failed to remove item:", result.message);
+        onUnhideItem(itemId);
+        router.refresh();
+        return;
+      }
       if (item) {
         const current = { id: itemId };
         pushCommand({
@@ -873,6 +972,7 @@ function ItemSection({
             router.refresh();
           },
           redo: async () => {
+            onHideItem(current.id);
             await removeBriefTaskItem(projectId, current.id);
             router.refresh();
           },
@@ -1147,6 +1247,8 @@ function FrameSection({
   frames,
   canManage,
   pushCommand,
+  onHideFrame,
+  onUnhideFrame,
 }: {
   title: string;
   projectId: string;
@@ -1155,6 +1257,8 @@ function FrameSection({
   frames: BriefTaskFrame[];
   canManage: boolean;
   pushCommand: (command: UndoableCommand) => void;
+  onHideFrame: (id: string) => void;
+  onUnhideFrame: (id: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -1204,9 +1308,15 @@ function FrameSection({
   function handleRemoveFrame(frameId: string) {
     const frameIndex = frames.findIndex((f) => f.id === frameId);
     const frame = frames[frameIndex];
+    onHideFrame(frameId);
     startTransition(async () => {
-      await removeBriefTaskFrame(projectId, frameId);
-      router.refresh();
+      const result = await removeBriefTaskFrame(projectId, frameId);
+      if (!result.success) {
+        console.error("Failed to remove frame:", result.message);
+        onUnhideFrame(frameId);
+        router.refresh();
+        return;
+      }
       if (frame) {
         const current = { id: frameId };
         pushCommand({
@@ -1217,6 +1327,7 @@ function FrameSection({
             router.refresh();
           },
           redo: async () => {
+            onHideFrame(current.id);
             await removeBriefTaskFrame(projectId, current.id);
             router.refresh();
           },
