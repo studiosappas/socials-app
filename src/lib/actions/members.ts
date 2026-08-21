@@ -80,6 +80,8 @@ export async function inviteMember(
   return { message: undefined };
 }
 
+// Not revalidating -- its one caller (TeamMemberRow's handleRemove)
+// already calls router.refresh() itself right after this resolves.
 export async function removeMember(projectId: string, userId: string) {
   const supabase = await createClient();
   await supabase
@@ -87,10 +89,11 @@ export async function removeMember(projectId: string, userId: string) {
     .delete()
     .eq("project_id", projectId)
     .eq("user_id", userId);
-
-  revalidatePath(`/projects/${projectId}/settings/team`);
 }
 
+// Not revalidating -- its one caller (TeamMemberRow's handleSaveEdit)
+// already calls router.refresh() itself right after this resolves (along
+// with updateMemberPermissions below, called in the same handler).
 export async function updateMemberRole(projectId: string, userId: string, role: ProjectRole) {
   if (role === "owner") {
     throw new Error("Use transferOwnership to make someone the owner.");
@@ -102,10 +105,10 @@ export async function updateMemberRole(projectId: string, userId: string, role: 
     .eq("project_id", projectId)
     .eq("user_id", userId);
   if (error) throw new Error(error.message);
-  revalidatePath(`/projects/${projectId}/settings/team`);
 }
 
-// null clears the override (falls back to the role's default access).
+// null clears the override (falls back to the role's default access). Not
+// revalidating -- same reasoning as updateMemberRole above.
 export async function updateMemberPermissions(
   projectId: string,
   userId: string,
@@ -118,7 +121,6 @@ export async function updateMemberPermissions(
     .eq("project_id", projectId)
     .eq("user_id", userId);
   if (error) throw new Error(error.message);
-  revalidatePath(`/projects/${projectId}/settings/team`);
 }
 
 // The previous owner becomes an admin rather than being removed -- ownership
@@ -159,5 +161,7 @@ export async function transferOwnership(projectId: string, newOwnerUserId: strin
 
   await logActivity(supabase, projectId, user.id, "transferred project ownership");
 
-  revalidatePath(`/projects/${projectId}/settings/team`);
+  // Not revalidating -- its one caller (TeamMemberRow's
+  // handleTransferOwnership) already calls router.refresh() itself right
+  // after this resolves.
 }
