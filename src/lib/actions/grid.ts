@@ -9,7 +9,23 @@ import { syncPostType } from "@/lib/post-type";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaType } from "@/types/database";
 
-export type UploadMediaState = { message?: string } | undefined;
+export type UploadMediaState =
+  | {
+      message?: string;
+      // Only set on success -- lets the caller reconcile its own optimistic
+      // placeholder (a local blob-URL item with a fake id) with the real,
+      // now-persisted asset without needing any revalidation/refresh at
+      // all. clientTempId is an opaque passthrough: whatever id the
+      // optimistic item was created with, echoed straight back, so the
+      // caller can find the matching entry among possibly several
+      // concurrent uploads (uploadFilesWithPosters dispatches one action
+      // call per file, not necessarily sequentially-resolving).
+      id?: string;
+      storagePath?: string;
+      posterStoragePath?: string | null;
+      clientTempId?: string;
+    }
+  | undefined;
 
 export async function addGridRow(projectId: string) {
   const supabase = await createClient();
@@ -82,6 +98,12 @@ export async function uploadMedia(
   const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
   let thumbnailStoragePath =
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
+  // Opaque passthrough set by the caller's optimistic-placeholder id --
+  // meaningless to this action itself, just echoed back in the return
+  // value so the caller can reconcile the right placeholder (see
+  // UploadMediaState's own comment).
+  const clientTempIdRaw = formData.get("clientTempId");
+  const clientTempId = typeof clientTempIdRaw === "string" && clientTempIdRaw ? clientTempIdRaw : undefined;
 
   const supabase = await createClient();
   const {
@@ -119,23 +141,37 @@ export async function uploadMedia(
 
   await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
-  await logActivity(supabase, projectId, user.id, "uploaded an asset");
-
+  // Independent of each other (activity log vs. member notifications) --
+  // run concurrently rather than one after another. Neither blocks the
+  // caller's own optimistic UI (that already rendered before this action
+  // was even called), but they do add to how long this response takes to
+  // resolve, which now matters for how quickly the caller can reconcile
+  // its optimistic placeholder with the real id below.
   const { data: uploader } = await supabase.from("profiles").select("name").eq("id", user.id).single();
-  await notifyProjectMembers(
-    supabase,
-    projectId,
-    "new_uploaded_assets",
-    {
-      title: `${uploader?.name ?? "Someone"} uploaded an asset`,
-      icon: "🖼",
-      link: `/projects/${projectId}/grid`,
-    },
-    { excludeUserId: user.id },
-  );
+  await Promise.all([
+    logActivity(supabase, projectId, user.id, "uploaded an asset"),
+    notifyProjectMembers(
+      supabase,
+      projectId,
+      "new_uploaded_assets",
+      {
+        title: `${uploader?.name ?? "Someone"} uploaded an asset`,
+        icon: "🖼",
+        link: `/projects/${projectId}/grid`,
+      },
+      { excludeUserId: user.id },
+    ),
+  ]);
 
-  revalidatePath(`/projects/${projectId}/grid`);
-  return undefined;
+  // Not revalidating /grid (its own currently-mounted route -- Media
+  // Library only ever renders there) -- that used to force a full fresh
+  // Grid RSC payload to be bundled into THIS action's own response before
+  // it could resolve, adding real latency to every upload for a refresh
+  // the caller doesn't need: it already reconciles its optimistic
+  // placeholder directly from the id/paths returned below, no page
+  // refresh required. A real future navigation to /grid still picks up
+  // the change regardless, since staleTimes.dynamic is 0.
+  return { id: mediaAsset.id, storagePath, posterStoragePath, clientTempId };
 }
 
 // An asset still referenced by any post/story is archived (hidden from the
@@ -161,7 +197,13 @@ export async function deleteMedia(projectId: string, mediaAssetId: string) {
   if (error) {
     throw new Error(error.message);
   }
-  revalidatePath(`/projects/${projectId}/grid`);
+  // Not revalidating /grid (its own currently-mounted route) -- the
+  // caller's optimistic removal (media-library.tsx/grid-board.tsx's
+  // MediaPickerDialog, both already filter the deleted item out of local
+  // state before this resolves) is the complete, final visual state;
+  // there's nothing further for a page refresh to bring back, same
+  // reasoning as placeMediaInSlot's own no-revalidation design. /posts
+  // and /stories are genuinely different routes, kept as-is.
   revalidatePath(`/projects/${projectId}/posts`);
   revalidatePath(`/projects/${projectId}/stories`);
 }
@@ -212,7 +254,11 @@ export async function restoreMediaAsset(
     return { message: error?.message ?? "Failed to restore media." };
   }
 
-  revalidatePath(`/projects/${projectId}/grid`);
+  // Not revalidating /grid -- both callers (undo of a delete, redo of an
+  // undone upload; see media-library.tsx's pushCommand) already call
+  // router.refresh() themselves right after this resolves, so this own-
+  // route call was purely redundant, just adding latency to every undo/
+  // redo without doing anything the caller wasn't already handling.
   return { id: mediaAsset.id };
 }
 
@@ -234,7 +280,9 @@ export async function createMediaFolder(
     return { message: error?.message ?? "Failed to create folder." };
   }
 
-  revalidatePath(`/projects/${projectId}/grid`);
+  // Not revalidating /grid -- its only caller (media-library.tsx's
+  // handleMoveToNewFolder) already calls router.refresh() itself right
+  // after this and moveMediaToFolder both resolve.
   return { id: folder.id };
 }
 
@@ -266,7 +314,8 @@ export async function bulkDeleteMedia(projectId: string, mediaAssetIds: string[]
     if (error) throw new Error(error.message);
   }
 
-  revalidatePath(`/projects/${projectId}/grid`);
+  // Not revalidating /grid -- same reasoning as deleteMedia above: the
+  // caller's optimistic removal is already the complete final state.
   revalidatePath(`/projects/${projectId}/posts`);
   revalidatePath(`/projects/${projectId}/stories`);
 }
@@ -282,7 +331,8 @@ export async function moveMediaToFolder(projectId: string, mediaAssetIds: string
   if (error) {
     throw new Error(error.message);
   }
-  revalidatePath(`/projects/${projectId}/grid`);
+  // Not revalidating /grid -- its only caller already calls
+  // router.refresh() itself right after (see createMediaFolder's comment).
 }
 
 export async function placeMediaInSlot(

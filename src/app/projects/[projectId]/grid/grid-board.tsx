@@ -1368,8 +1368,9 @@ function MediaPickerDialog({
 
   // Same optimistic overlay as media-library.tsx's sidebar library -- see
   // its comments for the full reasoning (instant blob-URL preview on
-  // upload, instant removal on delete, both superseded by the real item
-  // once this route's own revalidation lands).
+  // upload, instant removal on delete; upload reconciles its placeholder
+  // directly from uploadMedia's own return value, delete needs no further
+  // reconciliation -- neither action revalidates this route anymore).
   const [prevItems, setPrevItems] = useState(items);
   const [overrideItems, setOverrideItems] = useState<MediaLibraryItem[] | null>(null);
   const pendingBlobUrlsRef = useRef<Set<string>>(new Set());
@@ -1384,11 +1385,29 @@ function MediaPickerDialog({
     pendingBlobUrlsRef.current = new Set();
   }, [items]);
 
+  // See media-library.tsx's identical effect for the full reasoning --
+  // state.clientTempId (set below, at dispatch) identifies which
+  // optimistic placeholder a resolved upload belongs to, so it can be
+  // reconciled in place instead of clearing the whole override.
   useEffect(() => {
     if (state?.message) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setOverrideItems(null);
       showError(state.message);
+      return;
+    }
+    if (state?.id && state.clientTempId) {
+      const tempId = state.clientTempId;
+      const realId = state.id;
+      const realStoragePath = state.storagePath;
+      const realPosterStoragePath = state.posterStoragePath ?? null;
+      setOverrideItems((current) =>
+        (current ?? effectiveItems).map((i) =>
+          i.id === tempId
+            ? { ...i, id: realId, storagePath: realStoragePath, posterStoragePath: realPosterStoragePath }
+            : i,
+        ),
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -1441,16 +1460,26 @@ function MediaPickerDialog({
                 });
                 setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
 
-                uploadFilesWithPosters(projectId, action, files, (fileName, message) => {
-                  setUploadError(message);
-                  const failed = optimistic.find((o) => o.file.name === fileName);
-                  if (!failed) return;
-                  pendingBlobUrlsRef.current.delete(failed.item.url!);
-                  URL.revokeObjectURL(failed.item.url!);
-                  setOverrideItems((current) =>
-                    (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
-                  );
-                });
+                uploadFilesWithPosters(
+                  projectId,
+                  (formData) => {
+                    const fileName = formData.get("fileName");
+                    const match = optimistic.find((o) => o.file.name === fileName);
+                    if (match) formData.set("clientTempId", match.item.id);
+                    action(formData);
+                  },
+                  files,
+                  (fileName, message) => {
+                    setUploadError(message);
+                    const failed = optimistic.find((o) => o.file.name === fileName);
+                    if (!failed) return;
+                    pendingBlobUrlsRef.current.delete(failed.item.url!);
+                    URL.revokeObjectURL(failed.item.url!);
+                    setOverrideItems((current) =>
+                      (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
+                    );
+                  },
+                );
               }}
             />
             <Button
