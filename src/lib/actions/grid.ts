@@ -6,6 +6,7 @@ import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media"
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { syncPostType } from "@/lib/post-type";
+import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaType } from "@/types/database";
 
 export type UploadMediaState = { message?: string } | undefined;
@@ -79,7 +80,7 @@ export async function uploadMedia(
   // this existed, or if generation/its own upload failed -- every read site
   // already falls back to the full original in that case.
   const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
-  const thumbnailStoragePath =
+  let thumbnailStoragePath =
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
@@ -87,6 +88,15 @@ export async function uploadMedia(
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return { message: "You must be logged in." };
+
+  // The browser already tried (image-thumbnail.ts) -- this only runs when
+  // that failed, e.g. a HEIC/HEIF photo straight off an iPhone camera, which
+  // no desktop browser's <img> can decode even though the raw upload itself
+  // succeeds fine. sharp/libvips supports a much broader format set, so this
+  // guarantees a thumbnail exists instead of silently leaving one missing.
+  if (!thumbnailStoragePath && mediaType === "image") {
+    thumbnailStoragePath = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+  }
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
