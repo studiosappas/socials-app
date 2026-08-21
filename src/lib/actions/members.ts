@@ -88,14 +88,20 @@ export async function inviteMember(
 }
 
 // Not revalidating -- its one caller (TeamMemberRow's handleRemove)
-// already calls router.refresh() itself right after this resolves.
-export async function removeMember(projectId: string, userId: string) {
+// already hides the row optimistically before this runs, and only
+// restores it + surfaces an error if the removal actually failed.
+export async function removeMember(
+  projectId: string,
+  userId: string,
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
-  await supabase
+  const { error } = await supabase
     .from("project_members")
     .delete()
     .eq("project_id", projectId)
     .eq("user_id", userId);
+  if (error) return { success: false, message: error.message };
+  return { success: true };
 }
 
 // Not revalidating -- its one caller (TeamMemberRow's handleSaveEdit)
