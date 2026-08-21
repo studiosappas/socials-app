@@ -1,11 +1,13 @@
 import { Modal } from "../../../modal";
 import { Skeleton } from "@/components/ui/skeleton";
 
-// Same reasoning as the sibling posts/[postId]/loading.tsx: getStoryPageData
-// runs 7+ sequential Supabase queries with no streaming boundary of its own,
-// so without this file nothing appeared here at all until that whole chain
-// resolved. This can't shorten that fetch, but the modal's own chrome now
-// appears the instant a story is opened, with content streaming in behind it.
+// Same reasoning as the sibling posts/[postId]/loading.tsx: without this
+// file, nothing appears here at all until getStoryPageData resolves. This
+// can't shorten that fetch, but the modal's own chrome now appears the
+// instant a story is opened, with content streaming in behind it.
+// (getStoryPageData is itself already parallelized into two waves rather
+// than the fully sequential chain this comment used to describe -- see
+// lib/data/stories.ts.)
 export default function StoryEditorLoading() {
   return (
     <Modal>
