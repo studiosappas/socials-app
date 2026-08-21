@@ -3,6 +3,15 @@
 import { createClient } from "@/lib/supabase/server";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 
+// NOTE: no maxDuration export here -- a "use server" file may only export
+// async functions (plus type-only exports, which are erased); exporting a
+// plain const like maxDuration breaks the whole module's exports (caught
+// via a real local build failure: "the export ... was not found in
+// module ... the module has no exports at all"). runThumbnailBackfillBatch
+// stays on Vercel's default function duration for now -- batch size is
+// kept conservative (10 images/call) specifically because of this, and
+// duration can be revisited once the page itself is confirmed loading.
+
 // Runs entirely through the normal, already-authenticated app session (the
 // same createClient() every other action uses) -- deliberately NOT the
 // service-role key. That means it's bound by the exact same RLS rules as
@@ -17,7 +26,8 @@ async function requireAdmin() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("You must be logged in.");
-  const { data: profile } = await supabase.from("profiles").select("is_admin").eq("id", user.id).maybeSingle();
+  const { data: profile, error } = await supabase.from("profiles").select("is_admin").eq("id", user.id).maybeSingle();
+  if (error) throw new Error(`Couldn't check admin status: ${error.message}`);
   if (!profile?.is_admin) throw new Error("This tool is restricted to site admins.");
   return supabase;
 }
@@ -28,15 +38,31 @@ async function getManagedProjects(supabase: Awaited<ReturnType<typeof createClie
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const { data } = await supabase
+  if (!user) throw new Error("No logged-in user found.");
+  // Split into two plain queries instead of one embedded
+  // project_members->projects(name) select -- the embed relies on
+  // PostgREST resolving the FK relationship correctly, which is one more
+  // thing that can silently misbehave; two flat queries are easier to
+  // reason about and to blame correctly if either one fails, and errors
+  // are checked explicitly (not silently ignored) so a real failure here
+  // surfaces its actual reason instead of quietly returning zero projects.
+  const { data: memberRows, error: memberError } = await supabase
     .from("project_members")
-    .select("project_id, role, projects(name)")
-    .eq("user_id", user!.id)
+    .select("project_id, role")
+    .eq("user_id", user.id)
     .in("role", ["owner", "admin"]);
-  return (data ?? []).map((r) => ({
-    id: r.project_id as string,
-    name: (r.projects as { name: string | null } | null)?.name ?? "Untitled project",
-  }));
+  if (memberError) throw new Error(`Couldn't load your project memberships: ${memberError.message}`);
+
+  const projectIds = (memberRows ?? []).map((r) => r.project_id);
+  if (projectIds.length === 0) return [];
+
+  const { data: projectRows, error: projectError } = await supabase
+    .from("projects")
+    .select("id, name")
+    .in("id", projectIds);
+  if (projectError) throw new Error(`Couldn't load your projects: ${projectError.message}`);
+
+  return (projectRows ?? []).map((p) => ({ id: p.id, name: p.name ?? "Untitled project" }));
 }
 
 type EligibleAsset = { id: string; storagePath: string; projectId: string };
@@ -53,12 +79,13 @@ async function getEligibleImages(
   excludeIds: string[],
 ): Promise<EligibleAsset[]> {
   if (projectIds.length === 0) return [];
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("media_assets")
     .select("id, storage_path, project_id, archived")
     .in("project_id", projectIds)
     .eq("media_type", "image")
     .is("thumbnail_storage_path", null);
+  if (error) throw new Error(`Couldn't load media assets: ${error.message}`);
   const excludeSet = new Set(excludeIds);
   return (data ?? [])
     .filter((r) => !r.archived && !excludeSet.has(r.id))
