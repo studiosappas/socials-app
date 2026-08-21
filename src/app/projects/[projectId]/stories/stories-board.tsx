@@ -10,6 +10,7 @@ import {
   deleteContentFolder,
   renameContentFolder,
   uploadContentAsset,
+  type ActionResult,
 } from "@/lib/actions/stories";
 import { createShareLink } from "@/lib/actions/share-links";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
@@ -19,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Toast } from "@/components/ui/toast";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import type { ShareLinkItem } from "@/lib/data/share-links";
 import type { StoryStatus } from "@/types/database";
 
@@ -100,6 +102,28 @@ export function StoriesBoard({
   const [bulkMoveDialogOpen, setBulkMoveDialogOpen] = useState(false);
   const [, startBulkAction] = useTransition();
 
+  // Optimistic hide for bulk delete/move and folder delete -- an id that's
+  // genuinely gone from a fresh `stories`/`folders` prop is a harmless
+  // no-op to keep hidden, so no reset-on-prop-change guard is needed (same
+  // reasoning as Brief's hiddenTaskIds/hiddenItemIds/hiddenFrameIds).
+  const [hiddenStoryIds, setHiddenStoryIds] = useState<Set<string>>(new Set());
+  const [hiddenFolderIds, setHiddenFolderIds] = useState<Set<string>>(new Set());
+  const unhideStories = useCallback((ids: string[]) => {
+    setHiddenStoryIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }, []);
+  const unhideFolder = useCallback((id: string) => {
+    setHiddenFolderIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
   const handleToggleBulkSelect = useCallback((storyId: string) => {
     setBulkSelectedIds((prev) => {
       const next = new Set(prev);
@@ -118,20 +142,36 @@ export function StoriesBoard({
     const ids = Array.from(bulkSelectedIds);
     if (ids.length === 0) return;
     if (!confirm(`Delete ${ids.length} item${ids.length === 1 ? "" : "s"}? This can't be undone.`)) return;
+    setHiddenStoryIds((prev) => new Set([...prev, ...ids]));
+    handleCancelBulkSelection();
     startBulkAction(async () => {
-      await bulkDeleteStories(projectId, ids);
-      handleCancelBulkSelection();
-      router.refresh();
+      const result = await bulkDeleteStories(projectId, ids);
+      if (!result.success) {
+        unhideStories(ids);
+        setToastMessage(result.message ?? "Couldn't delete those items.");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
     });
   }
 
   function handleBulkMove(folderId: string | null) {
     const ids = Array.from(bulkSelectedIds);
     if (ids.length === 0) return;
+    // Moving out of the currently-viewed folder (or Unfiled) makes these
+    // cards disappear from the current view -- moving them further into a
+    // folder the user isn't currently looking at has no other visible
+    // effect to show optimistically.
+    setHiddenStoryIds((prev) => new Set([...prev, ...ids]));
+    handleCancelBulkSelection();
     startBulkAction(async () => {
-      await bulkMoveStoriesToFolder(projectId, ids, folderId);
-      handleCancelBulkSelection();
-      router.refresh();
+      const result = await bulkMoveStoriesToFolder(projectId, ids, folderId);
+      if (!result.success) {
+        unhideStories(ids);
+        setToastMessage(result.message ?? "Couldn't move those items.");
+        setTimeout(() => setToastMessage(null), 3000);
+      } else {
+        router.refresh();
+      }
     });
   }
 
@@ -169,18 +209,29 @@ export function StoriesBoard({
     });
   }
 
-  function handleRenameFolder(folderId: string, name: string) {
-    startFolderAction(async () => {
-      await renameContentFolder(projectId, folderId, name);
-      router.refresh();
-    });
+  // Returns the result (rather than fire-and-forget) so FolderTile can show
+  // the new name optimistically and revert it locally if the save fails.
+  async function handleRenameFolder(folderId: string, name: string) {
+    const result = await renameContentFolder(projectId, folderId, name);
+    if (result.success) router.refresh();
+    return result;
   }
 
   function handleDeleteFolder(folderId: string, name: string) {
     if (!confirm(`Delete "${name}"? Its content will move to Unfiled -- nothing is deleted.`)) return;
     if (activeFolderId === folderId) setActiveFolderId(null);
+    setHiddenFolderIds((prev) => new Set(prev).add(folderId));
     startFolderAction(async () => {
-      await deleteContentFolder(projectId, folderId);
+      const result = await deleteContentFolder(projectId, folderId);
+      if (!result.success) {
+        unhideFolder(folderId);
+        setToastMessage(result.message ?? "Couldn't delete that folder.");
+        setTimeout(() => setToastMessage(null), 3000);
+        return;
+      }
+      // Its content falls back to Unfiled server-side -- a real refresh is
+      // still needed so those stories' folderId (in the stale `stories`
+      // prop) catches up, same reasoning as handleBulkMove above.
       router.refresh();
     });
   }
@@ -188,21 +239,29 @@ export function StoriesBoard({
   const countByFolder = useMemo(() => {
     const counts = new Map<string, number>();
     for (const s of stories) {
-      if (!s.folderId) continue;
+      if (!s.folderId || hiddenStoryIds.has(s.id)) continue;
       counts.set(s.folderId, (counts.get(s.folderId) ?? 0) + 1);
     }
     return counts;
-  }, [stories]);
+  }, [stories, hiddenStoryIds]);
 
-  const activeFolder = activeFolderId ? folders.find((f) => f.id === activeFolderId) ?? null : null;
+  const visibleFolders = useMemo(
+    () => (hiddenFolderIds.size === 0 ? folders : folders.filter((f) => !hiddenFolderIds.has(f.id))),
+    [folders, hiddenFolderIds],
+  );
+
+  const activeFolder = activeFolderId ? visibleFolders.find((f) => f.id === activeFolderId) ?? null : null;
 
   // Client-side filter -- matches against name, notes, and the scheduled
   // date, so "type to search" finds an item by any of the three without a
   // server round-trip per keystroke. Scoped to the current folder (or
   // Unfiled at root) first, same as Grid Media Library's folder scoping.
   const scoped = useMemo(
-    () => stories.filter((s) => (activeFolderId ? s.folderId === activeFolderId : !s.folderId)),
-    [stories, activeFolderId],
+    () =>
+      stories.filter(
+        (s) => !hiddenStoryIds.has(s.id) && (activeFolderId ? s.folderId === activeFolderId : !s.folderId),
+      ),
+    [stories, activeFolderId, hiddenStoryIds],
   );
 
   const filtered = useMemo(() => {
@@ -220,7 +279,7 @@ export function StoriesBoard({
   const visible = isSearching || showAll ? filtered : filtered.slice(0, COLLAPSED_COUNT);
   const hasMore = !isSearching && !showAll && filtered.length > COLLAPSED_COUNT;
 
-  const sectionLabel = activeFolder ? "Content" : folders.length > 0 ? "Unfiled" : "Recent Content";
+  const sectionLabel = activeFolder ? "Content" : visibleFolders.length > 0 ? "Unfiled" : "Recent Content";
 
   return (
     <div className="flex flex-col gap-4">
@@ -270,11 +329,11 @@ export function StoriesBoard({
         </div>
       </div>
 
-      {!activeFolder && (folders.length > 0 || canManage) && (
+      {!activeFolder && (visibleFolders.length > 0 || canManage) && (
         <div className="flex flex-col gap-2">
           <span className="text-xs tracking-wide text-muted uppercase">Folders</span>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            {folders.map((folder) => (
+            {visibleFolders.map((folder) => (
               <FolderTile
                 key={folder.id}
                 folder={folder}
@@ -335,7 +394,7 @@ export function StoriesBoard({
             onToggleSelect={handleToggleSelect}
             bulkSelected={bulkSelectedIds.has(story.id)}
             onToggleBulkSelect={handleToggleBulkSelect}
-            folders={folders}
+            folders={visibleFolders}
             currentFolderId={story.folderId}
           />
         ))}
@@ -391,7 +450,7 @@ export function StoriesBoard({
           <Button type="button" variant="secondary" radius="none" onClick={handleCancelBulkSelection}>
             Cancel
           </Button>
-          {folders.length > 0 && (
+          {visibleFolders.length > 0 && (
             <Button type="button" variant="secondary" radius="none" onClick={() => setBulkMoveDialogOpen(true)}>
               Move to Folder
             </Button>
@@ -460,7 +519,7 @@ export function StoriesBoard({
           >
             Unfiled
           </button>
-          {folders.map((f) => (
+          {visibleFolders.map((f) => (
             <button
               key={f.id}
               type="button"
@@ -604,13 +663,21 @@ function FolderTile({
   count: number;
   canManage: boolean;
   onOpen: () => void;
-  onRename: (name: string) => void;
+  onRename: (name: string) => Promise<ActionResult>;
   onDelete: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+  // Shows the new name immediately on Enter instead of waiting for the
+  // round trip -- reverts to the last known-good server value if the save
+  // fails (see handleRenameFolder above, which returns the result instead
+  // of firing and forgetting).
+  const { value: displayName, set: setOptimisticName, reset: resetOptimisticName } = useOptimisticOverride(
+    folder.name,
+  );
+  const [renameError, setRenameError] = useState<string | undefined>();
 
   return (
     <div className="group relative aspect-[4/5] w-full">
@@ -646,15 +713,25 @@ function FolderTile({
                 if (e.key !== "Enter") return;
                 e.preventDefault();
                 setRenaming(false);
-                if (renameValue.trim() && renameValue.trim() !== folder.name) onRename(renameValue.trim());
+                const next = renameValue.trim();
+                if (!next || next === displayName) return;
+                setRenameError(undefined);
+                setOptimisticName(next);
+                onRename(next).then((result) => {
+                  if (!result.success) {
+                    resetOptimisticName();
+                    setRenameError(result.message ?? "Couldn't rename that folder.");
+                  }
+                });
               }}
               className="w-full truncate bg-transparent text-xs font-medium text-foreground outline-none"
             />
           ) : (
-            <span className="truncate text-xs font-medium text-foreground">{folder.name}</span>
+            <span className="truncate text-xs font-medium text-foreground">{displayName}</span>
           )}
         </div>
       </button>
+      {renameError && <p className="mt-1 text-[10px] text-error">{renameError}</p>}
 
       {canManage && (
         <div ref={menuRef} className="absolute right-2 top-2 z-10">
@@ -682,7 +759,7 @@ function FolderTile({
                 type="button"
                 onClick={() => {
                   setMenuOpen(false);
-                  setRenameValue(folder.name);
+                  setRenameValue(displayName);
                   setRenaming(true);
                 }}
                 className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"

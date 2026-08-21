@@ -25,14 +25,17 @@ export async function inviteMember(
   const permissions = formData.getAll("permissions").map(String);
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
-  const { data: userId, error: lookupError } = await supabase.rpc(
-    "get_user_id_by_email",
-    { p_email: email },
-  );
+  // Independent -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { data: userId, error: lookupError },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.rpc("get_user_id_by_email", { p_email: email }),
+  ]);
 
   if (lookupError || !userId) {
     return { message: "No account found with that email — they need to register first." };
@@ -52,17 +55,21 @@ export async function inviteMember(
     return { message: error.message };
   }
 
-  if (permissions.length > 0) {
-    await supabase
-      .from("project_members")
-      .update({ custom_permissions: permissions })
-      .eq("project_id", projectId)
-      .eq("user_id", userId);
-  }
+  // Independent of each other -- the permissions update and the activity
+  // log write different rows/tables, and the project-name read doesn't
+  // depend on either.
+  const [, , { data: project }] = await Promise.all([
+    permissions.length > 0
+      ? supabase
+          .from("project_members")
+          .update({ custom_permissions: permissions })
+          .eq("project_id", projectId)
+          .eq("user_id", userId)
+      : Promise.resolve(),
+    user ? logActivity(supabase, projectId, user.id, `invited ${email} as ${role}`) : Promise.resolve(),
+    supabase.from("projects").select("name").eq("id", projectId).single(),
+  ]);
 
-  if (user) await logActivity(supabase, projectId, user.id, `invited ${email} as ${role}`);
-
-  const { data: project } = await supabase.from("projects").select("name").eq("id", projectId).single();
   await notifyProjectMembers(
     supabase,
     projectId,
@@ -80,17 +87,26 @@ export async function inviteMember(
   return { message: undefined };
 }
 
-export async function removeMember(projectId: string, userId: string) {
+// Not revalidating -- its one caller (TeamMemberRow's handleRemove)
+// already hides the row optimistically before this runs, and only
+// restores it + surfaces an error if the removal actually failed.
+export async function removeMember(
+  projectId: string,
+  userId: string,
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
-  await supabase
+  const { error } = await supabase
     .from("project_members")
     .delete()
     .eq("project_id", projectId)
     .eq("user_id", userId);
-
-  revalidatePath(`/projects/${projectId}/settings/team`);
+  if (error) return { success: false, message: error.message };
+  return { success: true };
 }
 
+// Not revalidating -- its one caller (TeamMemberRow's handleSaveEdit)
+// already calls router.refresh() itself right after this resolves (along
+// with updateMemberPermissions below, called in the same handler).
 export async function updateMemberRole(projectId: string, userId: string, role: ProjectRole) {
   if (role === "owner") {
     throw new Error("Use transferOwnership to make someone the owner.");
@@ -102,10 +118,10 @@ export async function updateMemberRole(projectId: string, userId: string, role: 
     .eq("project_id", projectId)
     .eq("user_id", userId);
   if (error) throw new Error(error.message);
-  revalidatePath(`/projects/${projectId}/settings/team`);
 }
 
-// null clears the override (falls back to the role's default access).
+// null clears the override (falls back to the role's default access). Not
+// revalidating -- same reasoning as updateMemberRole above.
 export async function updateMemberPermissions(
   projectId: string,
   userId: string,
@@ -118,7 +134,6 @@ export async function updateMemberPermissions(
     .eq("project_id", projectId)
     .eq("user_id", userId);
   if (error) throw new Error(error.message);
-  revalidatePath(`/projects/${projectId}/settings/team`);
 }
 
 // The previous owner becomes an admin rather than being removed -- ownership
@@ -143,21 +158,22 @@ export async function transferOwnership(projectId: string, newOwnerUserId: strin
     throw new Error("Only the current owner can transfer ownership.");
   }
 
-  const { error: demoteError } = await supabase
-    .from("project_members")
-    .update({ role: "admin" })
-    .eq("project_id", projectId)
-    .eq("user_id", user.id);
+  // Two different rows (different user_id) of the same table -- no shared
+  // state between them, safe to run together.
+  const [{ error: demoteError }, { error: promoteError }] = await Promise.all([
+    supabase.from("project_members").update({ role: "admin" }).eq("project_id", projectId).eq("user_id", user.id),
+    supabase
+      .from("project_members")
+      .update({ role: "owner" })
+      .eq("project_id", projectId)
+      .eq("user_id", newOwnerUserId),
+  ]);
   if (demoteError) throw new Error(demoteError.message);
-
-  const { error: promoteError } = await supabase
-    .from("project_members")
-    .update({ role: "owner" })
-    .eq("project_id", projectId)
-    .eq("user_id", newOwnerUserId);
   if (promoteError) throw new Error(promoteError.message);
 
   await logActivity(supabase, projectId, user.id, "transferred project ownership");
 
-  revalidatePath(`/projects/${projectId}/settings/team`);
+  // Not revalidating -- its one caller (TeamMemberRow's
+  // handleTransferOwnership) already calls router.refresh() itself right
+  // after this resolves.
 }

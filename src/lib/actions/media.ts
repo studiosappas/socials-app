@@ -2,9 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import type { MediaType } from "@/types/database";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 // If this asset is the cover (position 0) of any post, that post's saved
 // pan/zoom (posts.cover_transform) is about to be reframing a different
@@ -119,15 +118,17 @@ export async function saveMediaAssetAnnotation(
 
   await resetCoverTransformForAsset(supabase, mediaAssetId);
 
-  const { data: signed } = await supabase.storage
-    .from("project-media")
-    .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
+  // Brand-new path every edit (crypto.randomUUID() above), so this is
+  // always a cache miss for correctness -- routed through the shared cache
+  // anyway so the next page load that reads this exact path (Grid,
+  // Calendar, Stories) reuses this same signed URL instead of re-signing it.
+  const previewUrl = await getCachedSignedUrl(supabase, "project-media", storagePath);
 
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/stories`);
 
-  return { previewUrl: signed?.signedUrl };
+  return { previewUrl: previewUrl ?? undefined };
 }
 
 // Same shape as saveMediaAssetAnnotation above (and satisfies the same
@@ -183,15 +184,16 @@ export async function saveMediaAssetPosterAnnotation(
 
   await resetCoverTransformForAsset(supabase, mediaAssetId);
 
-  const { data: signed } = await supabase.storage
-    .from("project-media")
-    .createSignedUrl(posterPath, SIGNED_URL_TTL_SECONDS);
+  // Same reasoning as saveMediaAssetAnnotation above -- brand-new path, but
+  // routed through the shared cache so a subsequent normal page load of
+  // this exact poster reuses this signed URL rather than minting another.
+  const previewUrl = await getCachedSignedUrl(supabase, "project-media", posterPath);
 
   revalidatePath(`/projects/${projectId}/grid`);
   revalidatePath(`/projects/${projectId}/calendar`);
   revalidatePath(`/projects/${projectId}/stories`);
 
-  return { previewUrl: signed?.signedUrl };
+  return { previewUrl: previewUrl ?? undefined };
 }
 
 // Manual escape hatch for a video whose poster was never captured (e.g.
@@ -230,12 +232,13 @@ export async function saveRegeneratedPoster(
     return { message: updateError.message };
   }
 
-  const { data: signed } = await supabase.storage
-    .from("project-media")
-    .createSignedUrl(posterPath, SIGNED_URL_TTL_SECONDS);
+  // Same reasoning as saveMediaAssetAnnotation above -- brand-new path,
+  // routed through the shared cache so a later normal page load of this
+  // exact poster reuses this signed URL rather than minting another.
+  const posterUrl = await getCachedSignedUrl(supabase, "project-media", posterPath);
 
   // Not revalidating /grid (its own route, only caller) -- the self-heal
   // effect in grid-board.tsx already patches this slot's thumbnail locally
   // from the posterUrl returned below.
-  return { posterUrl: signed?.signedUrl };
+  return { posterUrl: posterUrl ?? undefined };
 }

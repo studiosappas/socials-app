@@ -26,6 +26,8 @@ export function ListView({
   tomorrow,
   onAddTask,
   autoExpandComments,
+  onTaskDeleteStart,
+  onTaskDeleteFailed,
 }: {
   tasks: TaskItem[];
   membersByProject: Record<string, TeamMember[]>;
@@ -39,6 +41,8 @@ export function ListView({
   tomorrow: string;
   onAddTask: () => void;
   autoExpandComments: boolean;
+  onTaskDeleteStart: (id: string) => void;
+  onTaskDeleteFailed: (task: TaskItem, message: string) => void;
 }) {
   if (tasks.length === 0) {
     return (
@@ -78,6 +82,8 @@ export function ListView({
           onStatusChange={(status) => onStatusChange(task.id, status)}
           onOpenLinkedContent={() => onOpenLinkedContent(task)}
           autoExpandComments={autoExpandComments}
+          onDeleteStart={onTaskDeleteStart}
+          onDeleteFailed={onTaskDeleteFailed}
         />
       )}
     </div>

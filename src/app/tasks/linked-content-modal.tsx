@@ -4,14 +4,16 @@ import { useEffect, useState } from "react";
 import { Modal } from "@/app/projects/[projectId]/modal";
 import { PostEditor } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
 import { StoryEditor } from "@/app/projects/[projectId]/stories/[storyId]/story-editor";
-import { fetchPostForModal } from "@/lib/actions/posts";
+import { fetchPostForModal, type PostForModalData } from "@/lib/actions/posts";
 import { fetchStoryForModal } from "@/lib/actions/stories";
-import type { PostPageData } from "@/lib/data/posts";
 import type { StoryPageData } from "@/lib/data/stories";
 
 export type LinkedContentTarget = { projectId: string; type: "post" | "story"; id: string };
 
-type LoadResult = { kind: "post"; data: PostPageData } | { kind: "story"; data: StoryPageData } | { kind: "missing" };
+type LoadResult =
+  | { kind: "post"; data: PostForModalData }
+  | { kind: "story"; data: StoryPageData }
+  | { kind: "missing" };
 
 // The Tasks page's own equivalent of the Grid/Calendar intercepted-route
 // modal (@modal/(.)posts, @modal/(.)stories) -- those only activate for a
@@ -60,7 +62,11 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           post={result.data.post}
           assets={result.data.assets}
           links={result.data.links}
-          mediaLibrary={result.data.mediaLibrary}
+          // Already fully resolved by the time `result` is set (see
+          // fetchPostForModal's own comment on why this entry point can't
+          // stream it in separately) -- wrapped in Promise.resolve() just
+          // to satisfy PostEditor's prop type, not to defer anything.
+          mediaLibraryPromise={Promise.resolve(result.data.mediaLibrary)}
           canManage={result.data.canManage}
           currentUserId={result.data.currentUserId}
           members={result.data.members}

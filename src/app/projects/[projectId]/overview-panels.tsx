@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { useActionState, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -698,19 +698,37 @@ export function BrandKnowledgePanel({
     return () => clearTimeout(timer);
   }, []);
 
-  const fileCount = documents.filter((d) => d.sourceType === "file").length;
-  const linkCount = documents.filter((d) => d.sourceType === "link").length;
-  const latest = documents[0];
+  // Optimistic hide-on-delete -- an id that's genuinely gone from a fresh
+  // `documents` prop is a harmless no-op to keep hidden, same reasoning as
+  // Brief/Stories' own hidden-id sets.
+  const [hiddenDocumentIds, setHiddenDocumentIds] = useState<Set<string>>(new Set());
+  const visibleDocuments = useMemo(
+    () => (hiddenDocumentIds.size === 0 ? documents : documents.filter((d) => !hiddenDocumentIds.has(d.id))),
+    [documents, hiddenDocumentIds],
+  );
+
+  const fileCount = visibleDocuments.filter((d) => d.sourceType === "file").length;
+  const linkCount = visibleDocuments.filter((d) => d.sourceType === "link").length;
+  const latest = visibleDocuments[0];
 
   // Only real, uploaded documents get a tile -- no placeholder "File" ghosts
   // padding the ring out to a fixed 8 slots.
-  const tiles = documents.slice(0, MAX_ORBIT_TILES);
+  const tiles = visibleDocuments.slice(0, MAX_ORBIT_TILES);
   const tileLayout = computeTileLayout(tiles.length);
 
   function handleDelete(documentId: string) {
+    setHiddenDocumentIds((prev) => new Set(prev).add(documentId));
     startTransition(async () => {
-      await deleteBrandDocument(projectId, documentId);
-      router.refresh();
+      const result = await deleteBrandDocument(projectId, documentId);
+      if (!result.success) {
+        console.error("Failed to delete brand document:", result.message);
+        setHiddenDocumentIds((prev) => {
+          const next = new Set(prev);
+          next.delete(documentId);
+          return next;
+        });
+        router.refresh();
+      }
     });
   }
 
@@ -806,7 +824,7 @@ export function BrandKnowledgePanel({
         projectId={projectId}
         open={manageOpen}
         onClose={() => setManageOpen(false)}
-        documents={documents}
+        documents={visibleDocuments}
         onDelete={handleDelete}
         onUploaded={onIntelligenceRefresh}
       />
@@ -1155,7 +1173,6 @@ function SpectrumSlider({
   defaultValue: number;
   disabled: boolean;
 }) {
-  const router = useRouter();
   const [, startTransition] = useTransition();
   const [value, setValue] = useState(defaultValue);
   // React batches the onChange->setValue update with whatever event fires
@@ -1184,11 +1201,15 @@ function SpectrumSlider({
     latestValueRef.current = next;
   }
 
+  // No router.refresh() -- `value` (state, set in handleChange above)
+  // already shows the dragged position correctly and permanently, with or
+  // without a fresh page render; updateSpectrumValue no longer revalidates
+  // its own route either, since there was nothing left for a refresh to
+  // usefully bring back here.
   function commit() {
     const next = latestValueRef.current;
     startTransition(async () => {
       await updateSpectrumValue(projectId, name, next);
-      router.refresh();
     });
   }
 

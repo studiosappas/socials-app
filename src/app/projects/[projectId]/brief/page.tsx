@@ -10,45 +10,46 @@ export default async function BriefPage({
   const { projectId } = await params;
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // brandMoodboard needs only projectId, not the user/membership chain below
+  // -- fetched in the same wave as auth.getUser() instead of after everything
+  // else resolves.
+  const [
+    {
+      data: { user },
+    },
+    brandMoodboard,
+  ] = await Promise.all([supabase.auth.getUser(), getBrandMoodboard(supabase, projectId)]);
 
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
+  // Both only need projectId/user.id (already resolved above), not each
+  // other's result.
+  const [{ data: membership }, { data: tasks }] = await Promise.all([
+    supabase
+      .from("project_members")
+      .select("role")
+      .eq("project_id", projectId)
+      .eq("user_id", user!.id)
+      .single(),
+    supabase
+      .from("brief_tasks")
+      .select("id, name, content_types, position")
+      .eq("project_id", projectId)
+      .order("position"),
+  ]);
 
   const canManage = membership?.role === "owner" || membership?.role === "admin";
-
-  const { data: tasks } = await supabase
-    .from("brief_tasks")
-    .select("id, name, content_types, position")
-    .eq("project_id", projectId)
-    .order("position");
-
   const taskIds = (tasks ?? []).map((t) => t.id);
-
-  // Isolated from the select above -- `status` is a newer column that may
-  // not exist yet on a not-yet-migrated database, and a plain .select(...)
-  // that fails because the column doesn't exist would wipe out the entire
-  // Brief board (only `data` is read, and it comes back null on error), not
-  // just the status badges -- same reasoning as the folder_id isolation in
-  // stories/page.tsx.
-  const { data: statusRows } = taskIds.length
-    ? await supabase.from("brief_tasks").select("id, status").in("id", taskIds)
-    : { data: [] };
-  const statusByTask = new Map((statusRows ?? []).map((r) => [r.id, r.status]));
 
   // Fetched as flat, independent queries (rather than a nested embed) so a
   // pending migration on one table degrades that section gracefully instead
-  // of failing the whole page's select.
-  const [{ data: items }, { data: frames }, { data: attachments }] =
+  // of failing the whole page's select. `status` (a newer column) stays its
+  // own isolated select for the same reason -- same reasoning as the
+  // folder_id isolation in stories/page.tsx -- just run alongside the other
+  // three now instead of before them.
+  const [{ data: statusRows }, { data: items }, { data: frames }, { data: attachments }] =
     taskIds.length === 0
-      ? [{ data: [] }, { data: [] }, { data: [] }]
+      ? [{ data: [] }, { data: [] }, { data: [] }, { data: [] }]
       : await Promise.all([
+          supabase.from("brief_tasks").select("id, status").in("id", taskIds),
           supabase
             .from("brief_task_items")
             .select("id, task_id, section, kind, url, label, notes, attachment_id, position")
@@ -64,6 +65,7 @@ export default async function BriefPage({
             .select("id, original_storage_path, preview_storage_path, annotation_json")
             .eq("project_id", projectId),
         ]);
+  const statusByTask = new Map((statusRows ?? []).map((r) => [r.id, r.status]));
 
   const attachmentById = new Map((attachments ?? []).map((a) => [a.id, a]));
 
@@ -104,8 +106,6 @@ export default async function BriefPage({
         body: frame.body,
       })),
   }));
-
-  const brandMoodboard = await getBrandMoodboard(supabase, projectId);
 
   return <BriefBoard projectId={projectId} tasks={taskData} canManage={canManage} brandMoodboard={brandMoodboard} />;
 }

@@ -63,7 +63,14 @@ export async function updateAccountProfile(
     message = "Profile updated. Check your inbox to confirm your new email address.";
   }
 
-  revalidatePath("/", "layout");
+  // Narrowed from a blanket revalidatePath("/", "layout") -- the Account
+  // page itself never needed it (ProfileCard already shows the saved
+  // name/email/avatar from its own local state, never from a fresh server
+  // prop). Name/avatar are genuinely read elsewhere though: Team Settings'
+  // member list and every comment thread (Brief/Story under /projects,
+  // Task under /tasks) show this profile's name/avatar_url live.
+  revalidatePath("/projects", "layout");
+  revalidatePath("/tasks");
   return { success: true, message };
 }
 
@@ -121,7 +128,11 @@ export async function updateWorkspaceSettings(
   const { error } = await supabase.from("profiles").update({ workspace_settings: settings }).eq("id", user.id);
   if (error) return { message: error.message };
 
-  revalidatePath("/", "layout");
+  // Narrowed from a blanket revalidatePath("/", "layout") -- the Account
+  // page itself never needed it (WorkspaceCard is fully controlled local
+  // state). The one real external consumer is Calendar's week_starts_on
+  // (see calendar/page.tsx), which lives under /projects.
+  revalidatePath("/projects", "layout");
   return { success: true };
 }
 
@@ -174,7 +185,13 @@ export async function updatePreferences(
     { maxAge: 60 * 60 * 24 * 365, path: "/", sameSite: "lax" },
   );
 
-  revalidatePath("/", "layout");
+  // Narrowed from a blanket revalidatePath("/", "layout") -- the Account
+  // page itself never needed it (PreferencesCard is fully controlled local
+  // state), and theme/reduce_motion are already picked up on the very next
+  // request via the theme_prefs cookie set above, independent of any
+  // revalidation. The one real external consumer is /tasks'
+  // auto_expand_comments (see task-workspace.tsx/task-detail.tsx).
+  revalidatePath("/tasks");
   return { success: true };
 }
 
@@ -252,7 +269,10 @@ export async function updateNotificationPrefs(
     .eq("user_id", user.id);
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}/settings/notifications`);
+  // Not revalidating -- its one caller (NotificationsPanel) uses
+  // uncontrolled checkboxes that already show the saved state, and these
+  // prefs are otherwise only read server-side (notifyProjectMembers/
+  // notifyMentions), never rendered on any other page.
   return { success: true };
 }
 

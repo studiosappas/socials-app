@@ -6,21 +6,36 @@ import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media"
 import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
-import { getPostPageData, type PostPageData } from "@/lib/data/posts";
+import { getPostCoreData, getPostMediaLibrary, type PostCoreData } from "@/lib/data/posts";
 import { syncPostType } from "@/lib/post-type";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
+import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
 
+export type PostForModalData = PostCoreData & { mediaLibrary: MediaLibraryItem[] };
+
 // Lets the Tasks page (src/app/tasks/*) open a post in a client-side popup
 // instead of navigating away -- it lives outside /projects/[projectId]/...
 // entirely (see that layout's own comment for why), so it can't reach
-// getPostPageData directly (that needs the server-only Supabase client) or
+// getPostCoreData directly (that needs the server-only Supabase client) or
 // rely on the intercepted-route modal Grid/Calendar use, which only
 // activates for soft navigations already inside that route tree.
-export async function fetchPostForModal(projectId: string, postId: string): Promise<PostPageData | null> {
-  return getPostPageData(projectId, postId);
+//
+// Unlike those two routes, this is a plain client-invoked server action
+// (LinkedContentModal awaits it in a useEffect, with its own "Loading…"
+// state), not a Server Component render -- there's no equivalent of
+// passing an unresolved promise down for a child to stream in, so this
+// still fetches the whole-project media library eagerly, same as before
+// the Post Editor opening-latency pass. This entry point (opening linked
+// content from the Tasks page) is a secondary path, not the primary
+// Grid-tile-click flow that split was aimed at.
+export async function fetchPostForModal(projectId: string, postId: string): Promise<PostForModalData | null> {
+  const core = await getPostCoreData(projectId, postId);
+  if (!core) return null;
+  const mediaLibrary = await getPostMediaLibrary(projectId);
+  return { ...core, mediaLibrary };
 }
 
 // Not revalidating /grid or /calendar -- deletePost has two callers (Grid's
@@ -41,20 +56,22 @@ export async function updatePost(
   formData: FormData,
 ): Promise<UpdatePostState> {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
   const scheduledTime = String(formData.get("scheduled_time") ?? "").trim();
   const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
   const caption = String(formData.get("caption") ?? "");
 
-  const { data: before } = await supabase
-    .from("posts")
-    .select("status, post_type, scheduled_date")
-    .eq("id", postId)
-    .single();
+  // Independent reads -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { data: before },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("posts").select("status, post_type, scheduled_date").eq("id", postId).single(),
+  ]);
 
   // post_type: adding/replacing/removing media auto-suggests the right
   // value (lib/post-type.ts's syncPostType, called from those actions), but
@@ -93,24 +110,22 @@ export async function updatePost(
     await completeAutoTaskForPost(supabase, postId);
   }
 
-  // Isolated from the update above -- scheduled_time is a new column that
-  // may not exist yet on a not-yet-migrated database, and PostgREST fails
-  // the WHOLE statement if any referenced column is missing.
-  await supabase
-    .from("posts")
-    .update({ scheduled_time: scheduledTime ? scheduledTime : null })
-    .eq("id", postId);
-
-  // Same isolation reasoning -- review_status is what a client's review-link
-  // submission also writes to (set_post_review_status_by_token), so a
-  // manual edit here uses the exact same column, never a second field.
+  // Both isolated from the update above and from each other -- scheduled_time
+  // is a new column that may not exist yet on a not-yet-migrated database
+  // (PostgREST fails the WHOLE statement if any referenced column is
+  // missing), and review_status is what a client's review-link submission
+  // also writes to (set_post_review_status_by_token), so a manual edit here
+  // uses the exact same column, never a second field. Each targets a
+  // disjoint column on the same row, so running them together is safe --
+  // same reasoning already applied to Grid's upload flow and Post Editor's
+  // own page load earlier in this engagement.
   const reviewStatus = formData.get("review_status");
-  if (reviewStatus) {
-    await supabase
-      .from("posts")
-      .update({ review_status: String(reviewStatus) as ReviewStatus })
-      .eq("id", postId);
-  }
+  await Promise.all([
+    supabase.from("posts").update({ scheduled_time: scheduledTime ? scheduledTime : null }).eq("id", postId),
+    reviewStatus
+      ? supabase.from("posts").update({ review_status: String(reviewStatus) as ReviewStatus }).eq("id", postId)
+      : Promise.resolve(),
+  ]);
 
   // Only the transition INTO "in_review", not every save made while a post
   // already sits in that status -- otherwise this would fire on every
@@ -156,7 +171,7 @@ export async function addPostAsset(
   projectId: string,
   postId: string,
   mediaAssetId: string,
-) {
+): Promise<{ success: true; postAssetId: string } | { success: false; message: string }> {
   const supabase = await createClient();
 
   const { count } = await supabase
@@ -164,18 +179,26 @@ export async function addPostAsset(
     .select("*", { count: "exact", head: true })
     .eq("post_id", postId);
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("post_assets")
-    .insert({ post_id: postId, media_asset_id: mediaAssetId, position: count ?? 0 });
+    .insert({ post_id: postId, media_asset_id: mediaAssetId, position: count ?? 0 })
+    .select("id")
+    .single();
 
-  if (error) {
-    throw new Error(error.message);
+  if (error || !data) {
+    return { success: false, message: error?.message ?? "Failed to add that asset." };
   }
 
   await syncPostType(supabase, postId);
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (AddFromLibrarySection in post-editor.tsx) already inserts the
+  // new asset optimistically (it's picked from the already-loaded media
+  // library, so url/mediaType are known client-side) and reconciles the
+  // real postAssetId returned here. /grid is a genuinely different route,
+  // kept as-is (a new asset can change the post's cover/thumbnail there).
   revalidatePath(`/projects/${projectId}/grid`);
+  return { success: true, postAssetId: data.id };
 }
 
 export type UploadPostAssetState = { message?: string; success?: boolean } | undefined;
@@ -256,7 +279,10 @@ export async function uploadPostAsset(
 
   await syncPostType(supabase, postId);
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (UploadAssetTile, via onUploaded) already calls router.refresh()
+  // itself right after this resolves. /grid is a genuinely different
+  // route, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
   return { success: true };
 }
@@ -265,12 +291,17 @@ export async function removePostAsset(
   projectId: string,
   postId: string,
   postAssetId: string,
-) {
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
-  await supabase.from("post_assets").delete().eq("id", postAssetId);
+  const { error } = await supabase.from("post_assets").delete().eq("id", postAssetId);
+  if (error) return { success: false, message: error.message };
   await syncPostType(supabase, postId);
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (SortableAsset's onRemove) already removes the tile optimistically
+  // before this runs, and only calls router.refresh() on failure to resync.
+  // /grid is a genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
+  return { success: true };
 }
 
 export type ReplacePostAssetState = { message?: string; success?: boolean } | undefined;
@@ -359,7 +390,10 @@ export async function replacePostAsset(
 
   await syncPostType(supabase, postId);
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (ReplaceAssetPopover's runReplace) already calls
+  // router.refresh() itself right after this resolves. /grid is a
+  // genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
   return { success: true };
 }
@@ -377,7 +411,11 @@ export async function reorderPostAssets(
     ),
   );
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (post-editor.tsx's applyReorder) already shows the reordered
+  // carousel optimistically via orderedAssets. /grid is a genuinely
+  // different route, kept as-is (reordering can change which asset is now
+  // the cover/position 0, which Grid's tile thumbnail reads).
   revalidatePath(`/projects/${projectId}/grid`);
 }
 
@@ -398,12 +436,14 @@ export async function addPostLink(
     return { message: error.message };
   }
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating -- its one caller (PostLinks' handleAdd) already calls
+  // router.refresh() itself right after this resolves.
   return undefined;
 }
 
 export async function removePostLink(projectId: string, postId: string, linkId: string) {
   const supabase = await createClient();
   await supabase.from("post_links").delete().eq("id", linkId);
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating -- its one caller (PostLinks' remove button) already
+  // calls router.refresh() itself right after this resolves.
 }

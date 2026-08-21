@@ -36,56 +36,58 @@ export async function getStoryPageData(
 ): Promise<StoryPageData | null> {
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
-
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
-
-  const { data: story } = await supabase
-    .from("stories")
-    .select("id, name, scheduled_date, status, notes")
-    .eq("id", storyId)
-    .single();
+  // Everything in this wave is mutually independent -- story/frames/
+  // storyLinks only need storyId, allMediaAssets/members only need
+  // projectId, and getUser() needs neither. membership needs user.id (not
+  // known until this resolves), so it can't join this wave.
+  const [
+    {
+      data: { user },
+    },
+    { data: story },
+    { data: frames },
+    { data: storyLinks },
+    { data: allMediaAssets },
+    members,
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("stories").select("id, name, scheduled_date, status, notes").eq("id", storyId).single(),
+    supabase
+      .from("story_frames")
+      .select("id, position, link_url, media_assets(id, storage_path, media_type)")
+      .eq("story_id", storyId)
+      .order("position"),
+    // Queried independently of the critical `story` fetch above -- story_links
+    // is a separate table, so if it isn't live yet this just yields an empty
+    // Links section instead of 404-ing the whole page.
+    supabase.from("story_links").select("id, url, label").eq("story_id", storyId),
+    supabase
+      .from("media_assets")
+      .select("id, storage_path, media_type")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false }),
+    getProjectMemberOptions(supabase, projectId),
+  ]);
 
   if (!story) return null;
 
-  const { data: frames } = await supabase
-    .from("story_frames")
-    .select("id, position, link_url, media_assets(id, storage_path, media_type)")
-    .eq("story_id", storyId)
-    .order("position");
-
-  // Queried independently of the critical `story` fetch above -- story_links
-  // is a separate table, so if it isn't live yet this just yields an empty
-  // Links section instead of 404-ing the whole page.
-  const { data: storyLinks } = await supabase
-    .from("story_links")
-    .select("id, url, label")
-    .eq("story_id", storyId);
-
-  const { data: allMediaAssets } = await supabase
-    .from("media_assets")
-    .select("id, storage_path, media_type")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: false });
-
-  // Isolated from the select above -- archived is a newer column that may
-  // not exist yet on a not-yet-migrated database, and a plain .eq() filter
-  // on the main select would fail (silently returning nothing, since only
-  // `data` is read) the instant it doesn't exist, wiping out the whole
-  // library instead of just not filtering archived assets out yet.
+  // membership needs user.id (just resolved above); the archived check
+  // needs allMediaAssets' ids (also just resolved above) -- independent of
+  // each other, so one wave instead of two more sequential round trips.
+  // Isolated from the media_assets select above -- archived is a newer
+  // column that may not exist yet on a not-yet-migrated database, and a
+  // plain .eq() filter on the main select would fail (silently returning
+  // nothing, since only `data` is read) the instant it doesn't exist,
+  // wiping out the whole library instead of just not filtering archived
+  // assets out yet.
   const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
-  const { data: archivedRows } = allMediaIdsForArchiveCheck.length
-    ? await supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
-    : { data: [] };
+  const [{ data: membership }, { data: archivedRows }] = await Promise.all([
+    supabase.from("project_members").select("role").eq("project_id", projectId).eq("user_id", user!.id).single(),
+    allMediaIdsForArchiveCheck.length
+      ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
+      : Promise.resolve({ data: [] }),
+  ]);
+  const canManage = membership?.role === "owner" || membership?.role === "admin";
   const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
@@ -116,8 +118,6 @@ export async function getStoryPageData(
   }));
 
   const links: StoryLinkItem[] = (storyLinks ?? []).map((l) => ({ id: l.id, url: l.url, label: l.label }));
-
-  const members = await getProjectMemberOptions(supabase, projectId);
 
   return { story, frames: frameItems, links, mediaLibrary, canManage, currentUserId: user!.id, members };
 }

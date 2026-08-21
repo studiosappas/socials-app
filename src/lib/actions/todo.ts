@@ -6,7 +6,7 @@ import { getTaskComments, type TaskCommentItem } from "@/lib/data/tasks";
 import { notifyMentions } from "@/lib/notifications";
 import type { TaskStatus } from "@/types/database";
 
-export type TaskFormState = { message?: string; success?: boolean } | undefined;
+export type TaskFormState = { message?: string; success?: boolean; taskId?: string } | undefined;
 
 function normalizeDueDate(formData: FormData): string | null {
   const raw = formData.get("due_date");
@@ -36,18 +36,23 @@ export async function createTask(
   // a personal (no-project) task ignores whatever assignee_id was posted.
   const assigneeId = projectId ? normalizeOptional(formData, "assignee_id") : null;
 
-  const { error } = await supabase.from("tasks").insert({
-    user_id: user.id,
-    project_id: projectId,
-    title,
-    notes: String(formData.get("notes") ?? ""),
-    due_date: normalizeDueDate(formData),
-    assignee_id: assigneeId,
-  });
+  const { data, error } = await supabase
+    .from("tasks")
+    .insert({
+      user_id: user.id,
+      project_id: projectId,
+      title,
+      notes: String(formData.get("notes") ?? ""),
+      due_date: normalizeDueDate(formData),
+      assignee_id: assigneeId,
+    })
+    .select("id")
+    .single();
 
   if (error) return { message: error.message };
-  revalidatePath("/tasks");
-  return { success: true };
+  // Not revalidating -- its one caller (NewTaskDialog) already inserts the
+  // new task optimistically and reconciles the real id returned here.
+  return { success: true, taskId: data?.id };
 }
 
 export async function updateTask(
@@ -74,22 +79,32 @@ export async function updateTask(
   return { success: true };
 }
 
+// Not revalidating -- its one caller (task-workspace.tsx's
+// handleStatusChange) already applies the change optimistically via
+// overrideTasks before this action ever runs.
 export async function updateTaskStatus(taskId: string, status: TaskStatus) {
   const supabase = await createClient();
   await supabase.from("tasks").update({ status, updated_at: new Date().toISOString() }).eq("id", taskId);
-  revalidatePath("/tasks");
 }
 
+// Not revalidating -- same reasoning as updateTaskStatus above
+// (task-workspace.tsx's handleAssigneeChange already applies this
+// optimistically via overrideTasks).
 export async function updateTaskAssignee(taskId: string, assigneeId: string | null) {
   const supabase = await createClient();
   await supabase.from("tasks").update({ assignee_id: assigneeId, updated_at: new Date().toISOString() }).eq("id", taskId);
-  revalidatePath("/tasks");
 }
 
-export async function deleteTask(taskId: string) {
+// Not revalidating -- its one caller (task-detail.tsx's handleDelete)
+// already hides the task optimistically before this runs, and only
+// restores it + surfaces a toast if the delete actually failed.
+export async function deleteTask(
+  taskId: string,
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
-  await supabase.from("tasks").delete().eq("id", taskId);
-  revalidatePath("/tasks");
+  const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+  if (error) return { success: false, message: error.message };
+  return { success: true };
 }
 
 export async function addTaskComment(
@@ -125,7 +140,10 @@ export async function addTaskComment(
     });
   }
 
-  revalidatePath("/tasks");
+  // Not revalidating -- its one caller (task-detail.tsx's
+  // handleSubmitComment) already shows the new comment optimistically and
+  // re-fetches the real thread directly via fetchTaskComments, independent
+  // of any full-page revalidation.
   return { success: true };
 }
 

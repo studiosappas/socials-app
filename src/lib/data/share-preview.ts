@@ -1,9 +1,8 @@
 import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 import type { ReviewStatus } from "@/types/database";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export type SharedGalleryMedia = {
   mediaAssetId: string;
@@ -43,7 +42,8 @@ export type SharedGalleryData = {
 // DEFINER function so it can read posts/stories/media_assets (all otherwise
 // member-only) on behalf of an anonymous caller, but only ever for a token
 // that actually exists. A matching storage policy (see schema.sql) is what
-// lets the createSignedUrls call below succeed for an anon caller too.
+// lets the signed-URL cache's underlying storage call below succeed for an
+// anon caller too.
 // Wrapped in React's cache() since both generateMetadata and the page
 // component call this for the same request -- dedupes the RPC + storage
 // round trips to one instead of two.
@@ -64,15 +64,14 @@ export const getSharedPreviewData = cache(async function getSharedPreviewData(
     }
   }
 
+  // Cached the same way every authenticated surface signs project-media --
+  // the cache is keyed by (bucket, path) only, so a path already signed for
+  // a logged-in viewer (Grid, Post Editor, ...) is reused here for free, and
+  // vice versa. Safe for an anonymous caller: a cache hit never touches
+  // Supabase at all, and a miss still runs through this same request's
+  // anon-but-policy-scoped client, same as the uncached call this replaces.
   const pathList = Array.from(paths);
-  const { data: signedUrls } = pathList.length
-    ? await supabase.storage.from("project-media").createSignedUrls(pathList, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", pathList);
 
   return {
     title: data.title,

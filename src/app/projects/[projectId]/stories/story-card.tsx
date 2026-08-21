@@ -58,13 +58,26 @@ export const StoryCard = memo(function StoryCard({
   const [downloading, setDownloading] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [deleted, setDeleted] = useState(false);
+  // Moving out of the current view (a different folder, or Unfiled) makes
+  // this card disappear here too -- same "gone from this list" shape as
+  // delete, just via a different reason.
+  const [moved, setMoved] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => {
     setMenuOpen(false);
     setMenuView("root");
   });
   const href = `/projects/${projectId}/stories/${storyId}`;
 
-  if (deleted) return null;
+  // Warms the intercepted Story editor route's RSC payload as soon as this
+  // card is on screen, same fix already proven for Grid tiles -> Post
+  // Editor (grid-board.tsx). getStoryPageData runs several sequential
+  // Supabase queries; without a prefetch, opening a story was a fully cold
+  // navigation every time.
+  useEffect(() => {
+    router.prefetch(href);
+  }, [href, router]);
+
+  if (deleted || moved) return null;
 
   function handleDelete() {
     setMenuOpen(false);
@@ -84,8 +97,18 @@ export const StoryCard = memo(function StoryCard({
   function handleMove(folderId: string | null) {
     setMenuOpen(false);
     setMenuView("root");
+    setMoved(true);
     startTransition(async () => {
-      await moveStoryToFolder(projectId, storyId, folderId);
+      const result = await moveStoryToFolder(projectId, storyId, folderId);
+      if (!result.success) {
+        console.error("Failed to move story:", result.message);
+        setMoved(false);
+        router.refresh();
+        return;
+      }
+      // Still refresh on success -- the underlying `stories` prop's
+      // folderId is now stale, and a later navigation into the target
+      // folder (without a hard reload) needs it to be current.
       router.refresh();
     });
   }
@@ -413,9 +436,16 @@ function AssetPreviewModal({
           </>
         )}
 
+        {/* Keyed by index, not file.url -- the url is a signed URL that gets
+            a new token every time it's re-signed even though the underlying
+            file didn't change, so keying by it forced a full remount (video
+            restart/image flash) on every unrelated background revalidation,
+            not just on an actual Prev/Next navigation. index is stable for
+            "which file is this" across re-signs, and still changes exactly
+            when the user navigates to a different file. */}
         {file.mediaType === "video" ? (
           <video
-            key={file.url}
+            key={index}
             src={file.url}
             controls
             playsInline
@@ -424,7 +454,7 @@ function AssetPreviewModal({
           />
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
-          <img key={file.url} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
+          <img key={index} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
         )}
       </div>
 

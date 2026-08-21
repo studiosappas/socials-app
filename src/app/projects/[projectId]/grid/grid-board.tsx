@@ -106,6 +106,14 @@ export type MediaLibraryItem = {
   // only Grid's own page.tsx populates it. null/undefined both mean
   // "unfoldered," shown in the library's root view.
   folderId?: string | null;
+  // True only for an optimistic placeholder shown the instant a file is
+  // picked, before uploadMedia's insert has actually resolved (see
+  // media-library.tsx/grid-board.tsx's MediaPickerDialog, both of which set
+  // this on the placeholder and clear it once the real id/storagePath comes
+  // back). Never true for a real, already-persisted asset. Consumers gate
+  // drag/select/assign on this -- the preview shows immediately, but the
+  // asset isn't usable until the upload genuinely lands.
+  pending?: boolean;
 };
 export type MediaFolder = { id: string; name: string };
 export type GridCoverTransform = { scale: number; x: number; y: number };
@@ -1404,7 +1412,13 @@ function MediaPickerDialog({
       setOverrideItems((current) =>
         (current ?? effectiveItems).map((i) =>
           i.id === tempId
-            ? { ...i, id: realId, storagePath: realStoragePath, posterStoragePath: realPosterStoragePath }
+            ? {
+                ...i,
+                id: realId,
+                storagePath: realStoragePath,
+                posterStoragePath: realPosterStoragePath,
+                pending: false,
+              }
             : i,
         ),
       );
@@ -1455,6 +1469,10 @@ function MediaPickerDialog({
                       id: `optimistic-${crypto.randomUUID()}`,
                       url,
                       mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
+                      // Shown immediately, but not selectable until the
+                      // reconciliation effect below clears this once
+                      // uploadMedia's insert actually resolves.
+                      pending: true,
                     } satisfies MediaLibraryItem,
                   };
                 });
@@ -1510,13 +1528,15 @@ function MediaPickerDialog({
               <button
                 type="button"
                 onClick={() => onSelect(item)}
-                className="aspect-square w-full overflow-hidden border border-border transition-colors duration-150 hover:border-foreground/30"
+                disabled={item.pending}
+                title={item.pending ? "Uploading…" : undefined}
+                className="aspect-square w-full overflow-hidden border border-border transition-colors duration-150 hover:border-foreground/30 disabled:pointer-events-none"
               >
                 <MediaThumbPreview item={item} />
               </button>
               {/* Always visible (not hover-revealed) -- this dialog is the
                   touch-friendly picker, and touch has no hover state. */}
-              {!demoMode && (
+              {!demoMode && !item.pending && (
                 <button
                   type="button"
                   onClick={(e) => handleDelete(e, item.id)}

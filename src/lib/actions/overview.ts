@@ -80,18 +80,56 @@ export async function updateSpectrumValue(
     .upsert({ project_id: projectId, ...patch, updated_at: new Date().toISOString() });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- the slider's own local
+  // `value` state (overview-panels.tsx's SpectrumSlider) already shows the
+  // dragged position correctly and permanently, with or without this;
+  // revalidating /projects/[projectId] here only forced a full fresh page
+  // render to be bundled into this action's own response before it could
+  // resolve, for a value the UI was already showing correctly.
   return { success: true };
 }
 
-export async function generateBrandSummary(projectId: string): Promise<OverviewActionState> {
+// Shared by generateBrandSummary/suggestPersonalitySpectrum/
+// generateBrandSections (via brandContextLines) -- all three read the same
+// brand_strategy row and brand_documents rows to build their own prompt.
+// Each still fetches its own copy by default (they're independently called
+// from their own "Refresh AI" buttons elsewhere in Overview), but
+// refreshBrandIntelligence fetches this once and passes it to all three
+// instead of triggering 2-3x redundant re-fetches of identical rows when
+// they run in its Promise.all below.
+type BrandContextRows = {
+  strategy: {
+    brand_values: string | null;
+    vision: string | null;
+    voice: string | null;
+    positioning: string | null;
+    audience_notes: string | null;
+  } | null;
+  documents: { source_type: string; filename: string; url: string | null; ai_analysis: string | null }[] | null;
+};
+
+async function fetchBrandContextRows(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  projectId: string,
+): Promise<BrandContextRows> {
+  const [{ data: strategy }, { data: documents }] = await Promise.all([
+    supabase
+      .from("brand_strategy")
+      .select("brand_values, vision, voice, positioning, audience_notes")
+      .eq("project_id", projectId)
+      .maybeSingle(),
+    supabase.from("brand_documents").select("source_type, filename, url, ai_analysis").eq("project_id", projectId),
+  ]);
+  return { strategy, documents };
+}
+
+export async function generateBrandSummary(
+  projectId: string,
+  preFetched?: BrandContextRows,
+): Promise<OverviewActionState> {
   const supabase = await createClient();
 
-  const { data: strategy } = await supabase
-    .from("brand_strategy")
-    .select("brand_values, vision, voice, positioning, audience_notes")
-    .eq("project_id", projectId)
-    .maybeSingle();
+  const { strategy } = preFetched ?? (await fetchBrandContextRows(supabase, projectId));
 
   const prompt = [
     "Summarize this brand's strategy in 3-4 concise sentences for an internal team dashboard.",
@@ -110,21 +148,20 @@ export async function generateBrandSummary(projectId: string): Promise<OverviewA
     .upsert({ project_id: projectId, ai_summary: result.text, updated_at: new Date().toISOString() });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- its one caller
+  // (BrandIntelligenceSection.handleRefreshAi) already calls
+  // router.refresh() itself right after this resolves, so this was purely
+  // redundant: the same fresh render, minted twice.
   return { success: true };
 }
 
-export async function suggestPersonalitySpectrum(projectId: string): Promise<OverviewActionState> {
+export async function suggestPersonalitySpectrum(
+  projectId: string,
+  preFetched?: BrandContextRows,
+): Promise<OverviewActionState> {
   const supabase = await createClient();
 
-  const [{ data: strategy }, { data: documents }] = await Promise.all([
-    supabase
-      .from("brand_strategy")
-      .select("brand_values, vision, voice, positioning, audience_notes")
-      .eq("project_id", projectId)
-      .maybeSingle(),
-    supabase.from("brand_documents").select("ai_analysis").eq("project_id", projectId),
-  ]);
+  const { strategy, documents } = preFetched ?? (await fetchBrandContextRows(supabase, projectId));
 
   const documentSummaries = (documents ?? [])
     .map((d) => d.ai_analysis)
@@ -169,7 +206,10 @@ export async function suggestPersonalitySpectrum(projectId: string): Promise<Ove
   });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- its callers
+  // (BrandSpectrumPanel.handleSuggestSpectrum, refreshBrandIntelligence)
+  // already bring back fresh data themselves (router.refresh() / their own
+  // revalidation), same reasoning as generateBrandSummary above.
   return { success: true };
 }
 
@@ -207,7 +247,11 @@ export async function uploadBrandDocument(
     .single();
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating this action's own route -- its one caller
+  // (BrandKnowledgeDialog) always follows a successful upload with
+  // onUploaded(documentId), which triggers handleIntelligenceRefresh ->
+  // refreshBrandIntelligence -> router.refresh(), so the document list
+  // gets a fresh render regardless of anything revalidated here.
   return { success: true, documentId: data?.id };
 }
 
@@ -239,10 +283,16 @@ export async function addBrandLink(
     .single();
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- same reasoning as uploadBrandDocument above (its
+  // one caller, the same BrandKnowledgeDialog, triggers the same
+  // onUploaded -> refreshBrandIntelligence -> router.refresh() chain).
   return { success: true, documentId: data?.id };
 }
 
+// Not revalidating anywhere in this function -- both of its callers already
+// bring back fresh data themselves: BrandKnowledgeDialog.handleAnalyze
+// calls router.refresh() right after, and refreshBrandIntelligence (which
+// also calls this internally) has its own client-side refresh chain too.
 export async function analyzeBrandDocument(projectId: string, documentId: string) {
   const supabase = await createClient();
 
@@ -261,7 +311,6 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
       .from("brand_documents")
       .update({ ai_analysis: "Links are used as context automatically -- no separate analysis needed." })
       .eq("id", documentId);
-    revalidatePath(`/projects/${projectId}`);
     return;
   }
 
@@ -276,7 +325,6 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
       .from("brand_documents")
       .update({ ai_analysis: "Only PDF analysis is supported right now." })
       .eq("id", documentId);
-    revalidatePath(`/projects/${projectId}`);
     return;
   }
 
@@ -291,10 +339,15 @@ export async function analyzeBrandDocument(projectId: string, documentId: string
 
   const analysis = "error" in result ? result.error : result.text;
   await supabase.from("brand_documents").update({ ai_analysis: analysis }).eq("id", documentId);
-  revalidatePath(`/projects/${projectId}`);
 }
 
-export async function deleteBrandDocument(projectId: string, documentId: string) {
+// Not revalidating its own route -- its one caller
+// (BrandKnowledgeOrbit.handleDelete) always calls router.refresh() itself
+// right after this resolves.
+export async function deleteBrandDocument(
+  projectId: string,
+  documentId: string,
+): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
 
   const { data: doc } = await supabase
@@ -306,22 +359,21 @@ export async function deleteBrandDocument(projectId: string, documentId: string)
   if (doc?.storage_path) {
     await supabase.storage.from("brand-documents").remove([doc.storage_path]);
   }
-  await supabase.from("brand_documents").delete().eq("id", documentId);
-  revalidatePath(`/projects/${projectId}`);
+  const { error } = await supabase.from("brand_documents").delete().eq("id", documentId);
+  if (error) return { success: false, message: error.message };
+
+  // Not revalidating -- its one caller (BrandIntelligenceSection's
+  // handleDelete) already hides the tile optimistically before this runs,
+  // and only calls router.refresh() on failure to resync.
+  return { success: true };
 }
 
 async function brandContextLines(
   supabase: Awaited<ReturnType<typeof createClient>>,
   projectId: string,
+  preFetched?: BrandContextRows,
 ): Promise<string> {
-  const [{ data: strategy }, { data: documents }] = await Promise.all([
-    supabase
-      .from("brand_strategy")
-      .select("brand_values, vision, voice, positioning, audience_notes")
-      .eq("project_id", projectId)
-      .maybeSingle(),
-    supabase.from("brand_documents").select("source_type, filename, url, ai_analysis").eq("project_id", projectId),
-  ]);
+  const { strategy, documents } = preFetched ?? (await fetchBrandContextRows(supabase, projectId));
 
   const docLines = (documents ?? []).map((d) =>
     d.source_type === "link" ? `Link -- ${d.filename}: ${d.url}` : `File "${d.filename}": ${d.ai_analysis || "(not analyzed yet)"}`,
@@ -337,9 +389,12 @@ async function brandContextLines(
   ].join("\n");
 }
 
-export async function generateBrandSections(projectId: string): Promise<OverviewActionState> {
+export async function generateBrandSections(
+  projectId: string,
+  preFetched?: BrandContextRows,
+): Promise<OverviewActionState> {
   const supabase = await createClient();
-  const context = await brandContextLines(supabase, projectId);
+  const context = await brandContextLines(supabase, projectId, preFetched);
 
   const prompt = [
     "Based on this brand information, write a concise brand breakdown for an internal team dashboard.",
@@ -381,7 +436,9 @@ export async function generateBrandSections(projectId: string): Promise<Overview
   });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- same reasoning as generateBrandSummary above (both
+  // callers, handleRefreshAi and refreshBrandIntelligence, already bring
+  // back fresh data themselves).
   return { success: true };
 }
 
@@ -449,7 +506,8 @@ export async function generateAiInsights(projectId: string): Promise<OverviewAct
   });
   if (error) return { message: error.message };
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- its one caller (AiRecommendationsPanel.handleRefresh)
+  // already calls router.refresh() itself right after this resolves.
   return { success: true };
 }
 
@@ -466,22 +524,30 @@ export async function refreshBrandIntelligence(
     await analyzeBrandDocument(projectId, newDocumentId);
   }
 
+  // Fetched once (after analyzeBrandDocument above, so a freshly-analyzed
+  // document's ai_analysis is included) and shared across all three --
+  // previously each independently re-fetched the identical brand_strategy/
+  // brand_documents rows inside this same Promise.all.
+  const supabase = await createClient();
+  const context = await fetchBrandContextRows(supabase, projectId);
+
   const [summary, sections, spectrum] = await Promise.all([
-    generateBrandSummary(projectId),
-    generateBrandSections(projectId),
-    suggestPersonalitySpectrum(projectId),
+    generateBrandSummary(projectId, context),
+    generateBrandSections(projectId, context),
+    suggestPersonalitySpectrum(projectId, context),
   ]);
 
   const message = summary?.message || sections?.message || spectrum?.message;
   if (message) return { message };
 
-  const supabase = await createClient();
   await notifyProjectMembers(supabase, projectId, "ai_analysis_complete", {
     title: "AI finished analyzing your brand knowledge",
     icon: "✨",
     link: `/projects/${projectId}`,
   });
 
-  revalidatePath(`/projects/${projectId}`);
+  // Not revalidating -- its one caller (BrandIntelligenceSection's
+  // handleIntelligenceRefresh) already calls router.refresh() itself right
+  // after this resolves.
   return { success: true };
 }

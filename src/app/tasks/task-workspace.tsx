@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
+import { useToast } from "@/lib/hooks/use-toast";
 import { Toolbar, type ViewMode, type StatusView } from "./toolbar";
 import { ListView } from "./list-view";
 import { BoardView } from "./board-view";
@@ -29,19 +30,38 @@ export function TaskWorkspace({
   tomorrow: string;
   autoExpandComments: boolean;
 }) {
-  const router = useRouter();
   const [, startTransition] = useTransition();
+  const { showError } = useToast();
 
   // Optimistic override so status/assignee changes render immediately
-  // instead of waiting on the server round trip -- same "reset when the
-  // server prop actually changes" pattern as Grid's own overrideRows.
-  const [prevTasks, setPrevTasks] = useState(tasks);
-  const [overrideTasks, setOverrideTasks] = useState<TaskItem[] | null>(null);
-  if (tasks !== prevTasks) {
-    setPrevTasks(tasks);
-    setOverrideTasks(null);
+  // instead of waiting on the server round trip.
+  const { value: effectiveTasks, set: setOverrideTasks } = useOptimisticOverride(tasks);
+
+  // New-task creation: NewTaskDialog builds the full optimistic TaskItem
+  // itself (it already has projects/membersByProject/currentUserId) and
+  // calls these to insert it, patch in the real id once createTask
+  // resolves, or remove it + surface a toast if the create failed.
+  function handleTaskCreated(task: TaskItem) {
+    setOverrideTasks((current) => [task, ...current]);
   }
-  const effectiveTasks = overrideTasks ?? tasks;
+  function handleTaskReconciled(tempId: string, realId: string) {
+    setOverrideTasks((current) => current.map((t) => (t.id === tempId ? { ...t, id: realId } : t)));
+  }
+  function handleTaskCreateFailed(tempId: string, message: string) {
+    setOverrideTasks((current) => current.filter((t) => t.id !== tempId));
+    showError(message);
+  }
+
+  // Task delete: TaskDetail hides the task immediately (onDeleteStart),
+  // then restores it + surfaces a toast only if the server call actually
+  // failed (onDeleteFailed).
+  function handleTaskDeleteStart(id: string) {
+    setOverrideTasks((current) => current.filter((t) => t.id !== id));
+  }
+  function handleTaskDeleteFailed(task: TaskItem, message: string) {
+    setOverrideTasks((current) => [task, ...current]);
+    showError(message);
+  }
 
   const [view, setView] = useState<ViewMode>("list");
   const [statusView, setStatusView] = useState<StatusView>("active");
@@ -64,7 +84,6 @@ export function TaskWorkspace({
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, status } : t)));
     startTransition(async () => {
       await updateTaskStatus(taskId, status);
-      router.refresh();
     });
   }
 
@@ -74,7 +93,6 @@ export function TaskWorkspace({
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, assignee: assignee ?? null } : t)));
     startTransition(async () => {
       await updateTaskAssignee(taskId, assigneeId);
-      router.refresh();
     });
   }
 
@@ -129,6 +147,8 @@ export function TaskWorkspace({
           tomorrow={tomorrow}
           onAddTask={() => setNewTaskOpen(true)}
           autoExpandComments={autoExpandComments}
+          onTaskDeleteStart={handleTaskDeleteStart}
+          onTaskDeleteFailed={handleTaskDeleteFailed}
         />
       ) : (
         <BoardView
@@ -143,6 +163,8 @@ export function TaskWorkspace({
           today={today}
           tomorrow={tomorrow}
           autoExpandComments={autoExpandComments}
+          onTaskDeleteStart={handleTaskDeleteStart}
+          onTaskDeleteFailed={handleTaskDeleteFailed}
         />
       )}
 
@@ -151,6 +173,10 @@ export function TaskWorkspace({
         onClose={() => setNewTaskOpen(false)}
         projects={projects}
         membersByProject={membersByProject}
+        currentUserId={currentUserId}
+        onTaskCreated={handleTaskCreated}
+        onTaskReconciled={handleTaskReconciled}
+        onTaskCreateFailed={handleTaskCreateFailed}
       />
 
       {linkedContentTarget && (

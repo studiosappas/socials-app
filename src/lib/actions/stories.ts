@@ -38,7 +38,9 @@ export async function createStory(projectId: string, folderId?: string | null) {
     throw new Error(error?.message ?? "Failed to create story.");
   }
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- this always redirects away
+  // from it immediately below, and staleTimes.dynamic already forces a
+  // fresh fetch of it whenever the user navigates back.
   redirect(`/projects/${projectId}/stories/${story.id}`);
 }
 
@@ -64,7 +66,9 @@ export async function createContentFolder(
     return { message: error?.message ?? "Failed to create folder." };
   }
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleCreateFolder) already calls router.refresh()
+  // itself right after this resolves.
   return { id: data.id };
 }
 
@@ -84,7 +88,9 @@ export async function renameContentFolder(
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleRenameFolder) already calls router.refresh()
+  // itself right after this resolves.
   return { success: true };
 }
 
@@ -96,7 +102,9 @@ export async function deleteContentFolder(projectId: string, folderId: string): 
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleDeleteFolder) already calls router.refresh()
+  // itself right after this resolves.
   return { success: true };
 }
 
@@ -110,7 +118,9 @@ export async function moveStoryToFolder(
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (story-card.tsx's handleMove) already calls router.refresh() itself
+  // right after this resolves.
   return { success: true };
 }
 
@@ -128,7 +138,9 @@ export async function bulkMoveStoriesToFolder(
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleBulkMove) already calls router.refresh()
+  // itself right after this resolves.
   return { success: true };
 }
 
@@ -139,7 +151,10 @@ export async function bulkDeleteStories(projectId: string, storyIds: string[]): 
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleBulkDelete) already calls router.refresh()
+  // itself right after this resolves. /calendar is a genuinely different
+  // route, kept as-is.
   revalidatePath(`/projects/${projectId}/calendar`);
   return { success: true };
 }
@@ -201,68 +216,88 @@ export async function uploadContentAsset(
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+
+  // Independent reads -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { count },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("stories").select("*", { count: "exact", head: true }).eq("project_id", projectId),
+  ]);
   if (!user) return { message: "You must be logged in." };
 
-  const { count } = await supabase
-    .from("stories")
-    .select("*", { count: "exact", head: true })
-    .eq("project_id", projectId);
-
-  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
-
-  // The browser already tried -- this only runs when that failed (e.g. a
-  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
-  // server-thumbnail.ts's own comment for the full reasoning.
-  if (!thumbnailStoragePath && mediaType === "image") {
-    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+  // Independent uploads -- the poster upload and the server-thumbnail
+  // fallback write to different storage paths and neither reads the
+  // other's result. The thumbnail fallback only runs when the browser
+  // already tried and failed (e.g. a HEIC/HEIF photo no desktop browser can
+  // decode into an <img>) -- see server-thumbnail.ts's own comment for the
+  // full reasoning.
+  const needsServerThumbnail = !thumbnailStoragePath && mediaType === "image";
+  const [posterStoragePath, serverThumb] = await Promise.all([
+    uploadPosterIfPresent(supabase, projectId, formData, mediaType),
+    needsServerThumbnail
+      ? generateServerThumbnail(supabase, "project-media", storagePath, projectId)
+      : Promise.resolve(null),
+  ]);
+  if (serverThumb) {
     thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
-
-  const { data: mediaAsset, error: mediaError } = await supabase
-    .from("media_assets")
-    .insert({
-      project_id: projectId,
-      storage_path: storagePath,
-      media_type: mediaType,
-      uploaded_by: user.id,
-      thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
-
-  if (mediaError || !mediaAsset) {
-    return { message: mediaError?.message ?? "Failed to save media." };
-  }
-
-  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
   // Named from the file itself (minus extension) rather than "Untitled
   // story" -- these arrive as standalone assets, not something the user is
   // about to rename immediately the way a freshly created empty item is.
   const name = (typeof fileName === "string" ? fileName : "").replace(/\.[^./]+$/, "").trim() || "Untitled";
 
-  const { data: story, error: storyError } = await supabase
-    .from("stories")
-    .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
-    .select("id")
-    .single();
+  // The media_assets row and the stories row are independent inserts into
+  // different tables -- neither needs the other's id, only the frame insert
+  // below does.
+  const [
+    { data: mediaAsset, error: mediaError },
+    { data: story, error: storyError },
+  ] = await Promise.all([
+    supabase
+      .from("media_assets")
+      .insert({
+        project_id: projectId,
+        storage_path: storagePath,
+        media_type: mediaType,
+        uploaded_by: user.id,
+        thumbnail_storage_path: thumbnailStoragePath,
+      })
+      .select("id")
+      .single(),
+    supabase
+      .from("stories")
+      .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
+      .select("id")
+      .single(),
+  ]);
 
+  if (mediaError || !mediaAsset) {
+    return { message: mediaError?.message ?? "Failed to save media." };
+  }
   if (storyError || !story) {
     return { message: storyError?.message ?? "Failed to create content item." };
   }
 
-  const { error: frameError } = await supabase
-    .from("story_frames")
-    .insert({ story_id: story.id, media_asset_id: mediaAsset.id, position: 0 });
+  // Both only need mediaAsset.id/story.id from above -- setMediaAssetPoster
+  // writes to the media_assets row it just inserted, the frame insert
+  // writes to a different table entirely, neither depends on the other.
+  const [, { error: frameError }] = await Promise.all([
+    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+    supabase.from("story_frames").insert({ story_id: story.id, media_asset_id: mediaAsset.id, position: 0 }),
+  ]);
 
   if (frameError) {
     return { message: frameError.message };
   }
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's UploadAssetsZone, via onUploaded) already calls
+  // router.refresh() itself right after this resolves.
   return { success: true };
 }
 
@@ -284,8 +319,11 @@ export async function deleteStory(projectId: string, storyId: string) {
 export async function deleteStoryFromCalendar(projectId: string, storyId: string) {
   const supabase = await createClient();
   await supabase.from("stories").delete().eq("id", storyId);
+  // Not revalidating /calendar (its own route -- this is only ever called
+  // from Calendar's Drafts panel) -- its one caller (calendar-board.tsx's
+  // handleBulkDelete) already calls router.refresh() itself right after.
+  // /stories is a genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/calendar`);
 }
 
 export type UpdateStoryState = { message?: string; success?: boolean } | undefined;
@@ -322,7 +360,11 @@ export async function updateStory(
   return { success: true };
 }
 
-export async function addStoryFrame(projectId: string, storyId: string, mediaAssetId: string) {
+export async function addStoryFrame(
+  projectId: string,
+  storyId: string,
+  mediaAssetId: string,
+): Promise<{ success: true; frameId: string } | { success: false; message: string }> {
   const supabase = await createClient();
 
   const { count } = await supabase
@@ -330,16 +372,23 @@ export async function addStoryFrame(projectId: string, storyId: string, mediaAss
     .select("*", { count: "exact", head: true })
     .eq("story_id", storyId);
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("story_frames")
-    .insert({ story_id: storyId, media_asset_id: mediaAssetId, position: count ?? 0 });
+    .insert({ story_id: storyId, media_asset_id: mediaAssetId, position: count ?? 0 })
+    .select("id")
+    .single();
 
-  if (error) {
-    throw new Error(error.message);
+  if (error || !data) {
+    return { success: false, message: error?.message ?? "Failed to add frame." };
   }
 
+  // Not revalidating this action's own route (/stories/[storyId]) -- its
+  // one caller (story-editor.tsx's "Add from library" click) already shows
+  // the new frame optimistically and reconciles the real id returned here.
+  // /stories (the list) is a genuinely different route, kept as-is (a new
+  // frame can change that story's list thumbnail).
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  return { success: true, frameId: data.id };
 }
 
 export type UploadStoryFrameState = { message?: string; success?: boolean } | undefined;
@@ -370,25 +419,30 @@ export async function uploadStoryFrame(
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { message: "You must be logged in." };
 
-  const { count: startingCount } = await supabase
-    .from("story_frames")
-    .select("*", { count: "exact", head: true })
-    .eq("story_id", storyId);
+  // Independent reads -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { count: startingCount },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("story_frames").select("*", { count: "exact", head: true }).eq("story_id", storyId),
+  ]);
+  if (!user) return { message: "You must be logged in." };
 
   const position = startingCount ?? 0;
 
-  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
-
-  // The browser already tried -- this only runs when that failed (e.g. a
-  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
-  // server-thumbnail.ts's own comment for the full reasoning.
-  if (!thumbnailStoragePath && mediaType === "image") {
-    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+  // Independent uploads -- same reasoning as uploadContentAsset above.
+  const needsServerThumbnail = !thumbnailStoragePath && mediaType === "image";
+  const [posterStoragePath, serverThumb] = await Promise.all([
+    uploadPosterIfPresent(supabase, projectId, formData, mediaType),
+    needsServerThumbnail
+      ? generateServerThumbnail(supabase, "project-media", storagePath, projectId)
+      : Promise.resolve(null),
+  ]);
+  if (serverThumb) {
     thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
 
@@ -408,18 +462,22 @@ export async function uploadStoryFrame(
     return { message: insertError?.message ?? "Failed to save media." };
   }
 
-  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
-
-  const { error: frameError } = await supabase
-    .from("story_frames")
-    .insert({ story_id: storyId, media_asset_id: mediaAsset.id, position });
+  // Both only need mediaAsset.id -- same reasoning as uploadContentAsset
+  // above.
+  const [, { error: frameError }] = await Promise.all([
+    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+    supabase.from("story_frames").insert({ story_id: storyId, media_asset_id: mediaAsset.id, position }),
+  ]);
 
   if (frameError) {
     return { message: frameError.message };
   }
 
+  // Not revalidating this action's own route (/stories/[storyId]) -- its
+  // one caller (story-editor.tsx's UploadFrameTile, via onUploaded) already
+  // calls router.refresh() itself right after this resolves. /stories (the
+  // list) is a genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
   return { success: true };
 }
 
@@ -467,7 +525,10 @@ export async function updateStoryFrameLink(
     .update({ link_url: linkUrl.trim() ? linkUrl.trim() : null })
     .eq("id", frameId);
 
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- its one caller (SortableFrame's onBlur in
+  // story-editor.tsx) is an uncontrolled input that already shows the typed
+  // value with zero dependency on a fresh render, and nothing else on the
+  // page displays a frame's link.
 }
 
 export type UpdateStoryLinkState = { message?: string } | undefined;
@@ -489,12 +550,14 @@ export async function addStoryLink(
     return { message: error.message };
   }
 
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- its one caller (StoryLinks' handleAdd) already
+  // calls router.refresh() itself right after this resolves.
   return undefined;
 }
 
 export async function removeStoryLink(projectId: string, storyId: string, linkId: string) {
   const supabase = await createClient();
   await supabase.from("story_links").delete().eq("id", linkId);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- its one caller (StoryLinks' remove button) already
+  // calls router.refresh() itself right after this resolves.
 }

@@ -1,9 +1,10 @@
 "use client";
 
-import { memo, useMemo, useRef, useState, useTransition } from "react";
+import { memo, useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import {
   addBriefTaskFrame,
@@ -101,30 +102,86 @@ export function BriefBoard({
   // source of truth for these thumbnails going forward.
   const [previewOverrides, setPreviewOverrides] = useState<Record<string, string>>({});
 
-  // Only builds a new task object for a task that actually HAS an
-  // overridden item -- returning the original `task`/`tasks` references for
-  // everything else. Otherwise every task in the board got a brand-new
-  // object on every render the instant previewOverrides had ANY entry,
-  // which would have defeated TaskCard's React.memo below for the whole
-  // list, not just the one task that changed.
+  // Optimistic hide-on-delete for tasks/items/frames -- same "just an
+  // exclusion set, no reset-on-prop-change needed" reasoning as
+  // previewOverrides above: hiding an id that no longer exists in a fresh
+  // `tasks` prop (because it was for-real deleted) is a harmless no-op, and
+  // rollback on a failed delete just un-hides it again.
+  const [hiddenTaskIds, setHiddenTaskIds] = useState<Set<string>>(new Set());
+  const [hiddenItemIds, setHiddenItemIds] = useState<Set<string>>(new Set());
+  const [hiddenFrameIds, setHiddenFrameIds] = useState<Set<string>>(new Set());
+
+  const hideTask = useCallback((id: string) => setHiddenTaskIds((prev) => new Set(prev).add(id)), []);
+  const unhideTask = useCallback(
+    (id: string) =>
+      setHiddenTaskIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  const hideItem = useCallback((id: string) => setHiddenItemIds((prev) => new Set(prev).add(id)), []);
+  const unhideItem = useCallback(
+    (id: string) =>
+      setHiddenItemIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  const hideFrame = useCallback((id: string) => setHiddenFrameIds((prev) => new Set(prev).add(id)), []);
+  const unhideFrame = useCallback(
+    (id: string) =>
+      setHiddenFrameIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+
+  // Only builds a new task object for a task that actually needs one --
+  // returning the original `task`/`tasks` references for everything else.
+  // Otherwise every task in the board got a brand-new object on every
+  // render the instant any override/hidden-id state had ANY entry, which
+  // would have defeated TaskCard's React.memo below for the whole list, not
+  // just the one task that changed.
   const effectiveTasks = useMemo(() => {
-    if (Object.keys(previewOverrides).length === 0) return tasks;
-    let changed = false;
-    const next = tasks.map((task) => {
-      const affected = task.items.some((item) => item.attachmentId && previewOverrides[item.attachmentId]);
-      if (!affected) return task;
+    const hasOverrides = Object.keys(previewOverrides).length > 0;
+    const hasHidden = hiddenTaskIds.size > 0 || hiddenItemIds.size > 0 || hiddenFrameIds.size > 0;
+    if (!hasOverrides && !hasHidden) return tasks;
+
+    const visibleTasks = hiddenTaskIds.size > 0 ? tasks.filter((task) => !hiddenTaskIds.has(task.id)) : tasks;
+
+    let changed = visibleTasks !== tasks;
+    const next = visibleTasks.map((task) => {
+      const itemsAffected =
+        hiddenItemIds.size > 0 && task.items.some((item) => hiddenItemIds.has(item.id));
+      const framesAffected =
+        hiddenFrameIds.size > 0 && task.frames.some((frame) => hiddenFrameIds.has(frame.id));
+      const previewAffected =
+        hasOverrides && task.items.some((item) => item.attachmentId && previewOverrides[item.attachmentId]);
+      if (!itemsAffected && !framesAffected && !previewAffected) return task;
       changed = true;
       return {
         ...task,
-        items: task.items.map((item) =>
-          item.attachmentId && previewOverrides[item.attachmentId]
-            ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
-            : item,
-        ),
+        items: task.items
+          .filter((item) => !hiddenItemIds.has(item.id))
+          .map((item) =>
+            item.attachmentId && previewOverrides[item.attachmentId]
+              ? { ...item, thumbnailUrl: previewOverrides[item.attachmentId] }
+              : item,
+          ),
+        frames: task.frames.filter((frame) => !hiddenFrameIds.has(frame.id)),
       };
     });
     return changed ? next : tasks;
-  }, [tasks, previewOverrides]);
+  }, [tasks, previewOverrides, hiddenTaskIds, hiddenItemIds, hiddenFrameIds]);
 
   // Board-level (not per-task) since undoing "Add Task" must survive that
   // task's own TaskCard being removed from the tree -- same reasoning as
@@ -178,11 +235,12 @@ export function BriefBoard({
       return;
     }
     // "Generate Design" (source: "asset") edits a freshly-created media_asset
-    // that isn't part of `tasks` yet -- there's no local item to patch, so
-    // this one case still needs the refresh to pick up wherever that new
-    // asset surfaces next.
+    // that isn't part of `tasks` yet -- same as handleGenerateDesign's own
+    // reasoning above, nothing on THIS page ever displays this asset (it
+    // only surfaces later on Grid, which saveMediaAssetAnnotation already
+    // revalidates independently), so refreshing Brief's own route here
+    // achieved nothing and was pure waste.
     setEditingImage(null);
-    router.refresh();
   }
 
   return (
@@ -242,6 +300,12 @@ export function BriefBoard({
           canManage={canManage}
           onEditImage={setEditingImage}
           pushCommand={pushCommand}
+          onHideTask={hideTask}
+          onUnhideTask={unhideTask}
+          onHideItem={hideItem}
+          onUnhideItem={unhideItem}
+          onHideFrame={hideFrame}
+          onUnhideFrame={unhideFrame}
         />
       ))}
 
@@ -324,12 +388,24 @@ const TaskCard = memo(function TaskCard({
   canManage,
   onEditImage,
   pushCommand,
+  onHideTask,
+  onUnhideTask,
+  onHideItem,
+  onUnhideItem,
+  onHideFrame,
+  onUnhideFrame,
 }: {
   projectId: string;
   task: BriefTaskData;
   canManage: boolean;
   onEditImage: (image: EditingImage) => void;
   pushCommand: (command: UndoableCommand) => void;
+  onHideTask: (id: string) => void;
+  onUnhideTask: (id: string) => void;
+  onHideItem: (id: string) => void;
+  onUnhideItem: (id: string) => void;
+  onHideFrame: (id: string) => void;
+  onUnhideFrame: (id: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -349,56 +425,57 @@ const TaskCard = memo(function TaskCard({
   // a click didn't visibly do anything until the round-trip + router.refresh
   // landed. On a slow connection (or if the save silently failed, which
   // went unsurfaced before this) that read as "the button doesn't work."
-  const [prevServerType, setPrevServerType] = useState(task.contentTypes[0] ?? "post");
-  const [optimisticType, setOptimisticType] = useState<BriefTaskType>(prevServerType);
-  if ((task.contentTypes[0] ?? "post") !== prevServerType) {
-    setPrevServerType(task.contentTypes[0] ?? "post");
-    setOptimisticType(task.contentTypes[0] ?? "post");
-  }
-  const selectedType: BriefTaskType = optimisticType;
+  const {
+    value: selectedType,
+    set: setOptimisticType,
+    reset: resetOptimisticType,
+  } = useOptimisticOverride<BriefTaskType>(task.contentTypes[0] ?? "post");
 
+  // No router.refresh() on success -- optimisticType already shows the
+  // correct final value, and setBriefTaskTypes no longer revalidates its
+  // own route either, since there was nothing left for a refresh to
+  // usefully bring back.
   function handleSelectType(type: BriefTaskType) {
     if (type === selectedType) return;
     setTypeError(undefined);
-    const previous = selectedType;
     setOptimisticType(type);
     startTransition(async () => {
       const result = await setBriefTaskTypes(projectId, task.id, [type]);
       if (!result.success) {
-        setOptimisticType(previous);
+        resetOptimisticType();
         setTypeError(result.message ?? "Couldn't change the type.");
-        return;
       }
-      router.refresh();
     });
   }
 
   // Same optimistic pair/rollback shape as the Post Type pills above.
   const [statusError, setStatusError] = useState<string | undefined>();
-  const [prevServerStatus, setPrevServerStatus] = useState(task.status);
-  const [optimisticStatus, setOptimisticStatus] = useState<BriefTaskStatus>(prevServerStatus);
-  if (task.status !== prevServerStatus) {
-    setPrevServerStatus(task.status);
-    setOptimisticStatus(task.status);
-  }
-  const currentStatus: BriefTaskStatus = optimisticStatus;
+  const {
+    value: currentStatus,
+    set: setOptimisticStatus,
+    reset: resetOptimisticStatus,
+  } = useOptimisticOverride<BriefTaskStatus>(task.status);
 
+  // No router.refresh() on success -- same reasoning as handleSelectType
+  // above.
   function handleSetStatus(next: BriefTaskStatus) {
     if (next === currentStatus) return;
     setStatusError(undefined);
-    const previous = currentStatus;
     setOptimisticStatus(next);
     startTransition(async () => {
       const result = await setBriefTaskStatus(projectId, task.id, task.name, next);
       if (!result.success) {
-        setOptimisticStatus(previous);
+        resetOptimisticStatus();
         setStatusError(result.message ?? "Couldn't change the status.");
-        return;
       }
-      router.refresh();
     });
   }
 
+  // No router.refresh() -- the generated design isn't part of `tasks`/
+  // items at all, nothing on this page displays it, and onEditImage below
+  // already opens the annotation editor with the real result data
+  // (mediaAssetId/imageUrl/annotationJson) passed directly, not read back
+  // from a page prop.
   function handleGenerateDesign() {
     setGenerateError(undefined);
     setGenerating(true);
@@ -415,25 +492,30 @@ const TaskCard = memo(function TaskCard({
         imageUrl: result.imageUrl,
         annotationJson: result.annotationJson ?? null,
       });
-      router.refresh();
     });
   }
 
+  // No router.refresh() -- the task name field is an uncontrolled input
+  // (defaultValue) that already shows the typed text once this blurs.
   function handleNameBlur() {
     const value = nameRef.current?.value.trim();
     if (!value || value === task.name) return;
     startTransition(async () => {
       await renameBriefTask(projectId, task.id, value);
-      router.refresh();
     });
   }
 
   function handleDelete() {
     setMenuOpen(false);
     if (!confirm(`Delete "${task.name}"? This can't be undone.`)) return;
+    onHideTask(task.id);
     startTransition(async () => {
-      await deleteBriefTask(projectId, task.id);
-      router.refresh();
+      const result = await deleteBriefTask(projectId, task.id);
+      if (!result.success) {
+        console.error("Failed to delete task:", result.message);
+        onUnhideTask(task.id);
+        router.refresh();
+      }
     });
   }
 
@@ -441,7 +523,10 @@ const TaskCard = memo(function TaskCard({
     // Every field already saves itself on blur / on its own Add action --
     // this button's job is to commit whatever field is still mid-edit (blur
     // it) and give the user an explicit, visible confirmation that nothing
-    // is left unsaved.
+    // is left unsaved. No router.refresh() -- this isn't gated by any
+    // mutation of its own, so there's nothing for a fresh page render to
+    // bring back; it was forcing a full Brief refetch on every click purely
+    // for the "Saved." toast below.
     const active = document.activeElement;
     if (active instanceof HTMLElement && containerRef.current?.contains(active)) {
       active.blur();
@@ -450,7 +535,6 @@ const TaskCard = memo(function TaskCard({
     setTimeout(() => {
       setSaving(false);
       setSaved(true);
-      router.refresh();
       setTimeout(() => setSaved(false), 1500);
     }, 150);
   }
@@ -548,6 +632,8 @@ const TaskCard = memo(function TaskCard({
             canManage={canManage}
             onEditImage={onEditImage}
             pushCommand={pushCommand}
+            onHideItem={onHideItem}
+            onUnhideItem={onUnhideItem}
           />
           <ItemSection
             title="Images"
@@ -558,6 +644,8 @@ const TaskCard = memo(function TaskCard({
             canManage={canManage}
             onEditImage={onEditImage}
             pushCommand={pushCommand}
+            onHideItem={onHideItem}
+            onUnhideItem={onUnhideItem}
           />
           <ItemSection
             title="Products"
@@ -568,6 +656,8 @@ const TaskCard = memo(function TaskCard({
             canManage={canManage}
             onEditImage={onEditImage}
             pushCommand={pushCommand}
+            onHideItem={onHideItem}
+            onUnhideItem={onUnhideItem}
           />
 
           <FrameSection
@@ -578,6 +668,8 @@ const TaskCard = memo(function TaskCard({
             frames={task.frames.filter((f) => f.section === "frames")}
             canManage={canManage}
             pushCommand={pushCommand}
+            onHideFrame={onHideFrame}
+            onUnhideFrame={onUnhideFrame}
           />
           <FrameSection
             title="Text"
@@ -587,6 +679,8 @@ const TaskCard = memo(function TaskCard({
             frames={task.frames.filter((f) => f.section === "text")}
             canManage={canManage}
             pushCommand={pushCommand}
+            onHideFrame={onHideFrame}
+            onUnhideFrame={onUnhideFrame}
           />
 
           {canManage && (
@@ -687,6 +781,8 @@ function ItemSection({
   canManage,
   onEditImage,
   pushCommand,
+  onHideItem,
+  onUnhideItem,
 }: {
   title: string;
   projectId: string;
@@ -696,6 +792,8 @@ function ItemSection({
   canManage: boolean;
   onEditImage: (image: EditingImage) => void;
   pushCommand: (command: UndoableCommand) => void;
+  onHideItem: (id: string) => void;
+  onUnhideItem: (id: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -845,9 +943,15 @@ function ItemSection({
 
   function handleRemove(itemId: string) {
     const item = items.find((i) => i.id === itemId);
+    onHideItem(itemId);
     startTransition(async () => {
-      await removeBriefTaskItem(projectId, itemId);
-      router.refresh();
+      const result = await removeBriefTaskItem(projectId, itemId);
+      if (!result.success) {
+        console.error("Failed to remove item:", result.message);
+        onUnhideItem(itemId);
+        router.refresh();
+        return;
+      }
       if (item) {
         const current = { id: itemId };
         pushCommand({
@@ -868,6 +972,7 @@ function ItemSection({
             router.refresh();
           },
           redo: async () => {
+            onHideItem(current.id);
             await removeBriefTaskItem(projectId, current.id);
             router.refresh();
           },
@@ -876,11 +981,12 @@ function ItemSection({
     });
   }
 
+  // No router.refresh() -- an uncontrolled textarea already shows the
+  // typed notes.
   function handleNotesBlur(itemId: string, value: string, original: string) {
     if (value.trim() === original) return;
     startTransition(async () => {
       await updateBriefTaskItemNotes(projectId, itemId, value);
-      router.refresh();
     });
   }
 
@@ -1141,6 +1247,8 @@ function FrameSection({
   frames,
   canManage,
   pushCommand,
+  onHideFrame,
+  onUnhideFrame,
 }: {
   title: string;
   projectId: string;
@@ -1149,16 +1257,19 @@ function FrameSection({
   frames: BriefTaskFrame[];
   canManage: boolean;
   pushCommand: (command: UndoableCommand) => void;
+  onHideFrame: (id: string) => void;
+  onUnhideFrame: (id: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [adding, setAdding] = useState(false);
 
+  // No router.refresh() on either blur handler below -- both fields are
+  // uncontrolled inputs that already show their typed value.
   function handleLabelBlur(frameId: string, value: string, original: string) {
     if (value.trim() === original || !value.trim()) return;
     startTransition(async () => {
       await renameBriefTaskFrame(projectId, frameId, value);
-      router.refresh();
     });
   }
 
@@ -1166,7 +1277,6 @@ function FrameSection({
     if (value === original) return;
     startTransition(async () => {
       await updateBriefTaskFrameBody(projectId, frameId, value);
-      router.refresh();
     });
   }
 
@@ -1198,9 +1308,15 @@ function FrameSection({
   function handleRemoveFrame(frameId: string) {
     const frameIndex = frames.findIndex((f) => f.id === frameId);
     const frame = frames[frameIndex];
+    onHideFrame(frameId);
     startTransition(async () => {
-      await removeBriefTaskFrame(projectId, frameId);
-      router.refresh();
+      const result = await removeBriefTaskFrame(projectId, frameId);
+      if (!result.success) {
+        console.error("Failed to remove frame:", result.message);
+        onUnhideFrame(frameId);
+        router.refresh();
+        return;
+      }
       if (frame) {
         const current = { id: frameId };
         pushCommand({
@@ -1211,6 +1327,7 @@ function FrameSection({
             router.refresh();
           },
           redo: async () => {
+            onHideFrame(current.id);
             await removeBriefTaskFrame(projectId, current.id);
             router.refresh();
           },

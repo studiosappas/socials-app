@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Avatar } from "@/components/ui/avatar";
 import { MentionField } from "@/components/ui/mention-input";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
@@ -24,6 +23,8 @@ export function TaskDetail({
   onStatusChange,
   onOpenLinkedContent,
   autoExpandComments,
+  onDeleteStart,
+  onDeleteFailed,
 }: {
   task: TaskItem;
   currentUserId: string;
@@ -31,8 +32,9 @@ export function TaskDetail({
   onStatusChange: (status: TaskStatus) => void;
   onOpenLinkedContent: () => void;
   autoExpandComments: boolean;
+  onDeleteStart: (id: string) => void;
+  onDeleteFailed: (task: TaskItem, message: string) => void;
 }) {
-  const router = useRouter();
   const [statusOpen, setStatusOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const statusRef = useOutsideClick<HTMLDivElement>(statusOpen, () => setStatusOpen(false));
@@ -68,7 +70,15 @@ export function TaskDetail({
     if (!confirm("Delete this task? This can't be undone.")) return;
     setMenuOpen(false);
     setDeleting(true);
-    deleteTask(task.id).then(() => router.refresh());
+    // This component unmounts the instant onDeleteStart removes the task
+    // from the parent's list (it's only rendered while expandedTaskId
+    // matches), so there's no local state left to reset on failure --
+    // onDeleteFailed re-inserts the task at the parent, which remounts a
+    // fresh TaskDetail if it's still expanded.
+    onDeleteStart(task.id);
+    deleteTask(task.id).then((result) => {
+      if (!result.success) onDeleteFailed(task, result.message);
+    });
   }
 
   async function handleSubmitComment(e: React.FormEvent) {

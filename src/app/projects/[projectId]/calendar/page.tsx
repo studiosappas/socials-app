@@ -26,40 +26,6 @@ export default async function CalendarPage({
 
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // Account > Workspace's Week Starts On + Preferences > Calendar's Show
-  // Weekends -- fetched here (not just at Account) since this is the one
-  // place they actually change anything.
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("workspace_settings")
-    .eq("id", user!.id)
-    .single();
-  const { week_starts_on: weekStartsOn } = mergeWorkspaceSettings(profile?.workspace_settings);
-
-  const anchor = monthParam ? new Date(`${monthParam}-01T00:00:00`) : new Date();
-  const monthStart = startOfMonth(anchor);
-  const monthEnd = endOfMonth(anchor);
-  const gridStart = startOfWeek(monthStart, { weekStartsOn });
-  const gridEnd = endOfWeek(monthEnd, { weekStartsOn });
-
-  const monthStartStr = format(monthStart, "yyyy-MM-dd");
-  const monthEndStr = format(monthEnd, "yyyy-MM-dd");
-  const gridStartStr = format(gridStart, "yyyy-MM-dd");
-  const gridEndStr = format(gridEnd, "yyyy-MM-dd");
-
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
-
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
-
   // Automatic publish-marking: this app has no way to observe a post/story
   // actually going live on Instagram (no API integration), so "automatic"
   // is a date-based heuristic instead -- once scheduled_date has passed and
@@ -67,9 +33,16 @@ export default async function CalendarPage({
   // one-way push (mirrors completeAutoTaskForPost's convention in
   // task-automation.ts), run once per page load; manual override via the
   // post/story editor's own status field, or the calendar toggle below,
-  // always still works in either direction afterward.
+  // always still works in either direction afterward. Doesn't depend on
+  // (and isn't depended on by) auth.getUser(), so both run in the same wave
+  // -- the two UPDATEs still need to land before the status reads below.
   const todayStr = format(new Date(), "yyyy-MM-dd");
-  await Promise.all([
+  const [
+    {
+      data: { user },
+    },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
     supabase
       .from("posts")
       .update({ status: "published" })
@@ -84,12 +57,33 @@ export default async function CalendarPage({
       .lte("scheduled_date", todayStr),
   ]);
 
+  const anchor = monthParam ? new Date(`${monthParam}-01T00:00:00`) : new Date();
+  const monthStart = startOfMonth(anchor);
+  const monthEnd = endOfMonth(anchor);
+  const monthStartStr = format(monthStart, "yyyy-MM-dd");
+  const monthEndStr = format(monthEnd, "yyyy-MM-dd");
+
+  // profile/membership only need user.id (just resolved above); the four
+  // post/story reads only need projectId and the month range (independent
+  // of weekStartsOn -- month boundaries don't shift with which day a week
+  // starts on) and the auto-publish UPDATEs above having landed. None of
+  // these six depend on each other, so one wave covers all of them instead
+  // of profile/membership blocking the post/story reads or vice versa.
   const [
+    { data: profile },
+    { data: membership },
     { data: scheduledPosts },
     { data: scheduledStories },
     { data: unscheduledPosts },
     { data: unscheduledStories },
   ] = await Promise.all([
+    supabase.from("profiles").select("workspace_settings").eq("id", user!.id).single(),
+    supabase
+      .from("project_members")
+      .select("role")
+      .eq("project_id", projectId)
+      .eq("user_id", user!.id)
+      .single(),
     supabase
       .from("posts")
       .select("id, post_type, scheduled_date, status")
@@ -114,17 +108,16 @@ export default async function CalendarPage({
       .is("scheduled_date", null),
   ]);
 
-  const { data: calendarNotes } = await supabase
-    .from("calendar_notes")
-    .select("date, body")
-    .eq("project_id", projectId)
-    .gte("date", gridStartStr)
-    .lte("date", gridEndStr);
+  // Account > Workspace's Week Starts On + Preferences > Calendar's Show
+  // Weekends -- fetched here (not just at Account) since this is the one
+  // place they actually change anything.
+  const { week_starts_on: weekStartsOn } = mergeWorkspaceSettings(profile?.workspace_settings);
+  const gridStart = startOfWeek(monthStart, { weekStartsOn });
+  const gridEnd = endOfWeek(monthEnd, { weekStartsOn });
+  const gridStartStr = format(gridStart, "yyyy-MM-dd");
+  const gridEndStr = format(gridEnd, "yyyy-MM-dd");
 
-  const noteByDate = new Map<string, string>();
-  for (const note of calendarNotes ?? []) {
-    noteByDate.set(note.date, note.body);
-  }
+  const canManage = membership?.role === "owner" || membership?.role === "admin";
 
   const allPostIds = [
     ...(scheduledPosts ?? []).map((p) => p.id),
@@ -135,21 +128,37 @@ export default async function CalendarPage({
     ...(unscheduledStories ?? []).map((s) => s.id),
   ];
 
-  const { data: postAssets } = allPostIds.length
-    ? await supabase
-        .from("post_assets")
-        .select("post_id, position, media_assets(storage_path)")
-        .in("post_id", allPostIds)
-        .order("position")
-    : { data: [] };
+  // calendarNotes (needs gridStartStr/gridEndStr, just derived above),
+  // postAssets/storyFrames (need allPostIds/allStoryIds, just derived
+  // above), and members are all independent of each other -- one wave.
+  const [{ data: calendarNotes }, { data: postAssets }, { data: storyFrames }, members] = await Promise.all([
+    supabase
+      .from("calendar_notes")
+      .select("date, body")
+      .eq("project_id", projectId)
+      .gte("date", gridStartStr)
+      .lte("date", gridEndStr),
+    allPostIds.length
+      ? supabase
+          .from("post_assets")
+          .select("post_id, position, media_assets(storage_path)")
+          .in("post_id", allPostIds)
+          .order("position")
+      : Promise.resolve({ data: [] }),
+    allStoryIds.length
+      ? supabase
+          .from("story_frames")
+          .select("story_id, position, media_assets(storage_path)")
+          .in("story_id", allStoryIds)
+          .order("position")
+      : Promise.resolve({ data: [] }),
+    getProjectMemberOptions(supabase, projectId),
+  ]);
 
-  const { data: storyFrames } = allStoryIds.length
-    ? await supabase
-        .from("story_frames")
-        .select("story_id, position, media_assets(storage_path)")
-        .in("story_id", allStoryIds)
-        .order("position")
-    : { data: [] };
+  const noteByDate = new Map<string, string>();
+  for (const note of calendarNotes ?? []) {
+    noteByDate.set(note.date, note.body);
+  }
 
   const pathSet = new Set<string>();
   for (const a of postAssets ?? []) {
@@ -244,8 +253,6 @@ export default async function CalendarPage({
       status: s.status,
     })),
   ];
-
-  const members = await getProjectMemberOptions(supabase, projectId);
 
   return (
     <CalendarBoard

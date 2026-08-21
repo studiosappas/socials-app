@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { generateWithImages } from "@/lib/ai/client";
 import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
 import { logActivity } from "@/lib/activity-log";
@@ -56,7 +57,10 @@ export async function createBriefTask(
     return { success: false, message: frameError.message };
   }
 
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating this action's own route -- its only caller
+  // (brief-board.tsx's handleAddTask, and its undo/redo commands) already
+  // calls router.refresh() itself right after, since there's no optimistic
+  // insertion of a new task card yet.
   return { success: true, taskId: task.id };
 }
 
@@ -71,7 +75,10 @@ export async function renameBriefTask(
     .update({ name: name.trim() || "Task" })
     .eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- the task name field is an uncontrolled input
+  // (defaultValue) that already shows the typed text, and nothing else on
+  // the page reads task.name, so there was nothing for a fresh render to
+  // usefully bring back.
   return { success: true };
 }
 
@@ -83,7 +90,9 @@ export async function setBriefTaskTypes(
   const supabase = await createClient();
   const { error } = await supabase.from("brief_tasks").update({ content_types: contentTypes }).eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- brief-board.tsx's Post Type pills already apply
+  // this optimistically (optimisticType) before this call and roll back on
+  // failure, so the UI is already showing the correct final state either way.
   return { success: true };
 }
 
@@ -127,7 +136,9 @@ export async function setBriefTaskStatus(
     );
   }
 
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- brief-board.tsx's Status pills already apply this
+  // optimistically (optimisticStatus) before this call and roll back on
+  // failure, same reasoning as setBriefTaskTypes above.
   return { success: true };
 }
 
@@ -135,7 +146,10 @@ export async function deleteBriefTask(projectId: string, taskId: string): Promis
   const supabase = await createClient();
   const { error } = await supabase.from("brief_tasks").delete().eq("id", taskId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its one real caller (TaskCard's handleDelete)
+  // already hides the card optimistically before this runs, and only
+  // calls router.refresh() on failure to resync. The "Add task" undo
+  // command still refreshes on its own since undo isn't optimistic here.
   return { success: true };
 }
 
@@ -182,7 +196,10 @@ async function insertBriefImageItem(
     .single();
   if (itemError) return { success: false, message: itemError.message };
 
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- every caller chain (addBriefTaskImage,
+  // addBriefTaskLink's image path) ends at a client handler that already
+  // calls router.refresh() itself, since no optimistic item insertion
+  // exists yet.
   return { success: true, itemId: item?.id, attachmentId: attachment.id, label: fileName };
 }
 
@@ -256,7 +273,9 @@ async function createBriefLinkItem(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its one caller (addBriefTaskLink's plain-link
+  // fallback) ends at a client handler that already calls router.refresh()
+  // itself.
   return { success: true, itemId: data?.id };
 }
 
@@ -357,7 +376,8 @@ export async function restoreBriefTaskItem(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- called from undo (of Remove) and redo (of Add),
+  // both of which already call router.refresh() themselves right after.
   return { success: true, itemId: data?.id };
 }
 
@@ -394,7 +414,8 @@ export async function updateBriefTaskItemNotes(projectId: string, itemId: string
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").update({ notes: notes.trim() }).eq("id", itemId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- an uncontrolled textarea (defaultValue) already
+  // shows the typed notes, same reasoning as renameBriefTask above.
   return { success: true };
 }
 
@@ -402,7 +423,10 @@ export async function removeBriefTaskItem(projectId: string, itemId: string): Pr
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").delete().eq("id", itemId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its one real caller (ItemSection's handleRemove)
+  // already hides the item optimistically before this runs, and only
+  // calls router.refresh() on failure to resync. Redo of a prior remove
+  // still refreshes on its own since undo/redo replay isn't optimistic here.
   return { success: true };
 }
 
@@ -440,7 +464,9 @@ export async function addBriefTaskFrame(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its callers (handleAddFrame, and the "Remove
+  // Frame" undo command) already call router.refresh() themselves right
+  // after, since no optimistic insertion of a new frame box exists yet.
   return { success: true, frameId: frame?.id, label, position: insertPosition };
 }
 
@@ -462,7 +488,8 @@ export async function restoreBriefTaskFrame(
     .select("id")
     .single();
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- called from undo (of Remove Frame) and redo (of
+  // Add Frame), both of which already call router.refresh() themselves.
   return { success: true, frameId: data?.id };
 }
 
@@ -477,7 +504,8 @@ export async function renameBriefTaskFrame(
     .update({ label: label.trim() || "Text" })
     .eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- an uncontrolled input (defaultValue) already
+  // shows the typed label.
   return { success: true };
 }
 
@@ -489,7 +517,8 @@ export async function updateBriefTaskFrameBody(
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_frames").update({ body }).eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- an uncontrolled textarea (defaultValue) already
+  // shows the typed body text.
   return { success: true };
 }
 
@@ -497,7 +526,11 @@ export async function removeBriefTaskFrame(projectId: string, frameId: string): 
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_frames").delete().eq("id", frameId);
   if (error) return { success: false, message: error.message };
-  revalidatePath(`/projects/${projectId}/brief`);
+  // Not revalidating -- its one real caller (FrameSection's
+  // handleRemoveFrame) already hides the frame optimistically before this
+  // runs, and only calls router.refresh() on failure to resync. Redo of a
+  // prior remove still refreshes on its own since undo/redo replay isn't
+  // optimistic here.
   return { success: true };
 }
 
@@ -549,8 +582,6 @@ export async function saveBriefAnnotation(
   const { data } = supabase.storage.from("brief-media").getPublicUrl(storagePath);
   return { previewUrl: data.publicUrl };
 }
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 // Post/Carousel Cover and Story are explicit in the brief; Reel Cover
 // (matches a Reel's own vertical frame) and Newsletter (~1.91:1, standard
@@ -742,10 +773,12 @@ export async function generateBriefDesign(
     .upload(newStoragePath, baseFetched.buffer, { contentType: "image/jpeg" });
   if (uploadError) return { success: false, message: uploadError.message };
 
-  const { data: signed } = await supabase.storage
-    .from("project-media")
-    .createSignedUrl(newStoragePath, SIGNED_URL_TTL_SECONDS);
-  if (!signed) return { success: false, message: "Couldn't sign the new asset's URL." };
+  // Routed through the shared cache even for this brand-new path -- it's a
+  // no-op for correctness (nothing else could already have this path
+  // cached), but it means Grid's next full load of this exact asset reuses
+  // this same signed URL instead of minting a second one moments later.
+  const signedUrl = await getCachedSignedUrl(supabase, "project-media", newStoragePath);
+  if (!signedUrl) return { success: false, message: "Couldn't sign the new asset's URL." };
 
   // Secondary images (any "image" element that isn't the base) resolve
   // straight to their existing brief-media public URL -- that bucket is
@@ -778,7 +811,7 @@ export async function generateBriefDesign(
     elements,
     canvasW,
     canvasH,
-    { src: signed.signedUrl, naturalW: baseMeta.width, naturalH: baseMeta.height },
+    { src: signedUrl, naturalW: baseMeta.width, naturalH: baseMeta.height },
     imagesById,
   );
 
@@ -810,7 +843,7 @@ export async function generateBriefDesign(
   return {
     success: true,
     mediaAssetId: mediaAsset.id,
-    imageUrl: signed.signedUrl,
+    imageUrl: signedUrl,
     annotationJson,
   };
 }

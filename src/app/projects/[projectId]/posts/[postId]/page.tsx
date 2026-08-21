@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getPostPageData } from "@/lib/data/posts";
+import { getPostCoreData, getPostMediaLibrary } from "@/lib/data/posts";
 import { PostEditor } from "./post-editor";
 
 export default async function PostPage({
@@ -8,9 +8,14 @@ export default async function PostPage({
   params: Promise<{ projectId: string; postId: string }>;
 }) {
   const { projectId, postId } = await params;
-  const data = await getPostPageData(projectId, postId);
+  const data = await getPostCoreData(projectId, postId);
 
   if (!data) notFound();
+
+  // See the intercepted-modal route's identical comment -- not awaited on
+  // purpose, so the primary editor doesn't wait on the whole project's
+  // media library.
+  const mediaLibraryPromise = getPostMediaLibrary(projectId);
 
   return (
     <PostEditor
@@ -18,7 +23,7 @@ export default async function PostPage({
       post={data.post}
       assets={data.assets}
       links={data.links}
-      mediaLibrary={data.mediaLibrary}
+      mediaLibraryPromise={mediaLibraryPromise}
       canManage={data.canManage}
       currentUserId={data.currentUserId}
       members={data.members}

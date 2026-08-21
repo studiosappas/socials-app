@@ -1,9 +1,10 @@
 "use client";
 
-import { useActionState, useState, useTransition } from "react";
+import { useActionState, useCallback, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useToast } from "@/lib/hooks/use-toast";
 import {
   inviteMember,
   removeMember,
@@ -62,10 +63,52 @@ export function TeamPanel({
     undefined,
   );
   const [invitePermissions, setInvitePermissions] = useState<string[]>([]);
+  const { showError } = useToast();
 
   function toggleInvitePermission(key: string) {
     setInvitePermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   }
+
+  // Optimistic role display + hide-on-remove -- roleOverrides patches what
+  // badge a row shows (role edit, or both sides of a transfer-ownership),
+  // hiddenMemberIds hides a removed row immediately. Same "exclusion set,
+  // no reset-on-prop-change needed" reasoning as every other hidden-id set
+  // in this phase; roleOverrides similarly stays correct even after a
+  // stale `members` prop, since it's never cleared except by an explicit
+  // rollback.
+  const [roleOverrides, setRoleOverrides] = useState<Record<string, ProjectRole>>({});
+  const [hiddenMemberIds, setHiddenMemberIds] = useState<Set<string>>(new Set());
+
+  const visibleMembers = useMemo(() => {
+    const withRoles =
+      Object.keys(roleOverrides).length === 0
+        ? members
+        : members.map((m) => (roleOverrides[m.userId] ? { ...m, role: roleOverrides[m.userId] } : m));
+    return hiddenMemberIds.size === 0 ? withRoles : withRoles.filter((m) => !hiddenMemberIds.has(m.userId));
+  }, [members, roleOverrides, hiddenMemberIds]);
+
+  const setRole = useCallback((userId: string, role: ProjectRole) => {
+    setRoleOverrides((prev) => ({ ...prev, [userId]: role }));
+  }, []);
+  const clearRoleOverride = useCallback((userId: string) => {
+    setRoleOverrides((prev) => {
+      if (!(userId in prev)) return prev;
+      const next = { ...prev };
+      delete next[userId];
+      return next;
+    });
+  }, []);
+  const hideMember = useCallback((userId: string) => {
+    setHiddenMemberIds((prev) => new Set(prev).add(userId));
+  }, []);
+  const unhideMember = useCallback((userId: string) => {
+    setHiddenMemberIds((prev) => {
+      if (!prev.has(userId)) return prev;
+      const next = new Set(prev);
+      next.delete(userId);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="flex max-w-2xl flex-col gap-10">
@@ -124,7 +167,7 @@ export function TeamPanel({
       <div className="flex flex-col gap-3">
         <h2 className={labelClass}>Team List</h2>
         <ul className="flex flex-col gap-2">
-          {members.map((member) => (
+          {visibleMembers.map((member) => (
             <TeamMemberRow
               key={member.userId}
               projectId={projectId}
@@ -132,6 +175,12 @@ export function TeamPanel({
               canManage={canManage}
               isOwner={isOwner}
               isSelf={member.userId === currentUserId}
+              currentUserId={currentUserId}
+              onSetRole={setRole}
+              onClearRoleOverride={clearRoleOverride}
+              onHideMember={hideMember}
+              onUnhideMember={unhideMember}
+              onError={showError}
             />
           ))}
         </ul>
@@ -146,19 +195,31 @@ function TeamMemberRow({
   canManage,
   isOwner,
   isSelf,
+  currentUserId,
+  onSetRole,
+  onClearRoleOverride,
+  onHideMember,
+  onUnhideMember,
+  onError,
 }: {
   projectId: string;
   member: TeamMember;
   canManage: boolean;
   isOwner: boolean;
   isSelf: boolean;
+  currentUserId: string;
+  onSetRole: (userId: string, role: ProjectRole) => void;
+  onClearRoleOverride: (userId: string) => void;
+  onHideMember: (userId: string) => void;
+  onUnhideMember: (userId: string) => void;
+  onError: (message: string) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
   const [editing, setEditing] = useState(false);
-  const [role, setRole] = useState<ProjectRole>(member.role);
+  const [role, setLocalRole] = useState<ProjectRole>(member.role);
   const [permissions, setPermissions] = useState<string[]>(member.customPermissions ?? []);
   const [useCustomPermissions, setUseCustomPermissions] = useState(Boolean(member.customPermissions));
 
@@ -167,29 +228,51 @@ function TeamMemberRow({
   }
 
   function handleSaveEdit() {
-    startTransition(async () => {
-      await updateMemberRole(projectId, member.userId, role);
-      await updateMemberPermissions(projectId, member.userId, useCustomPermissions ? permissions : null);
-      router.refresh();
-    });
     setEditing(false);
+    onSetRole(member.userId, role);
+    startTransition(async () => {
+      try {
+        await updateMemberRole(projectId, member.userId, role);
+        await updateMemberPermissions(projectId, member.userId, useCustomPermissions ? permissions : null);
+      } catch (error) {
+        console.error("Failed to save member edit:", error);
+        onClearRoleOverride(member.userId);
+        onError(error instanceof Error ? error.message : "Couldn't save that change.");
+        router.refresh();
+      }
+    });
   }
 
   function handleTransferOwnership() {
     setMenuOpen(false);
     if (!confirm(`Make ${member.name} the owner of this project? You'll become an admin.`)) return;
+    onSetRole(member.userId, "owner");
+    onSetRole(currentUserId, "admin");
     startTransition(async () => {
-      await transferOwnership(projectId, member.userId);
-      router.refresh();
+      try {
+        await transferOwnership(projectId, member.userId);
+      } catch (error) {
+        console.error("Failed to transfer ownership:", error);
+        onClearRoleOverride(member.userId);
+        onClearRoleOverride(currentUserId);
+        onError(error instanceof Error ? error.message : "Couldn't transfer ownership.");
+        router.refresh();
+      }
     });
   }
 
   function handleRemove() {
     setMenuOpen(false);
     if (!confirm(`Remove ${member.name} from this project?`)) return;
+    onHideMember(member.userId);
     startTransition(async () => {
-      await removeMember(projectId, member.userId);
-      router.refresh();
+      const result = await removeMember(projectId, member.userId);
+      if (!result.success) {
+        console.error("Failed to remove member:", result.message);
+        onUnhideMember(member.userId);
+        onError(result.message);
+        router.refresh();
+      }
     });
   }
 
@@ -263,7 +346,7 @@ function TeamMemberRow({
             <span className={labelClass}>Role</span>
             <select
               value={role}
-              onChange={(e) => setRole(e.target.value as ProjectRole)}
+              onChange={(e) => setLocalRole(e.target.value as ProjectRole)}
               className={`${fieldClass} w-40`}
             >
               {INVITE_ROLE_OPTIONS.map((r) => (
