@@ -8,11 +8,14 @@ import { ThumbnailBackfillPanel } from "./thumbnail-backfill-panel";
 // flag only controls whether this PAGE renders; the actual backfill work
 // still runs through the normal authenticated Supabase client, so it's
 // still bound by ordinary project_members RLS underneath (see
-// thumbnail-backfill.ts's own comment). Raised past Vercel's default
-// function timeout since a single batch downloads+resizes+uploads several
-// multi-MB originals in sequence.
-export const maxDuration = 60;
-
+// thumbnail-backfill.ts's own comment).
+//
+// Deliberately no maxDuration export here -- this page's own render only
+// ever runs a handful of cheap status queries (see getThumbnailBackfillStatus),
+// never the slow download+resize+upload work, so it doesn't need Vercel's
+// default function timeout raised. The one action that does (
+// runThumbnailBackfillBatch) sets its own maxDuration directly on
+// thumbnail-backfill.ts instead, scoped to just that invocation.
 export default async function AdminThumbnailsPage() {
   const supabase = await createClient();
   const {
@@ -37,7 +40,19 @@ export default async function AdminThumbnailsPage() {
     );
   }
 
-  const status = await getThumbnailBackfillStatus();
+  // Caught explicitly (rather than letting a thrown error hit Next's
+  // generic "a server error occurred" page) so a real failure here is
+  // actually diagnosable -- this is admin-only tooling nobody but you will
+  // ever see, so showing the real message is safe and, without any way
+  // for me to read Vercel's own runtime logs directly, it's the fastest
+  // path to finding the real cause if this ever breaks again.
+  let status: Awaited<ReturnType<typeof getThumbnailBackfillStatus>> | null = null;
+  let loadError: string | null = null;
+  try {
+    status = await getThumbnailBackfillStatus();
+  } catch (err) {
+    loadError = err instanceof Error ? err.message : String(err);
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-4 py-12 sm:px-8">
@@ -50,7 +65,13 @@ export default async function AdminThumbnailsPage() {
           keep using the original at full quality regardless.
         </p>
       </div>
-      <ThumbnailBackfillPanel initialStatus={status} />
+      {loadError || !status ? (
+        <div className="rounded border border-error/40 bg-error/5 p-4 text-sm text-error">
+          Couldn&apos;t load the thumbnail status: {loadError ?? "unknown error"}
+        </div>
+      ) : (
+        <ThumbnailBackfillPanel initialStatus={status} />
+      )}
     </div>
   );
 }
