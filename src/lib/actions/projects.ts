@@ -119,19 +119,6 @@ export async function updateProjectProfile(
     return { message: error.message };
   }
 
-  // Isolated from the update above -- instagram_url/tiktok_url are new
-  // columns that may not exist yet on a not-yet-migrated database, and
-  // PostgREST fails the WHOLE statement if any referenced column is
-  // missing. A pending migration means these two links just don't save
-  // yet, not that the rest of the profile edit breaks.
-  await supabase
-    .from("projects")
-    .update({
-      instagram_url: String(formData.get("instagram_url") ?? "").trim(),
-      tiktok_url: String(formData.get("tiktok_url") ?? "").trim(),
-    })
-    .eq("id", projectId);
-
   // Custom sections ("Add Section +") are saved as a full replace -- simplest
   // correct approach for a small, single-editor list with no concurrent
   // multi-user editing to reconcile.
@@ -144,7 +131,23 @@ export async function updateProjectProfile(
   }
   sections = sections.filter((s) => s.title.trim() || s.body.trim());
 
-  await supabase.from("project_sections").delete().eq("project_id", projectId);
+  // Independent of each other -- the isolated instagram_url/tiktok_url
+  // update (instagram_url/tiktok_url are new columns that may not exist yet
+  // on a not-yet-migrated database, and PostgREST fails the WHOLE statement
+  // if any referenced column is missing, hence isolated from the main
+  // update above) writes disjoint columns on the same projects row, while
+  // the sections delete writes an entirely different table.
+  await Promise.all([
+    supabase
+      .from("projects")
+      .update({
+        instagram_url: String(formData.get("instagram_url") ?? "").trim(),
+        tiktok_url: String(formData.get("tiktok_url") ?? "").trim(),
+      })
+      .eq("id", projectId),
+    supabase.from("project_sections").delete().eq("project_id", projectId),
+  ]);
+
   if (sections.length > 0) {
     const { error: sectionsError } = await supabase.from("project_sections").insert(
       sections.map((s, i) => ({

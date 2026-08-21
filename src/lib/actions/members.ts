@@ -25,14 +25,17 @@ export async function inviteMember(
   const permissions = formData.getAll("permissions").map(String);
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
-  const { data: userId, error: lookupError } = await supabase.rpc(
-    "get_user_id_by_email",
-    { p_email: email },
-  );
+  // Independent -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { data: userId, error: lookupError },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.rpc("get_user_id_by_email", { p_email: email }),
+  ]);
 
   if (lookupError || !userId) {
     return { message: "No account found with that email — they need to register first." };
@@ -52,17 +55,21 @@ export async function inviteMember(
     return { message: error.message };
   }
 
-  if (permissions.length > 0) {
-    await supabase
-      .from("project_members")
-      .update({ custom_permissions: permissions })
-      .eq("project_id", projectId)
-      .eq("user_id", userId);
-  }
+  // Independent of each other -- the permissions update and the activity
+  // log write different rows/tables, and the project-name read doesn't
+  // depend on either.
+  const [, , { data: project }] = await Promise.all([
+    permissions.length > 0
+      ? supabase
+          .from("project_members")
+          .update({ custom_permissions: permissions })
+          .eq("project_id", projectId)
+          .eq("user_id", userId)
+      : Promise.resolve(),
+    user ? logActivity(supabase, projectId, user.id, `invited ${email} as ${role}`) : Promise.resolve(),
+    supabase.from("projects").select("name").eq("id", projectId).single(),
+  ]);
 
-  if (user) await logActivity(supabase, projectId, user.id, `invited ${email} as ${role}`);
-
-  const { data: project } = await supabase.from("projects").select("name").eq("id", projectId).single();
   await notifyProjectMembers(
     supabase,
     projectId,
@@ -145,18 +152,17 @@ export async function transferOwnership(projectId: string, newOwnerUserId: strin
     throw new Error("Only the current owner can transfer ownership.");
   }
 
-  const { error: demoteError } = await supabase
-    .from("project_members")
-    .update({ role: "admin" })
-    .eq("project_id", projectId)
-    .eq("user_id", user.id);
+  // Two different rows (different user_id) of the same table -- no shared
+  // state between them, safe to run together.
+  const [{ error: demoteError }, { error: promoteError }] = await Promise.all([
+    supabase.from("project_members").update({ role: "admin" }).eq("project_id", projectId).eq("user_id", user.id),
+    supabase
+      .from("project_members")
+      .update({ role: "owner" })
+      .eq("project_id", projectId)
+      .eq("user_id", newOwnerUserId),
+  ]);
   if (demoteError) throw new Error(demoteError.message);
-
-  const { error: promoteError } = await supabase
-    .from("project_members")
-    .update({ role: "owner" })
-    .eq("project_id", projectId)
-    .eq("user_id", newOwnerUserId);
   if (promoteError) throw new Error(promoteError.message);
 
   await logActivity(supabase, projectId, user.id, "transferred project ownership");

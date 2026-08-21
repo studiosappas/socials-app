@@ -216,62 +216,80 @@ export async function uploadContentAsset(
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+
+  // Independent reads -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { count },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("stories").select("*", { count: "exact", head: true }).eq("project_id", projectId),
+  ]);
   if (!user) return { message: "You must be logged in." };
 
-  const { count } = await supabase
-    .from("stories")
-    .select("*", { count: "exact", head: true })
-    .eq("project_id", projectId);
-
-  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
-
-  // The browser already tried -- this only runs when that failed (e.g. a
-  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
-  // server-thumbnail.ts's own comment for the full reasoning.
-  if (!thumbnailStoragePath && mediaType === "image") {
-    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+  // Independent uploads -- the poster upload and the server-thumbnail
+  // fallback write to different storage paths and neither reads the
+  // other's result. The thumbnail fallback only runs when the browser
+  // already tried and failed (e.g. a HEIC/HEIF photo no desktop browser can
+  // decode into an <img>) -- see server-thumbnail.ts's own comment for the
+  // full reasoning.
+  const needsServerThumbnail = !thumbnailStoragePath && mediaType === "image";
+  const [posterStoragePath, serverThumb] = await Promise.all([
+    uploadPosterIfPresent(supabase, projectId, formData, mediaType),
+    needsServerThumbnail
+      ? generateServerThumbnail(supabase, "project-media", storagePath, projectId)
+      : Promise.resolve(null),
+  ]);
+  if (serverThumb) {
     thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
-
-  const { data: mediaAsset, error: mediaError } = await supabase
-    .from("media_assets")
-    .insert({
-      project_id: projectId,
-      storage_path: storagePath,
-      media_type: mediaType,
-      uploaded_by: user.id,
-      thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
-
-  if (mediaError || !mediaAsset) {
-    return { message: mediaError?.message ?? "Failed to save media." };
-  }
-
-  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
   // Named from the file itself (minus extension) rather than "Untitled
   // story" -- these arrive as standalone assets, not something the user is
   // about to rename immediately the way a freshly created empty item is.
   const name = (typeof fileName === "string" ? fileName : "").replace(/\.[^./]+$/, "").trim() || "Untitled";
 
-  const { data: story, error: storyError } = await supabase
-    .from("stories")
-    .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
-    .select("id")
-    .single();
+  // The media_assets row and the stories row are independent inserts into
+  // different tables -- neither needs the other's id, only the frame insert
+  // below does.
+  const [
+    { data: mediaAsset, error: mediaError },
+    { data: story, error: storyError },
+  ] = await Promise.all([
+    supabase
+      .from("media_assets")
+      .insert({
+        project_id: projectId,
+        storage_path: storagePath,
+        media_type: mediaType,
+        uploaded_by: user.id,
+        thumbnail_storage_path: thumbnailStoragePath,
+      })
+      .select("id")
+      .single(),
+    supabase
+      .from("stories")
+      .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
+      .select("id")
+      .single(),
+  ]);
 
+  if (mediaError || !mediaAsset) {
+    return { message: mediaError?.message ?? "Failed to save media." };
+  }
   if (storyError || !story) {
     return { message: storyError?.message ?? "Failed to create content item." };
   }
 
-  const { error: frameError } = await supabase
-    .from("story_frames")
-    .insert({ story_id: story.id, media_asset_id: mediaAsset.id, position: 0 });
+  // Both only need mediaAsset.id/story.id from above -- setMediaAssetPoster
+  // writes to the media_assets row it just inserted, the frame insert
+  // writes to a different table entirely, neither depends on the other.
+  const [, { error: frameError }] = await Promise.all([
+    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+    supabase.from("story_frames").insert({ story_id: story.id, media_asset_id: mediaAsset.id, position: 0 }),
+  ]);
 
   if (frameError) {
     return { message: frameError.message };
@@ -394,25 +412,30 @@ export async function uploadStoryFrame(
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { message: "You must be logged in." };
 
-  const { count: startingCount } = await supabase
-    .from("story_frames")
-    .select("*", { count: "exact", head: true })
-    .eq("story_id", storyId);
+  // Independent reads -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { count: startingCount },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("story_frames").select("*", { count: "exact", head: true }).eq("story_id", storyId),
+  ]);
+  if (!user) return { message: "You must be logged in." };
 
   const position = startingCount ?? 0;
 
-  const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
-
-  // The browser already tried -- this only runs when that failed (e.g. a
-  // HEIC/HEIF photo no desktop browser can decode into an <img>). See
-  // server-thumbnail.ts's own comment for the full reasoning.
-  if (!thumbnailStoragePath && mediaType === "image") {
-    const serverThumb = await generateServerThumbnail(supabase, "project-media", storagePath, projectId);
+  // Independent uploads -- same reasoning as uploadContentAsset above.
+  const needsServerThumbnail = !thumbnailStoragePath && mediaType === "image";
+  const [posterStoragePath, serverThumb] = await Promise.all([
+    uploadPosterIfPresent(supabase, projectId, formData, mediaType),
+    needsServerThumbnail
+      ? generateServerThumbnail(supabase, "project-media", storagePath, projectId)
+      : Promise.resolve(null),
+  ]);
+  if (serverThumb) {
     thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
 
@@ -432,11 +455,12 @@ export async function uploadStoryFrame(
     return { message: insertError?.message ?? "Failed to save media." };
   }
 
-  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
-
-  const { error: frameError } = await supabase
-    .from("story_frames")
-    .insert({ story_id: storyId, media_asset_id: mediaAsset.id, position });
+  // Both only need mediaAsset.id -- same reasoning as uploadContentAsset
+  // above.
+  const [, { error: frameError }] = await Promise.all([
+    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+    supabase.from("story_frames").insert({ story_id: storyId, media_asset_id: mediaAsset.id, position }),
+  ]);
 
   if (frameError) {
     return { message: frameError.message };

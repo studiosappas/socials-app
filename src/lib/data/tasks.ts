@@ -38,20 +38,25 @@ export async function getTasksForUser(
   supabase: Awaited<ReturnType<typeof createClient>>,
   userId: string,
 ): Promise<TaskWorkspaceData> {
-  const { data: memberships } = await supabase
-    .from("project_members")
-    .select("project_id, user_id, projects(id, name, profile_photo_path), profiles(name, avatar_url)")
-    .eq("user_id", userId);
+  // taskRows has no explicit project_id/user_id filter (RLS alone returns
+  // the visible set), so it's independent of memberships -- both run in the
+  // same wave instead of the task read waiting on the membership read.
+  const [{ data: memberships }, { data: taskRows }] = await Promise.all([
+    supabase
+      .from("project_members")
+      .select("project_id, user_id, projects(id, name, profile_photo_path), profiles(name, avatar_url)")
+      .eq("user_id", userId),
+    supabase
+      .from("tasks")
+      .select("id, user_id, project_id, title, due_date, status, assignee_id, source_type, source_id, created_at, updated_at")
+      .order("due_date", { ascending: true, nullsFirst: false })
+      .order("created_at", { ascending: true }),
+  ]);
 
   const projectIds = Array.from(
     new Set((memberships ?? []).map((m) => m.project_id).filter((id): id is string => Boolean(id))),
   );
 
-  // Same profile_photo_path -> signed URL resolution as nav-data.ts's own
-  // project switcher, reused here for the Tasks page's project chip cover.
-  // getCachedSignedUrls means this reuses the exact same cache entry
-  // nav-data.ts/Grid/Overview already populated for this path, instead of
-  // minting yet another signed URL for the same file.
   const projectRows = new Map<string, { id: string; name: string; profile_photo_path: string | null }>();
   for (const m of memberships ?? []) {
     const project = m.projects as { id: string; name: string; profile_photo_path: string | null } | null;
@@ -60,7 +65,35 @@ export async function getTasksForUser(
   const projectPhotoPaths = Array.from(projectRows.values())
     .map((p) => p.profile_photo_path)
     .filter((p): p is string => Boolean(p));
-  const projectUrlByPath = await getCachedSignedUrls(supabase, "project-media", projectPhotoPaths);
+
+  const rows = taskRows ?? [];
+  const assigneeIds = Array.from(new Set(rows.map((t) => t.assignee_id).filter((id): id is string => Boolean(id))));
+  const taskIds = rows.map((t) => t.id);
+
+  // Four independent reads, all derived from the memberships/taskRows wave
+  // above: allMemberRows needs projectIds, projectUrlByPath needs
+  // projectPhotoPaths (same profile_photo_path -> signed URL resolution as
+  // nav-data.ts's own project switcher -- getCachedSignedUrls means this
+  // reuses the exact same cache entry nav-data.ts/Grid/Overview already
+  // populated for this path, instead of minting yet another signed URL for
+  // the same file), assigneeProfiles needs assigneeIds, commentRows needs
+  // taskIds -- none of the four need each other's result.
+  const [{ data: allMemberRows }, projectUrlByPath, { data: assigneeProfiles }, { data: commentRows }] =
+    await Promise.all([
+      projectIds.length
+        ? supabase
+            .from("project_members")
+            .select("project_id, user_id, profiles(name, avatar_url)")
+            .in("project_id", projectIds)
+        : Promise.resolve({ data: [] }),
+      getCachedSignedUrls(supabase, "project-media", projectPhotoPaths),
+      assigneeIds.length
+        ? supabase.from("profiles").select("id, name, avatar_url").in("id", assigneeIds)
+        : Promise.resolve({ data: [] }),
+      taskIds.length
+        ? supabase.from("task_comments").select("task_id").in("task_id", taskIds)
+        : Promise.resolve({ data: [] }),
+    ]);
 
   const projectsById = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
   for (const project of projectRows.values()) {
@@ -70,16 +103,6 @@ export async function getTasksForUser(
       avatarUrl: project.profile_photo_path ? projectUrlByPath.get(project.profile_photo_path) ?? null : null,
     });
   }
-
-  // Every member of every project the current user belongs to -- the pool
-  // an assignee picker draws from. One query across all projectIds rather
-  // than one per project, then grouped in JS.
-  const { data: allMemberRows } = projectIds.length
-    ? await supabase
-        .from("project_members")
-        .select("project_id, user_id, profiles(name, avatar_url)")
-        .in("project_id", projectIds)
-    : { data: [] };
 
   const membersByProject = new Map<string, TeamMember[]>();
   for (const row of allMemberRows ?? []) {
@@ -94,31 +117,11 @@ export async function getTasksForUser(
     membersByProject.set(row.project_id, list);
   }
 
-  // No explicit project_id/user_id filter -- RLS alone returns exactly the
-  // visible set (every project-shared task across the user's projects,
-  // plus their own personal ones), which is correct for this one
-  // genuinely cross-project page.
-  const { data: taskRows } = await supabase
-    .from("tasks")
-    .select("id, user_id, project_id, title, due_date, status, assignee_id, source_type, source_id, created_at, updated_at")
-    .order("due_date", { ascending: true, nullsFirst: false })
-    .order("created_at", { ascending: true });
-
-  const rows = taskRows ?? [];
-
-  const assigneeIds = Array.from(new Set(rows.map((t) => t.assignee_id).filter((id): id is string => Boolean(id))));
-  const { data: assigneeProfiles } = assigneeIds.length
-    ? await supabase.from("profiles").select("id, name, avatar_url").in("id", assigneeIds)
-    : { data: [] };
   const assigneeById = new Map<string, TeamMember>();
   for (const p of assigneeProfiles ?? []) {
     assigneeById.set(p.id, { id: p.id, name: p.name ?? "Unknown", avatarUrl: p.avatar_url ?? null });
   }
 
-  const taskIds = rows.map((t) => t.id);
-  const { data: commentRows } = taskIds.length
-    ? await supabase.from("task_comments").select("task_id").in("task_id", taskIds)
-    : { data: [] };
   const commentCountByTask = new Map<string, number>();
   for (const c of commentRows ?? []) {
     commentCountByTask.set(c.task_id, (commentCountByTask.get(c.task_id) ?? 0) + 1);

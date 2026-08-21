@@ -41,20 +41,22 @@ export async function updatePost(
   formData: FormData,
 ): Promise<UpdatePostState> {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
   const scheduledTime = String(formData.get("scheduled_time") ?? "").trim();
   const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
   const caption = String(formData.get("caption") ?? "");
 
-  const { data: before } = await supabase
-    .from("posts")
-    .select("status, post_type, scheduled_date")
-    .eq("id", postId)
-    .single();
+  // Independent reads -- neither needs the other's result.
+  const [
+    {
+      data: { user },
+    },
+    { data: before },
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.from("posts").select("status, post_type, scheduled_date").eq("id", postId).single(),
+  ]);
 
   // post_type: adding/replacing/removing media auto-suggests the right
   // value (lib/post-type.ts's syncPostType, called from those actions), but
@@ -93,24 +95,22 @@ export async function updatePost(
     await completeAutoTaskForPost(supabase, postId);
   }
 
-  // Isolated from the update above -- scheduled_time is a new column that
-  // may not exist yet on a not-yet-migrated database, and PostgREST fails
-  // the WHOLE statement if any referenced column is missing.
-  await supabase
-    .from("posts")
-    .update({ scheduled_time: scheduledTime ? scheduledTime : null })
-    .eq("id", postId);
-
-  // Same isolation reasoning -- review_status is what a client's review-link
-  // submission also writes to (set_post_review_status_by_token), so a
-  // manual edit here uses the exact same column, never a second field.
+  // Both isolated from the update above and from each other -- scheduled_time
+  // is a new column that may not exist yet on a not-yet-migrated database
+  // (PostgREST fails the WHOLE statement if any referenced column is
+  // missing), and review_status is what a client's review-link submission
+  // also writes to (set_post_review_status_by_token), so a manual edit here
+  // uses the exact same column, never a second field. Each targets a
+  // disjoint column on the same row, so running them together is safe --
+  // same reasoning already applied to Grid's upload flow and Post Editor's
+  // own page load earlier in this engagement.
   const reviewStatus = formData.get("review_status");
-  if (reviewStatus) {
-    await supabase
-      .from("posts")
-      .update({ review_status: String(reviewStatus) as ReviewStatus })
-      .eq("id", postId);
-  }
+  await Promise.all([
+    supabase.from("posts").update({ scheduled_time: scheduledTime ? scheduledTime : null }).eq("id", postId),
+    reviewStatus
+      ? supabase.from("posts").update({ review_status: String(reviewStatus) as ReviewStatus }).eq("id", postId)
+      : Promise.resolve(),
+  ]);
 
   // Only the transition INTO "in_review", not every save made while a post
   // already sits in that status -- otherwise this would fire on every
