@@ -38,7 +38,9 @@ export async function createStory(projectId: string, folderId?: string | null) {
     throw new Error(error?.message ?? "Failed to create story.");
   }
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- this always redirects away
+  // from it immediately below, and staleTimes.dynamic already forces a
+  // fresh fetch of it whenever the user navigates back.
   redirect(`/projects/${projectId}/stories/${story.id}`);
 }
 
@@ -64,7 +66,9 @@ export async function createContentFolder(
     return { message: error?.message ?? "Failed to create folder." };
   }
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleCreateFolder) already calls router.refresh()
+  // itself right after this resolves.
   return { id: data.id };
 }
 
@@ -84,7 +88,9 @@ export async function renameContentFolder(
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleRenameFolder) already calls router.refresh()
+  // itself right after this resolves.
   return { success: true };
 }
 
@@ -96,7 +102,9 @@ export async function deleteContentFolder(projectId: string, folderId: string): 
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleDeleteFolder) already calls router.refresh()
+  // itself right after this resolves.
   return { success: true };
 }
 
@@ -110,7 +118,9 @@ export async function moveStoryToFolder(
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (story-card.tsx's handleMove) already calls router.refresh() itself
+  // right after this resolves.
   return { success: true };
 }
 
@@ -128,7 +138,9 @@ export async function bulkMoveStoriesToFolder(
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleBulkMove) already calls router.refresh()
+  // itself right after this resolves.
   return { success: true };
 }
 
@@ -139,7 +151,10 @@ export async function bulkDeleteStories(projectId: string, storyIds: string[]): 
 
   if (error) return { success: false, message: error.message };
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's handleBulkDelete) already calls router.refresh()
+  // itself right after this resolves. /calendar is a genuinely different
+  // route, kept as-is.
   revalidatePath(`/projects/${projectId}/calendar`);
   return { success: true };
 }
@@ -262,7 +277,9 @@ export async function uploadContentAsset(
     return { message: frameError.message };
   }
 
-  revalidatePath(`/projects/${projectId}/stories`);
+  // Not revalidating /stories (its own route) -- its one caller
+  // (stories-board.tsx's UploadAssetsZone, via onUploaded) already calls
+  // router.refresh() itself right after this resolves.
   return { success: true };
 }
 
@@ -284,8 +301,11 @@ export async function deleteStory(projectId: string, storyId: string) {
 export async function deleteStoryFromCalendar(projectId: string, storyId: string) {
   const supabase = await createClient();
   await supabase.from("stories").delete().eq("id", storyId);
+  // Not revalidating /calendar (its own route -- this is only ever called
+  // from Calendar's Drafts panel) -- its one caller (calendar-board.tsx's
+  // handleBulkDelete) already calls router.refresh() itself right after.
+  // /stories is a genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/calendar`);
 }
 
 export type UpdateStoryState = { message?: string; success?: boolean } | undefined;
@@ -338,8 +358,12 @@ export async function addStoryFrame(projectId: string, storyId: string, mediaAss
     throw new Error(error.message);
   }
 
+  // Not revalidating this action's own route (/stories/[storyId]) -- its
+  // one caller (story-editor.tsx's "Add from library" click) already calls
+  // router.refresh() itself right after this resolves. /stories (the list)
+  // is a genuinely different route, kept as-is (a new frame can change
+  // that story's list thumbnail).
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
 }
 
 export type UploadStoryFrameState = { message?: string; success?: boolean } | undefined;
@@ -418,8 +442,11 @@ export async function uploadStoryFrame(
     return { message: frameError.message };
   }
 
+  // Not revalidating this action's own route (/stories/[storyId]) -- its
+  // one caller (story-editor.tsx's UploadFrameTile, via onUploaded) already
+  // calls router.refresh() itself right after this resolves. /stories (the
+  // list) is a genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/stories`);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
   return { success: true };
 }
 
@@ -467,7 +494,10 @@ export async function updateStoryFrameLink(
     .update({ link_url: linkUrl.trim() ? linkUrl.trim() : null })
     .eq("id", frameId);
 
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- its one caller (SortableFrame's onBlur in
+  // story-editor.tsx) is an uncontrolled input that already shows the typed
+  // value with zero dependency on a fresh render, and nothing else on the
+  // page displays a frame's link.
 }
 
 export type UpdateStoryLinkState = { message?: string } | undefined;
@@ -489,12 +519,14 @@ export async function addStoryLink(
     return { message: error.message };
   }
 
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- its one caller (StoryLinks' handleAdd) already
+  // calls router.refresh() itself right after this resolves.
   return undefined;
 }
 
 export async function removeStoryLink(projectId: string, storyId: string, linkId: string) {
   const supabase = await createClient();
   await supabase.from("story_links").delete().eq("id", linkId);
-  revalidatePath(`/projects/${projectId}/stories/${storyId}`);
+  // Not revalidating -- its one caller (StoryLinks' remove button) already
+  // calls router.refresh() itself right after this resolves.
 }
