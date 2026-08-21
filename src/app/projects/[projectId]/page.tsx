@@ -1,5 +1,6 @@
 import { endOfWeek, format, startOfWeek } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { AnimatedNumber } from "./animated-number";
 import {
   AiRecommendationsPanel,
@@ -7,8 +8,6 @@ import {
   ProfilePanel,
   WorkplaceInsightsPanel,
 } from "./overview-panels";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export default async function ProjectOverviewPage({
   params,
@@ -120,13 +119,11 @@ export default async function ProjectOverviewPage({
 
   const canManage = membership?.role === "owner" || membership?.role === "admin";
 
-  const profilePhotoUrl = project?.profile_photo_path
-    ? (
-        await supabase.storage
-          .from("project-media")
-          .createSignedUrl(project.profile_photo_path, SIGNED_URL_TTL_SECONDS)
-      ).data?.signedUrl ?? null
-    : null;
+  // The same profile_photo_path nav-data.ts/Grid/Tasks each independently
+  // sign for their own display -- routing through the shared cache means
+  // whichever of those already signed it wins, and this just reuses that
+  // entry instead of minting a 4th signed URL for the same file.
+  const profilePhotoUrl = await getCachedSignedUrl(supabase, "project-media", project?.profile_photo_path);
 
   const trackedPostIds = new Set(
     (trackedTasks ?? []).filter((t) => t.source_type === "post").map((t) => t.source_id),

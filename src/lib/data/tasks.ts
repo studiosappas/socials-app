@@ -1,7 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { TaskStatus } from "@/types/database";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export type TaskSource = "manual" | "auto";
 export type TaskSourceRef = { type: "post" | "story"; id: string } | null;
@@ -50,6 +49,9 @@ export async function getTasksForUser(
 
   // Same profile_photo_path -> signed URL resolution as nav-data.ts's own
   // project switcher, reused here for the Tasks page's project chip cover.
+  // getCachedSignedUrls means this reuses the exact same cache entry
+  // nav-data.ts/Grid/Overview already populated for this path, instead of
+  // minting yet another signed URL for the same file.
   const projectRows = new Map<string, { id: string; name: string; profile_photo_path: string | null }>();
   for (const m of memberships ?? []) {
     const project = m.projects as { id: string; name: string; profile_photo_path: string | null } | null;
@@ -58,13 +60,7 @@ export async function getTasksForUser(
   const projectPhotoPaths = Array.from(projectRows.values())
     .map((p) => p.profile_photo_path)
     .filter((p): p is string => Boolean(p));
-  const { data: projectSignedUrls } = projectPhotoPaths.length
-    ? await supabase.storage.from("project-media").createSignedUrls(projectPhotoPaths, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-  const projectUrlByPath = new Map<string, string>();
-  for (const entry of projectSignedUrls ?? []) {
-    if (entry.signedUrl && entry.path) projectUrlByPath.set(entry.path, entry.signedUrl);
-  }
+  const projectUrlByPath = await getCachedSignedUrls(supabase, "project-media", projectPhotoPaths);
 
   const projectsById = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
   for (const project of projectRows.values()) {

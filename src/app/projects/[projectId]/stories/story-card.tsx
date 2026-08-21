@@ -422,9 +422,16 @@ function AssetPreviewModal({
           </>
         )}
 
+        {/* Keyed by index, not file.url -- the url is a signed URL that gets
+            a new token every time it's re-signed even though the underlying
+            file didn't change, so keying by it forced a full remount (video
+            restart/image flash) on every unrelated background revalidation,
+            not just on an actual Prev/Next navigation. index is stable for
+            "which file is this" across re-signs, and still changes exactly
+            when the user navigates to a different file. */}
         {file.mediaType === "video" ? (
           <video
-            key={file.url}
+            key={index}
             src={file.url}
             controls
             playsInline
@@ -433,7 +440,7 @@ function AssetPreviewModal({
           />
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
-          <img key={file.url} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
+          <img key={index} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
         )}
       </div>
 

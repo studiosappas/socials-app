@@ -1,7 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { AssetBoard, type AssetCollectionItem } from "./asset-board";
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export default async function AssetsPage({
   params,
@@ -31,13 +30,7 @@ export default async function AssetsPage({
     .order("created_at", { ascending: false });
 
   const coverPaths = (rows ?? []).map((r) => r.cover_storage_path).filter((p): p is string => Boolean(p));
-  const { data: signedUrls } = coverPaths.length
-    ? await supabase.storage.from("project-media").createSignedUrls(coverPaths, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", coverPaths);
 
   const collections: AssetCollectionItem[] = (rows ?? []).map((r) => ({
     id: r.id,

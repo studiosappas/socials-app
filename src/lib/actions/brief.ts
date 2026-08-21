@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { generateWithImages } from "@/lib/ai/client";
 import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
 import { logActivity } from "@/lib/activity-log";
@@ -577,8 +578,6 @@ export async function saveBriefAnnotation(
   return { previewUrl: data.publicUrl };
 }
 
-const SIGNED_URL_TTL_SECONDS = 3600;
-
 // Post/Carousel Cover and Story are explicit in the brief; Reel Cover
 // (matches a Reel's own vertical frame) and Newsletter (~1.91:1, standard
 // email/link-preview banner width) are reasonable defaults for the two the
@@ -769,10 +768,12 @@ export async function generateBriefDesign(
     .upload(newStoragePath, baseFetched.buffer, { contentType: "image/jpeg" });
   if (uploadError) return { success: false, message: uploadError.message };
 
-  const { data: signed } = await supabase.storage
-    .from("project-media")
-    .createSignedUrl(newStoragePath, SIGNED_URL_TTL_SECONDS);
-  if (!signed) return { success: false, message: "Couldn't sign the new asset's URL." };
+  // Routed through the shared cache even for this brand-new path -- it's a
+  // no-op for correctness (nothing else could already have this path
+  // cached), but it means Grid's next full load of this exact asset reuses
+  // this same signed URL instead of minting a second one moments later.
+  const signedUrl = await getCachedSignedUrl(supabase, "project-media", newStoragePath);
+  if (!signedUrl) return { success: false, message: "Couldn't sign the new asset's URL." };
 
   // Secondary images (any "image" element that isn't the base) resolve
   // straight to their existing brief-media public URL -- that bucket is
@@ -805,7 +806,7 @@ export async function generateBriefDesign(
     elements,
     canvasW,
     canvasH,
-    { src: signed.signedUrl, naturalW: baseMeta.width, naturalH: baseMeta.height },
+    { src: signedUrl, naturalW: baseMeta.width, naturalH: baseMeta.height },
     imagesById,
   );
 
@@ -837,7 +838,7 @@ export async function generateBriefDesign(
   return {
     success: true,
     mediaAssetId: mediaAsset.id,
-    imageUrl: signed.signedUrl,
+    imageUrl: signedUrl,
     annotationJson,
   };
 }

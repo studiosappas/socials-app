@@ -1,14 +1,20 @@
 import type { createClient } from "@/lib/supabase/server";
+import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
-
-const SIGNED_URL_TTL_SECONDS = 3600;
 
 export type NavProject = { id: string; name: string; avatarUrl: string | null };
 
 // Shared by AppHeader's project-switcher dropdown AND its current-project
 // avatar/hover-menu -- one fetch covers both, since "current project" is
-// just whichever item in this same list matches the URL's projectId.
+// just whichever item in this same list matches the URL's projectId. This
+// runs on literally every navigation across the whole app (it's called from
+// every top-level layout.tsx), so it was the single most-repeated signed-URL
+// mint in the app -- re-signing every project's avatar on every click even
+// though the app-header data itself never actually flashes/reloads.
+// getCachedSignedUrls also means the SAME cache entry (keyed by storage
+// path, not by which page asked) is shared with Grid/Overview/Tasks, which
+// each independently sign this exact same profile_photo_path.
 export async function getUserProjectsForNav(
   supabase: SupabaseServerClient,
   userId: string,
@@ -24,14 +30,7 @@ export async function getUserProjectsForNav(
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
 
   const paths = projects.map((p) => p.profile_photo_path).filter((p): p is string => Boolean(p));
-  const { data: signedUrls } = paths.length
-    ? await supabase.storage.from("project-media").createSignedUrls(paths, SIGNED_URL_TTL_SECONDS)
-    : { data: [] };
-
-  const urlByPath = new Map<string, string>();
-  for (const entry of signedUrls ?? []) {
-    if (entry.signedUrl && entry.path) urlByPath.set(entry.path, entry.signedUrl);
-  }
+  const urlByPath = await getCachedSignedUrls(supabase, "project-media", paths);
 
   return projects.map((p) => ({
     id: p.id,
