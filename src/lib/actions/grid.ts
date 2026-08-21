@@ -181,6 +181,20 @@ export async function restoreMediaAsset(
   } = await supabase.auth.getUser();
   if (!user) return { message: "You must be logged in." };
 
+  // deleteMedia never removes the underlying Storage objects (see its own
+  // comment) -- but the deleted row's thumbnail_storage_path is gone with
+  // the row, and there's no cheap way from here to know whether an old,
+  // now-orphaned thumbnail file still exists at some prior path. Simplest
+  // correct fix: regenerate one against the still-live original, same
+  // guarantee every other insert into this table now has, rather than
+  // leaving a restored asset permanently without one.
+  const thumbnailStoragePath =
+    data.mediaType === "image"
+      ? await generateServerThumbnail(supabase, "project-media", data.storagePath, projectId).then((r) =>
+          r.ok ? r.path : null,
+        )
+      : null;
+
   const { data: mediaAsset, error } = await supabase
     .from("media_assets")
     .insert({
@@ -189,6 +203,7 @@ export async function restoreMediaAsset(
       media_type: data.mediaType,
       poster_storage_path: data.posterStoragePath,
       uploaded_by: user.id,
+      thumbnail_storage_path: thumbnailStoragePath,
     })
     .select("id")
     .single();

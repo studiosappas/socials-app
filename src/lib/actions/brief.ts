@@ -7,6 +7,7 @@ import { generateWithImages } from "@/lib/ai/client";
 import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
+import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type {
   BriefFrameSection,
   BriefItemKind,
@@ -781,6 +782,13 @@ export async function generateBriefDesign(
     imagesById,
   );
 
+  // This becomes a real Media Library/Grid-placeable asset (same as any
+  // other upload), so it needs the same thumbnail guarantee -- otherwise
+  // a Grid tile using it would silently fall back to the full original,
+  // same as the other upload paths this pass fixed.
+  const thumbnailResult = await generateServerThumbnail(supabase, "project-media", newStoragePath, projectId);
+  const thumbnailStoragePath = thumbnailResult.ok ? thumbnailResult.path : null;
+
   const { data: mediaAsset, error: insertError } = await supabase
     .from("media_assets")
     .insert({
@@ -790,6 +798,7 @@ export async function generateBriefDesign(
       uploaded_by: user.id,
       annotation_json: annotationJson,
       generated_by_ai: true,
+      thumbnail_storage_path: thumbnailStoragePath,
     })
     .select("id")
     .single();
