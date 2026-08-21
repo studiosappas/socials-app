@@ -186,7 +186,6 @@ export function PostEditor({
     setOrderedAssets(next);
     startTransition(async () => {
       await reorderPostAssets(projectId, post.id, next.map((a) => a.postAssetId));
-      router.refresh();
     });
   }
 

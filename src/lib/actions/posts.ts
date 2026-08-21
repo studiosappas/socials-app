@@ -174,7 +174,11 @@ export async function addPostAsset(
 
   await syncPostType(supabase, postId);
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller ("Add from library" in post-editor.tsx) already calls
+  // router.refresh() itself right after this resolves. /grid is a
+  // genuinely different route, kept as-is (a new asset can change the
+  // post's cover/thumbnail there).
   revalidatePath(`/projects/${projectId}/grid`);
 }
 
@@ -256,7 +260,10 @@ export async function uploadPostAsset(
 
   await syncPostType(supabase, postId);
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (UploadAssetTile, via onUploaded) already calls router.refresh()
+  // itself right after this resolves. /grid is a genuinely different
+  // route, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
   return { success: true };
 }
@@ -269,7 +276,10 @@ export async function removePostAsset(
   const supabase = await createClient();
   await supabase.from("post_assets").delete().eq("id", postAssetId);
   await syncPostType(supabase, postId);
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (SortableAsset's onRemove) already calls router.refresh() itself
+  // right after this resolves. /grid is a genuinely different route, kept
+  // as-is.
   revalidatePath(`/projects/${projectId}/grid`);
 }
 
@@ -359,7 +369,10 @@ export async function replacePostAsset(
 
   await syncPostType(supabase, postId);
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (ReplaceAssetPopover's runReplace) already calls
+  // router.refresh() itself right after this resolves. /grid is a
+  // genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
   return { success: true };
 }
@@ -377,7 +390,11 @@ export async function reorderPostAssets(
     ),
   );
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating this action's own route (/posts/[postId]) -- its one
+  // caller (post-editor.tsx's applyReorder) already shows the reordered
+  // carousel optimistically via orderedAssets. /grid is a genuinely
+  // different route, kept as-is (reordering can change which asset is now
+  // the cover/position 0, which Grid's tile thumbnail reads).
   revalidatePath(`/projects/${projectId}/grid`);
 }
 
@@ -398,12 +415,14 @@ export async function addPostLink(
     return { message: error.message };
   }
 
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating -- its one caller (PostLinks' handleAdd) already calls
+  // router.refresh() itself right after this resolves.
   return undefined;
 }
 
 export async function removePostLink(projectId: string, postId: string, linkId: string) {
   const supabase = await createClient();
   await supabase.from("post_links").delete().eq("id", linkId);
-  revalidatePath(`/projects/${projectId}/posts/${postId}`);
+  // Not revalidating -- its one caller (PostLinks' remove button) already
+  // calls router.refresh() itself right after this resolves.
 }
