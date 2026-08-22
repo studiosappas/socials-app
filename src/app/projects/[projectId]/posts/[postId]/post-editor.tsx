@@ -531,7 +531,18 @@ function AddFromLibrarySection({
               <img src={item.url} alt="" className="h-full w-full object-cover" />
             )}
             {item.url && item.mediaType === "video" && (
-              <video src={item.url} className="h-full w-full object-cover" muted />
+              // preload="metadata" -- mobile browsers commonly default video
+              // preload to "none" to save cellular data, which otherwise
+              // leaves this thumbnail with no visible frame at all until
+              // played. playsInline avoids iOS Safari trying to launch
+              // native fullscreen playback chrome for it.
+              <video
+                src={item.url}
+                className="h-full w-full object-cover"
+                muted
+                playsInline
+                preload="metadata"
+              />
             )}
             {item.usedInCarousel && (
               <span

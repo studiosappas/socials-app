@@ -247,13 +247,31 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
   // real work for nothing, only worth doing for postAssets' own
   // PostAssetItem.posterUrl, which now lives in getPostCoreData above.
   const allMediaIds = (mediaAssets ?? []).map((a) => a.id);
-  const { data: previewRows } = allMediaIds.length
-    ? await supabase.from("media_assets").select("id, preview_storage_path").in("id", allMediaIds)
-    : { data: [] };
+  const [{ data: previewRows }, { data: thumbnailRows }] = await Promise.all([
+    allMediaIds.length
+      ? supabase.from("media_assets").select("id, preview_storage_path").in("id", allMediaIds)
+      : Promise.resolve({ data: [] }),
+    // Isolated the same way as preview above -- thumbnail_storage_path may
+    // not exist yet on a not-yet-migrated database. This grid's tiles are
+    // tiny (~65-90px), same as Grid's own media library sidebar (see
+    // grid/page.tsx's identical thumbnail-over-original preference) -- this
+    // list was the one picker still signing the full original/preview for
+    // every asset just to paint a small tile, which on a slow mobile
+    // connection meant every thumbnail sat mid-download (rendering as a
+    // partial sliver of decoded pixels) for however long a multi-MB file
+    // took to arrive.
+    allMediaIds.length
+      ? supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", allMediaIds)
+      : Promise.resolve({ data: [] }),
+  ]);
 
   const previewPathByMediaId = new Map<string, string | null>();
   for (const r of previewRows ?? []) {
     previewPathByMediaId.set(r.id, (r as { id: string; preview_storage_path: string | null }).preview_storage_path ?? null);
+  }
+  const thumbnailPathByMediaId = new Map<string, string | null>();
+  for (const r of thumbnailRows ?? []) {
+    thumbnailPathByMediaId.set(r.id, (r as { id: string; thumbnail_storage_path: string | null }).thumbnail_storage_path ?? null);
   }
 
   const allPaths = new Set<string>();
@@ -261,16 +279,26 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
     allPaths.add(asset.storage_path);
     const preview = previewPathByMediaId.get(asset.id);
     if (preview) allPaths.add(preview);
+    const thumbnail = thumbnailPathByMediaId.get(asset.id);
+    if (thumbnail) allPaths.add(thumbnail);
   }
 
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
 
   return (mediaAssets ?? []).map((asset) => {
     const preview = previewPathByMediaId.get(asset.id);
+    const thumbnail = thumbnailPathByMediaId.get(asset.id);
     const originalUrl = urlByPath.get(asset.storage_path) ?? null;
+    // Thumbnail first (this list only ever renders a small tile, never a
+    // full-size view), then the edited preview, then the original -- same
+    // priority Grid's own on-screen tiles use, just with the preview step
+    // added back in so a cropped/annotated asset still shows its actual
+    // saved look here instead of the stale pre-edit thumbnail.
+    const displayUrl =
+      (thumbnail ? urlByPath.get(thumbnail) : undefined) ?? (preview ? urlByPath.get(preview) : undefined) ?? originalUrl;
     return {
       id: asset.id,
-      url: preview ? urlByPath.get(preview) ?? originalUrl : originalUrl,
+      url: displayUrl,
       // Always storage_path, never the preview -- see handleAddFromLibrary/
       // handleReplaceFromLibrary in post-editor.tsx, which need the real
       // original url (not this list's display-only `url`) for their
