@@ -255,6 +255,27 @@ export function AnnotationEditor({
   // cover) never constructs on top of a still-in-flight disposal. See that
   // effect for the crash this prevents.
   const disposePromiseRef = useRef<Promise<boolean> | null>(null);
+  // The explicit "editor idle" contract: Rotate and Crop Apply are the two
+  // operations that asynchronously mutate the AUTHORITATIVE canvas state
+  // (basePhoto's element/crop/scale) -- both read something (a fresh
+  // Image load, a fetched FabricImage) that takes real, unbounded time,
+  // then write the result back. Neither previously checked, after that
+  // await, whether the canvas they were about to mutate was still the
+  // live one -- if the user rotated or applied a crop and then quickly
+  // moved on (another edit, Save, or closing the editor) before that
+  // await resolved, the eventual completion still called
+  // basePhoto.setElement()/canvas.loadFromJSON()/canvas.requestRenderAll()
+  // regardless, sometimes against a canvas mid-disposal (Fabric's own
+  // dispose() had already deleted its internal DOM-manager state) --
+  // "Cannot read properties of undefined (reading 'clearRect')" and
+  // friends, reproducible only under a fast combined sequence, never in
+  // an isolated single-tool test. This ref is a serialized queue both
+  // operations register into (trackPendingEdit below); Save awaits it
+  // before snapshotting, and the disposal cleanup effect awaits it before
+  // actually calling canvas.dispose() -- so persistence and teardown both
+  // wait for in-flight editor mutations to genuinely settle first,
+  // structurally, rather than by guessing at a delay.
+  const pendingEditRef = useRef<Promise<void>>(Promise.resolve());
   // See handleAdjustmentInput below -- coalesces rapid slider ticks so the
   // expensive full-resolution filter pass runs at most once per animation
   // frame instead of once per native 'input' event (which fires far more
@@ -340,6 +361,11 @@ export function AnnotationEditor({
   const [cropZoom, setCropZoom] = useState(1);
   const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
   const [cropFrameSize, setCropFrameSize] = useState<{ width: number; height: number } | null>(null);
+  // handleApplyCrop previously had no error handling or in-flight feedback
+  // at all -- a failed fetch/loadFromJSON was an uncaught rejection, and
+  // there was no way to tell "still applying" from "silently did nothing."
+  const [applyingCrop, setApplyingCrop] = useState(false);
+  const [cropError, setCropError] = useState<string | undefined>();
   // The base photo's CURRENT full source (getElement().src), captured fresh
   // every time the crop tool opens -- must match whatever handleApplyCrop
   // itself crops from, or the live drag-to-position preview shows the wrong
@@ -365,6 +391,13 @@ export function AnnotationEditor({
   // around the async work so a second call can bail out immediately,
   // regardless of render timing.
   const rotatingRef = useRef(false);
+  // Same synchronous-mutex reasoning as rotatingRef, for handleApplyCrop --
+  // which previously had NO such guard at all. A rapid double-tap on
+  // "Apply crop" (or any other trigger firing it twice back to back)
+  // could start a second async apply while the first was still awaiting
+  // its own fetch/loadFromJSON, each independently reading/mutating the
+  // same basePhoto.
+  const applyingCropRef = useRef(false);
 
   // For video: a JPEG data URL of whatever frame the user picked (or, when
   // reopening an already-edited video, one captured silently for canvas-
@@ -808,15 +841,34 @@ export function AnnotationEditor({
 
     return () => {
       disposed = true;
-      if (canvas) {
-        disposePromiseRef.current = canvas.dispose();
-      }
+      // Nulled IMMEDIATELY/synchronously, before the canvas is actually
+      // disposed below -- this is the signal applyBaseTransform/
+      // handleApplyCrop check (fabricRef.current !== canvas) to bail out
+      // of a still-in-flight operation as early as possible, rather than
+      // only once the (potentially delayed, see below) actual teardown
+      // happens.
       fabricRef.current = null;
       if (adjustmentRafRef.current !== null) {
         cancelAnimationFrame(adjustmentRafRef.current);
         adjustmentRafRef.current = null;
       }
       pendingAdjustmentsRef.current = null;
+      if (canvas) {
+        const canvasToDispose = canvas;
+        // See pendingEditRef's own declaration -- actually tearing the
+        // canvas down (which deletes Fabric's internal DOM-manager state)
+        // is deferred until any Rotate/Crop Apply still in flight against
+        // THIS canvas has settled. pendingEditRef never rejects (see
+        // trackPendingEdit), so no .catch needed. Combined with the
+        // fabricRef.current nulling above (which makes that in-flight
+        // operation bail out on its own the moment it next checks), this
+        // guarantees dispose() never runs while that operation is
+        // mid-mutation, and -- since the NEXT open's construction effect
+        // itself awaits disposePromiseRef before building a new canvas --
+        // that no old async work can ever reach a newly-constructed
+        // canvas either.
+        disposePromiseRef.current = pendingEditRef.current.then(() => canvasToDispose.dispose());
+      }
     };
     // canvasNonce is a real dependency, not just a React key: the "reset
     // picker state" effect above bumps it on every open (for every media
@@ -879,7 +931,39 @@ export function AnnotationEditor({
     fn(canvas);
   }
 
+  // See pendingEditRef's own declaration for why this exists. Chains `run`
+  // after whatever edit was already pending (so two overlapping
+  // authoritative-state mutations serialize instead of racing each other),
+  // and leaves pendingEditRef holding an always-resolving tracker promise
+  // (never rejecting) so a failed edit doesn't permanently wedge every
+  // future Save/disposal into waiting on an already-rejected promise --
+  // the ORIGINAL caller still observes whatever `run` actually
+  // resolves/rejects with, via the returned promise, which is `run`'s own
+  // promise, not the tracker.
+  function trackPendingEdit<T>(run: () => Promise<T>): Promise<T> {
+    const started = pendingEditRef.current.then(run, run);
+    pendingEditRef.current = started.then(
+      () => undefined,
+      () => undefined,
+    );
+    return started;
+  }
+
   function activateTool(next: Tool) {
+    // Rotate and Crop Apply both asynchronously read/replace the base
+    // photo's element (a fetch/decode that takes real, unbounded time) --
+    // switching to ANY other tool while one is still in flight, most
+    // concretely entering Crop, would capture/act on a basePhoto that's
+    // about to change out from under it the moment that operation
+    // completes (e.g. Crop's own cropSourceUrl snapshot going stale the
+    // instant a still-pending Rotate finishes and calls setElement()).
+    // Both buttons already disable themselves while their OWN operation is
+    // running (rotating/applyingCrop); refusing every OTHER tool switch
+    // here too closes off the cross-tool version of the same race
+    // structurally, rather than only guarding the one case (Crop) known to
+    // read basePhoto on entry -- correct regardless of what a future tool
+    // might also read from it.
+    if (rotatingRef.current || applyingCropRef.current) return;
     withCanvas((canvas) => {
       // Rotate/Flip (applyBaseTransform) resets the base photo's element
       // AND its crop window (cropX/Y reset to 0, width/height to the new
@@ -1011,57 +1095,78 @@ export function AnnotationEditor({
     rotatingRef.current = true;
     setRotating(true);
     setRotateError(undefined);
-    try {
-      const transformedUrl = getRotatedCropDataUrl(basePhoto, { rotation, flipX, flipY });
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const el = new window.Image();
-        el.onload = () => resolve(el);
-        el.onerror = () => reject(new Error("Couldn't load the rotated image."));
-        el.src = transformedUrl;
-      });
+    // See pendingEditRef's own declaration -- registers this operation so
+    // Save and disposal both know a mutation is in flight and wait for it,
+    // instead of racing its eventual completion.
+    await trackPendingEdit(async () => {
+      try {
+        const transformedUrl = getRotatedCropDataUrl(basePhoto, { rotation, flipX, flipY });
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new window.Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error("Couldn't load the rotated image."));
+          el.src = transformedUrl;
+        });
 
-      const naturalW = img.naturalWidth;
-      const naturalH = img.naturalHeight;
-      const frameW = canvas.getWidth();
-      const frameH = canvas.getHeight();
-      // Same cover-fit formula as the initial load (targetAspect branch) --
-      // naturalW/H already reflect the swapped dimensions for a 90/270
-      // rotation, so this re-centers/re-covers correctly with no separate
-      // "swapped" case to handle.
-      const imgScale = Math.max(frameW / naturalW, frameH / naturalH);
+        // The await above can take arbitrarily long (decoding a large
+        // native-resolution frame). If the canvas this operation started
+        // against has since been disposed/replaced (the user closed the
+        // editor, or another open/reopen cycle already swapped in a fresh
+        // instance), fabricRef.current no longer points at THIS canvas --
+        // bail out instead of mutating/rendering a torn-down or stale
+        // instance, which is exactly what produced Fabric-internal crashes
+        // ("Cannot read properties of undefined (reading 'clearRect')")
+        // under a fast combined sequence.
+        if (fabricRef.current !== canvas) return;
 
-      basePhoto.setElement(img);
-      basePhoto.set({
-        scaleX: imgScale,
-        scaleY: imgScale,
-        left: (frameW - naturalW * imgScale) / 2,
-        top: (frameH - naturalH * imgScale) / 2,
-        cropX: 0,
-        cropY: 0,
-        width: naturalW,
-        height: naturalH,
-      });
-      basePhoto.setCoords();
-      canvas.requestRenderAll();
-      canvas.fire("object:modified", { target: basePhoto });
-      setCropZoom(1);
-      setCropOffset({ x: 0, y: 0 });
-    } catch (error) {
-      // Previously uncaught -- any failure here (a CORS-tainted canvas
-      // throwing SecurityError on toDataURL, same real failure mode already
-      // handled in handleSave; a decode error; anything else) was silently
-      // swallowed, so on a real device this looked exactly like "I tap
-      // Rotate and nothing happens" with zero feedback.
-      console.error("Failed to rotate/flip image:", error);
-      setRotateError(
-        error instanceof DOMException && error.name === "SecurityError"
-          ? "Couldn't rotate -- this image failed to load securely."
-          : "Couldn't rotate the image. Try again.",
-      );
-    } finally {
-      rotatingRef.current = false;
-      setRotating(false);
-    }
+        const naturalW = img.naturalWidth;
+        const naturalH = img.naturalHeight;
+        const frameW = canvas.getWidth();
+        const frameH = canvas.getHeight();
+        // Same cover-fit formula as the initial load (targetAspect branch) --
+        // naturalW/H already reflect the swapped dimensions for a 90/270
+        // rotation, so this re-centers/re-covers correctly with no separate
+        // "swapped" case to handle.
+        const imgScale = Math.max(frameW / naturalW, frameH / naturalH);
+
+        basePhoto.setElement(img);
+        basePhoto.set({
+          scaleX: imgScale,
+          scaleY: imgScale,
+          left: (frameW - naturalW * imgScale) / 2,
+          top: (frameH - naturalH * imgScale) / 2,
+          cropX: 0,
+          cropY: 0,
+          width: naturalW,
+          height: naturalH,
+        });
+        basePhoto.setCoords();
+        canvas.requestRenderAll();
+        canvas.fire("object:modified", { target: basePhoto });
+        setCropZoom(1);
+        setCropOffset({ x: 0, y: 0 });
+      } catch (error) {
+        // Previously uncaught -- any failure here (a CORS-tainted canvas
+        // throwing SecurityError on toDataURL, same real failure mode already
+        // handled in handleSave; a decode error; anything else) was silently
+        // swallowed, so on a real device this looked exactly like "I tap
+        // Rotate and nothing happens" with zero feedback.
+        console.error("Failed to rotate/flip image:", error);
+        // Also stale-guarded: don't surface an error banner for an
+        // operation whose canvas has already been torn down/replaced --
+        // there's no dialog left for it to mean anything to.
+        if (fabricRef.current === canvas) {
+          setRotateError(
+            error instanceof DOMException && error.name === "SecurityError"
+              ? "Couldn't rotate -- this image failed to load securely."
+              : "Couldn't rotate the image. Try again.",
+          );
+        }
+      } finally {
+        rotatingRef.current = false;
+        setRotating(false);
+      }
+    });
   }
 
   function rotateBasePhoto(deltaDegrees: 90 | -90) {
@@ -1097,133 +1202,207 @@ export function AnnotationEditor({
     const canvas = fabricRef.current;
     const basePhoto = canvas ? findBasePhoto(canvas) : null;
     if (!canvas || !basePhoto || !cropFrameSize) return;
-    // frameW/frameH (Fabric's INTERNAL canvas resolution, i.e. canvas
-    // units) are only used below for the final PLACEMENT onto the canvas
-    // -- scaleX/scaleY/left/top -- since that's the coordinate space Fabric
-    // actually renders in, independent of how big the canvas is drawn on
-    // screen.
-    const frameW = canvas.getWidth();
-    const frameH = canvas.getHeight();
+    // See applyingCropRef's own declaration -- bails out synchronously on a
+    // rapid double-tap instead of racing a second fetch/loadFromJSON
+    // against this one.
+    if (applyingCropRef.current) return;
 
-    // basePhoto.getElement() is always the current FULL underlying source
-    // -- cropX/Y/width/height are just Fabric's window into it, never the
-    // element itself -- so this already correctly reflects any prior
-    // rotate/flip (rotateBasePhoto/flipBasePhoto bake those directly into
-    // this same element) without needing to separately track/reapply a
-    // transform here.
-    const sourceUrl = (basePhoto.getElement() as HTMLImageElement).src;
+    applyingCropRef.current = true;
+    setApplyingCrop(true);
+    setCropError(undefined);
+    // See pendingEditRef's own declaration -- registers this operation so
+    // Save and disposal both know a mutation is in flight and wait for it,
+    // instead of racing its eventual completion.
+    await trackPendingEdit(async () => {
+      try {
+        // frameW/frameH (Fabric's INTERNAL canvas resolution, i.e. canvas
+        // units) are only used below for the final PLACEMENT onto the canvas
+        // -- scaleX/scaleY/left/top -- since that's the coordinate space Fabric
+        // actually renders in, independent of how big the canvas is drawn on
+        // screen.
+        const frameW = canvas.getWidth();
+        const frameH = canvas.getHeight();
 
-    const freshImg = await fabric.FabricImage.fromURL(sourceUrl, { crossOrigin: "anonymous" });
-    const naturalW = freshImg.width ?? frameW;
-    const naturalH = freshImg.height ?? frameH;
-    // THE ACTUAL BUG this fixes: the crop overlay the user drags/pinches is
-    // sized and CSS-`object-cover`-fit against cropFrameSize -- the
-    // canvas element's live CSS DISPLAY box (measured via
-    // getBoundingClientRect() when crop mode opens). That box is NOT
-    // guaranteed to equal canvas.getWidth()/getHeight() (Fabric's internal
-    // resolution) -- entering crop mode adds the Apply/Cancel button row
-    // above the canvas, which can shrink the canvas's available CSS height
-    // below its own intrinsic resolution on a real, viewport-constrained
-    // phone (this never reproduces on a spacious desktop test, or even a
-    // roomy mobile-emulated one). Computing "cover scale" from
-    // frameW/frameH here -- a DIFFERENT box than the one the overlay
-    // visually panned/zoomed against -- silently cropped a different
-    // window than what was shown, which is exactly the "Apply jumps to a
-    // different framing" bug. Using cropFrameSize here instead is the
-    // SAME number that already determines the overlay's own rendered
-    // size/scale (see its JSX below), so by construction there is no
-    // second, possibly-diverging "frame size" for this math to disagree
-    // with -- whatever box the user saw is exactly the box this crops
-    // against.
-    const coverScale = Math.max(cropFrameSize.width / naturalW, cropFrameSize.height / naturalH);
-    const cropW = clamp(cropFrameSize.width / (coverScale * cropZoom), 0, naturalW);
-    const cropH = clamp(cropFrameSize.height / (coverScale * cropZoom), 0, naturalH);
-    // offset is a fraction of the FRAME (matching Grid's own drag-delta
-    // convention), which is the same as a fraction of the crop window's
-    // own natural size -- both are scaled by the same factor to fill the
-    // frame, so a "one frame-width" drag is exactly "one crop-window-
-    // width" in natural pixels, regardless of zoom.
-    //
-    // THE ACTUAL "Apply doesn't match the preview" BUG: this used to ADD
-    // cropOffset here, but the overlay's own gesture and the crop window
-    // it's supposed to describe move in OPPOSITE directions. The overlay
-    // pans by moving the IMAGE via `transform: translate(offset%, ...)` --
-    // dragging right increases offset.x, which slides the image content
-    // right on screen. But sliding the image right under a FIXED frame
-    // reveals content from further toward the image's LEFT (smaller
-    // natural-x), the same as sliding a photo right under a fixed peephole
-    // -- so the crop window's left edge should DECREASE as offset.x
-    // increases, not increase. Adding cropOffset here did the opposite:
-    // every pan moved the crop window the wrong way, and every pinch-zoom
-    // (which re-centers around the current offset, see
-    // AnnotationCropOverlay's pinch handler) compounded that same wrong-
-    // direction shift. Confirmed empirically -- extracting the source
-    // image at the ADDED-offset coordinates the old formula computed
-    // produced a visibly different, more-zoomed-out framing than what the
-    // overlay showed; extracting it at these SUBTRACTED-offset coordinates
-    // instead matches the overlay's preview.
-    const cropX = clamp((naturalW - cropW) / 2 - cropOffset.x * cropW, 0, naturalW - cropW);
-    const cropY = clamp((naturalH - cropH) / 2 - cropOffset.y * cropH, 0, naturalH - cropH);
+        // basePhoto.getElement() is always the current FULL underlying source
+        // -- cropX/Y/width/height are just Fabric's window into it, never the
+        // element itself -- so this already correctly reflects any prior
+        // rotate/flip (rotateBasePhoto/flipBasePhoto bake those directly into
+        // this same element) without needing to separately track/reapply a
+        // transform here.
+        const sourceUrl = (basePhoto.getElement() as HTMLImageElement).src;
 
-    // The base photo is a regular (tagged) entry in json.objects now, not
-    // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
-    const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
-    const objects = json.objects ?? [];
-    const photoIndex = objects.findIndex((o) => o.appRole === BASE_PHOTO_ROLE);
-    const updatedPhoto = {
-      ...(photoIndex >= 0 ? objects[photoIndex] : {}),
-      appRole: BASE_PHOTO_ROLE,
-      src: sourceUrl,
-      cropX,
-      cropY,
-      width: cropW,
-      height: cropH,
-      scaleX: frameW / cropW,
-      scaleY: frameH / cropH,
-      left: 0,
-      top: 0,
-      // See the identical note on the initial-load path -- without this,
-      // the object renders centered on (left,top) instead of anchored
-      // there, which is why the crop never appeared to visually apply.
-      originX: "left",
-      originY: "top",
-    };
-    if (photoIndex >= 0) {
-      objects[photoIndex] = updatedPhoto;
-    } else {
-      objects.unshift(updatedPhoto);
-    }
-    json.objects = objects;
-    await canvas.loadFromJSON(json);
-    canvas.requestRenderAll();
-    setCropping(false);
-    setTool("select");
+        const freshImg = await fabric.FabricImage.fromURL(sourceUrl, { crossOrigin: "anonymous" });
+        // The await above (a network fetch/decode) can take arbitrarily
+        // long. If the canvas this operation started against has since
+        // been disposed/replaced (editor closed, or a fresh open/reopen
+        // cycle already swapped in a new instance), fabricRef.current no
+        // longer points at THIS canvas -- bail out instead of mutating a
+        // torn-down or stale instance. Same reasoning/failure mode as
+        // applyBaseTransform's identical guard.
+        if (fabricRef.current !== canvas) return;
+        const naturalW = freshImg.width ?? frameW;
+        const naturalH = freshImg.height ?? frameH;
+        // THE ACTUAL BUG this fixes: the crop overlay the user drags/pinches is
+        // sized and CSS-`object-cover`-fit against cropFrameSize -- the
+        // canvas element's live CSS DISPLAY box (measured via
+        // getBoundingClientRect() when crop mode opens). That box is NOT
+        // guaranteed to equal canvas.getWidth()/getHeight() (Fabric's internal
+        // resolution) -- entering crop mode adds the Apply/Cancel button row
+        // above the canvas, which can shrink the canvas's available CSS height
+        // below its own intrinsic resolution on a real, viewport-constrained
+        // phone (this never reproduces on a spacious desktop test, or even a
+        // roomy mobile-emulated one). Computing "cover scale" from
+        // frameW/frameH here -- a DIFFERENT box than the one the overlay
+        // visually panned/zoomed against -- silently cropped a different
+        // window than what was shown, which is exactly the "Apply jumps to a
+        // different framing" bug. Using cropFrameSize here instead is the
+        // SAME number that already determines the overlay's own rendered
+        // size/scale (see its JSX below), so by construction there is no
+        // second, possibly-diverging "frame size" for this math to disagree
+        // with -- whatever box the user saw is exactly the box this crops
+        // against.
+        const coverScale = Math.max(cropFrameSize.width / naturalW, cropFrameSize.height / naturalH);
+        const cropW = clamp(cropFrameSize.width / (coverScale * cropZoom), 0, naturalW);
+        const cropH = clamp(cropFrameSize.height / (coverScale * cropZoom), 0, naturalH);
+        // offset is a fraction of the FRAME (matching Grid's own drag-delta
+        // convention), which is the same as a fraction of the crop window's
+        // own natural size -- both are scaled by the same factor to fill the
+        // frame, so a "one frame-width" drag is exactly "one crop-window-
+        // width" in natural pixels, regardless of zoom.
+        //
+        // THE ACTUAL "Apply doesn't match the preview" BUG: this used to ADD
+        // cropOffset here, but the overlay's own gesture and the crop window
+        // it's supposed to describe move in OPPOSITE directions. The overlay
+        // pans by moving the IMAGE via `transform: translate(offset%, ...)` --
+        // dragging right increases offset.x, which slides the image content
+        // right on screen. But sliding the image right under a FIXED frame
+        // reveals content from further toward the image's LEFT (smaller
+        // natural-x), the same as sliding a photo right under a fixed peephole
+        // -- so the crop window's left edge should DECREASE as offset.x
+        // increases, not increase. Adding cropOffset here did the opposite:
+        // every pan moved the crop window the wrong way, and every pinch-zoom
+        // (which re-centers around the current offset, see
+        // AnnotationCropOverlay's pinch handler) compounded that same wrong-
+        // direction shift. Confirmed empirically -- extracting the source
+        // image at the ADDED-offset coordinates the old formula computed
+        // produced a visibly different, more-zoomed-out framing than what the
+        // overlay showed; extracting it at these SUBTRACTED-offset coordinates
+        // instead matches the overlay's preview.
+        const cropX = clamp((naturalW - cropW) / 2 - cropOffset.x * cropW, 0, naturalW - cropW);
+        const cropY = clamp((naturalH - cropH) / 2 - cropOffset.y * cropH, 0, naturalH - cropH);
+
+        // The base photo is a regular (tagged) entry in json.objects now, not
+        // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
+        const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
+        const objects = json.objects ?? [];
+        const photoIndex = objects.findIndex((o) => o.appRole === BASE_PHOTO_ROLE);
+        const updatedPhoto = {
+          ...(photoIndex >= 0 ? objects[photoIndex] : {}),
+          appRole: BASE_PHOTO_ROLE,
+          src: sourceUrl,
+          cropX,
+          cropY,
+          width: cropW,
+          height: cropH,
+          scaleX: frameW / cropW,
+          scaleY: frameH / cropH,
+          left: 0,
+          top: 0,
+          // See the identical note on the initial-load path -- without this,
+          // the object renders centered on (left,top) instead of anchored
+          // there, which is why the crop never appeared to visually apply.
+          originX: "left",
+          originY: "top",
+        };
+        if (photoIndex >= 0) {
+          objects[photoIndex] = updatedPhoto;
+        } else {
+          objects.unshift(updatedPhoto);
+        }
+        json.objects = objects;
+        await canvas.loadFromJSON(json);
+        // Second async boundary -- re-check for the same reason as above.
+        // loadFromJSON reconstructs every object (including re-fetching the
+        // base photo's own image), which can take real time on a large
+        // native-resolution source; the canvas could have been torn down
+        // during THIS await too, independent of the first check.
+        if (fabricRef.current !== canvas) return;
+        canvas.requestRenderAll();
+        setCropping(false);
+        setTool("select");
+      } catch (error) {
+        // Previously completely unhandled -- a failed fetch or a
+        // loadFromJSON rejection was an uncaught promise rejection, so
+        // tapping "Apply crop" and having it silently do nothing (no
+        // error, crop mode just stayed open) was indistinguishable from
+        // the tap not having registered at all.
+        console.error("Failed to apply crop:", error);
+        if (fabricRef.current === canvas) {
+          setCropError(
+            error instanceof DOMException && error.name === "SecurityError"
+              ? "Couldn't crop -- this image failed to load securely."
+              : "Couldn't apply the crop. Try again.",
+          );
+        }
+      } finally {
+        applyingCropRef.current = false;
+        setApplyingCrop(false);
+      }
+    });
   }
+
+  // Same class of bug as Rotate/Crop Apply had: loadFromJSON is
+  // asynchronous (re-fetches/reconstructs every object, including the base
+  // photo's own image), and this previously had neither a same-operation
+  // mutex (a rapid double-tap on Undo could start a second restore before
+  // the first's loadFromJSON resolved, each independently mutating the
+  // canvas and racing to finish last) nor a staleness check (its .then()
+  // ran unconditionally, regardless of whether the canvas it captured was
+  // still the live one by the time it fired). historyOperationRef +
+  // trackPendingEdit + the fabricRef.current check give it the identical
+  // protection.
+  const historyOperationRef = useRef(false);
 
   function handleUndo() {
     withCanvas((canvas) => {
-      if (historyIndexRef.current <= 0) return;
+      if (historyIndexRef.current <= 0 || historyOperationRef.current) return;
       historyIndexRef.current -= 1;
+      const json = JSON.parse(historyRef.current[historyIndexRef.current]);
+      historyOperationRef.current = true;
       restoringRef.current = true;
-      canvas.loadFromJSON(JSON.parse(historyRef.current[historyIndexRef.current])).then(() => {
-        canvas.requestRenderAll();
-        restoringRef.current = false;
-        const basePhoto = findBasePhoto(canvas);
-        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+      void trackPendingEdit(async () => {
+        try {
+          await canvas.loadFromJSON(json);
+          if (fabricRef.current !== canvas) return;
+          canvas.requestRenderAll();
+          const basePhoto = findBasePhoto(canvas);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+        } finally {
+          restoringRef.current = false;
+          historyOperationRef.current = false;
+        }
       });
     });
   }
 
   function handleRedo() {
     withCanvas((canvas) => {
-      if (historyIndexRef.current >= historyRef.current.length - 1) return;
+      if (historyIndexRef.current >= historyRef.current.length - 1 || historyOperationRef.current) return;
       historyIndexRef.current += 1;
+      const json = JSON.parse(historyRef.current[historyIndexRef.current]);
+      historyOperationRef.current = true;
       restoringRef.current = true;
-      canvas.loadFromJSON(JSON.parse(historyRef.current[historyIndexRef.current])).then(() => {
-        canvas.requestRenderAll();
-        restoringRef.current = false;
-        const basePhoto = findBasePhoto(canvas);
-        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+      void trackPendingEdit(async () => {
+        try {
+          await canvas.loadFromJSON(json);
+          if (fabricRef.current !== canvas) return;
+          canvas.requestRenderAll();
+          const basePhoto = findBasePhoto(canvas);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+        } finally {
+          restoringRef.current = false;
+          historyOperationRef.current = false;
+        }
       });
     });
   }
@@ -1373,59 +1552,67 @@ export function AnnotationEditor({
     if (!canvas || !(active instanceof fabric.FabricImage)) return;
 
     setRemovingBackground(true);
-    try {
-      const { width, height } = active.getOriginalSize();
-      if (!width || !height) return;
-      const off = document.createElement("canvas");
-      off.width = width;
-      off.height = height;
-      const ctx = off.getContext("2d", { willReadFrequently: true });
-      if (!ctx) return;
-      ctx.drawImage(active.getElement() as CanvasImageSource, 0, 0, width, height);
+    // Same class of bug as Rotate/Crop Apply/Undo/Redo: this awaits an
+    // image decode (real, unbounded time) then mutates the canvas
+    // afterward -- registers into pendingEditRef so Save/disposal wait for
+    // it too, and re-checks fabricRef.current afterward so it can't touch
+    // a canvas that's since been disposed or replaced.
+    await trackPendingEdit(async () => {
+      try {
+        const { width, height } = active.getOriginalSize();
+        if (!width || !height) return;
+        const off = document.createElement("canvas");
+        off.width = width;
+        off.height = height;
+        const ctx = off.getContext("2d", { willReadFrequently: true });
+        if (!ctx) return;
+        ctx.drawImage(active.getElement() as CanvasImageSource, 0, 0, width, height);
 
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const data = imageData.data;
-      function pixelAt(x: number, y: number): [number, number, number] {
-        const i = (y * width + x) * 4;
-        return [data[i], data[i + 1], data[i + 2]];
-      }
-      const corners = [pixelAt(0, 0), pixelAt(width - 1, 0), pixelAt(0, height - 1), pixelAt(width - 1, height - 1)];
-      const bg = [0, 1, 2].map((c) => corners.reduce((sum, p) => sum + p[c], 0) / corners.length);
-
-      const TOLERANCE = 40;
-      const FEATHER = 25;
-      for (let i = 0; i < data.length; i += 4) {
-        const dr = data[i] - bg[0];
-        const dg = data[i + 1] - bg[1];
-        const db = data[i + 2] - bg[2];
-        const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-        if (dist < TOLERANCE) {
-          data[i + 3] = 0;
-        } else if (dist < TOLERANCE + FEATHER) {
-          data[i + 3] = Math.round(data[i + 3] * ((dist - TOLERANCE) / FEATHER));
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+        function pixelAt(x: number, y: number): [number, number, number] {
+          const i = (y * width + x) * 4;
+          return [data[i], data[i + 1], data[i + 2]];
         }
+        const corners = [pixelAt(0, 0), pixelAt(width - 1, 0), pixelAt(0, height - 1), pixelAt(width - 1, height - 1)];
+        const bg = [0, 1, 2].map((c) => corners.reduce((sum, p) => sum + p[c], 0) / corners.length);
+
+        const TOLERANCE = 40;
+        const FEATHER = 25;
+        for (let i = 0; i < data.length; i += 4) {
+          const dr = data[i] - bg[0];
+          const dg = data[i + 1] - bg[1];
+          const db = data[i + 2] - bg[2];
+          const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+          if (dist < TOLERANCE) {
+            data[i + 3] = 0;
+          } else if (dist < TOLERANCE + FEATHER) {
+            data[i + 3] = Math.round(data[i + 3] * ((dist - TOLERANCE) / FEATHER));
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        const resultUrl = off.toDataURL("image/png");
+        const resultEl = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const img = new window.Image();
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = resultUrl;
+        });
+        if (fabricRef.current !== canvas) return;
+
+        // Swaps which element this SAME object renders, rather than
+        // replacing the object -- position/scale/rotation/selection all stay
+        // exactly as they were, no remove+re-add bookkeeping needed.
+        active.setElement(resultEl);
+        canvas.requestRenderAll();
+        canvas.fire("object:modified", { target: active });
+      } catch (error) {
+        console.error("Failed to remove background:", error);
+      } finally {
+        setRemovingBackground(false);
       }
-      ctx.putImageData(imageData, 0, 0);
-
-      const resultUrl = off.toDataURL("image/png");
-      const resultEl = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const img = new window.Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = resultUrl;
-      });
-
-      // Swaps which element this SAME object renders, rather than
-      // replacing the object -- position/scale/rotation/selection all stay
-      // exactly as they were, no remove+re-add bookkeeping needed.
-      active.setElement(resultEl);
-      canvas.requestRenderAll();
-      canvas.fire("object:modified", { target: active });
-    } catch (error) {
-      console.error("Failed to remove background:", error);
-    } finally {
-      setRemovingBackground(false);
-    }
+    });
   }
 
   function handleBrushColorChange(color: string) {
@@ -1604,6 +1791,32 @@ export function AnnotationEditor({
     setSaving(true);
     setSaveError(undefined);
     try {
+      // Establishes "the editor is idle" before snapshotting -- see
+      // pendingEditRef's own declaration. An Adjust slider release already
+      // flushes synchronously (commitAdjustments), but a release that
+      // hasn't fired yet (or a drag still in progress) leaves a value
+      // queued for the next animation frame rather than applied yet;
+      // cancel-then-flush here too (same pair commitAdjustments itself
+      // uses) means Save never captures a canvas that's one rAF behind the
+      // sliders' displayed values, and never runs that same pending frame
+      // a second time redundantly after this manual flush already did it.
+      // Rotate/Crop Apply are asynchronous (a fetch/decode that can take
+      // real time on a large source) and register themselves into
+      // pendingEditRef -- if either is still in flight, awaiting it here
+      // means Save always snapshots the SETTLED result of the user's most
+      // recent edit, never a canvas mid-mutation.
+      if (adjustmentRafRef.current !== null) {
+        cancelAnimationFrame(adjustmentRafRef.current);
+        adjustmentRafRef.current = null;
+      }
+      flushPendingAdjustments();
+      await pendingEditRef.current;
+      // The wait above can take a while on a slow rotate/crop. If the
+      // editor closed (or reopened into a fresh instance) during that
+      // wait, fabricRef.current no longer points at THIS canvas -- there's
+      // no dialog left for a save result to mean anything to, so stop
+      // rather than snapshot/export a canvas that's no longer live.
+      if (fabricRef.current !== canvas) return;
       const annotationJson = JSON.stringify(canvas.toJSON());
       // For a targetAspect-locked frame, exportScaleRef.current is a FIXED
       // TARGET_EXPORT_W/canvasW ratio (see setupCanvas) -- it always produces
@@ -1994,13 +2207,28 @@ export function AnnotationEditor({
       )}
 
       {tool === "crop" && (
-        <div className="flex items-center justify-center gap-2 pb-2">
-          <Button type="button" variant="primary" radius="full" onClick={handleApplyCrop}>
-            Apply crop
-          </Button>
-          <Button type="button" variant="secondary" radius="full" onClick={() => activateTool("select")}>
-            Cancel crop
-          </Button>
+        <div className="flex flex-col items-center gap-1 pb-2">
+          <div className="flex items-center justify-center gap-2">
+            <Button
+              type="button"
+              variant="primary"
+              radius="full"
+              onClick={handleApplyCrop}
+              disabled={applyingCrop}
+            >
+              {applyingCrop ? "Applying…" : "Apply crop"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              radius="full"
+              onClick={() => activateTool("select")}
+              disabled={applyingCrop}
+            >
+              Cancel crop
+            </Button>
+          </div>
+          {cropError && <p className="text-xs text-error">{cropError}</p>}
         </div>
       )}
 
