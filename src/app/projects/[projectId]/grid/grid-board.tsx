@@ -727,8 +727,18 @@ export function GridBoard({
         {activeSlot && (
           <div className="aspect-[4/5] w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
             {activeSlot.thumbnailUrl ? (
+              // Same coverTransformStyle the real tile renders with (see
+              // GridSlotBody) -- without it, a cropped post's drag preview
+              // showed the raw, uncropped framing while dragging, a visible
+              // mismatch from what the tile actually looks like at rest
+              // (and from what it snaps back to on drop).
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={activeSlot.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+              <img
+                src={activeSlot.thumbnailUrl}
+                alt=""
+                className="h-full w-full object-cover"
+                style={coverTransformStyle(activeSlot.coverTransform)}
+              />
             ) : null}
           </div>
         )}
