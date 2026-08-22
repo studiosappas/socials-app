@@ -121,60 +121,49 @@ function findBasePhoto(canvas: fabric.Canvas): fabric.FabricImage | null {
 
 // Fabric's cropX/cropY/width/height are just a WINDOW into the base photo's
 // underlying element (getElement()) -- the element itself stays the full,
-// un-cropped source no matter what's currently visible. This flattens
-// exactly what's currently VISIBLE (respecting whatever crop window, if
-// any, is already applied) into one standalone image, as a data URL.
-// rotateBasePhoto/flipBasePhoto use this so rotating after cropping rotates
-// the cropped result, not a version from before the crop.
-function getVisibleCropDataUrl(basePhoto: fabric.FabricImage): string {
+// un-cropped source no matter what's currently visible. This crops AND
+// rotates/flips the currently-visible region in ONE canvas pass, returning
+// the result as a data URL -- rotateBasePhoto/flipBasePhoto use it so
+// rotating after cropping rotates the cropped result, not a version from
+// before the crop.
+//
+// Originally two separate functions (flatten the visible crop to a PNG
+// data URL, then load THAT back into an <img> and rotate it into a SECOND
+// PNG data URL) -- each full-resolution PNG round-trip allocates its own
+// uncompressed canvas buffer and base64 string, and on a real phone with a
+// large (multi-megapixel, this app now genuinely produces native-
+// resolution originals) source image, doing that twice per rotation was a
+// plausible memory/performance cliff a small desktop-test image would
+// never hit. Combining into one pass halves the peak memory and the
+// number of async image-decode round trips (which also halves the window
+// for a second rapid tap to race against the first -- see the `rotating`
+// guard on the buttons below). JPEG instead of PNG for the same reason:
+// smaller buffers/strings at a real phone's memory budget, negligible
+// quality cost at 0.97 -- the app's own final Save already re-encodes to
+// JPEG at 0.92 regardless (see handleSave), so this isn't introducing a
+// new category of loss, just an earlier one at a much higher quality.
+function getRotatedCropDataUrl(
+  basePhoto: fabric.FabricImage,
+  transform: { rotation: 0 | 90 | 180 | 270; flipX: boolean; flipY: boolean },
+): string {
   const el = basePhoto.getElement() as HTMLImageElement;
   const cropX = basePhoto.cropX ?? 0;
   const cropY = basePhoto.cropY ?? 0;
   const cropW = basePhoto.width || el.naturalWidth || 1;
   const cropH = basePhoto.height || el.naturalHeight || 1;
+  const swapped = transform.rotation === 90 || transform.rotation === 270;
+  const outW = swapped ? cropH : cropW;
+  const outH = swapped ? cropW : cropH;
   const off = document.createElement("canvas");
-  off.width = cropW;
-  off.height = cropH;
+  off.width = outW || 1;
+  off.height = outH || 1;
   const ctx = off.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D context unavailable.");
-  ctx.drawImage(el, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-  return off.toDataURL("image/png");
-}
-
-// Renders `sourceUrl` onto an offscreen canvas rotated/flipped by exactly
-// this one increment (dimensions swapped for a 90/270 rotation), and
-// returns the result as a data URL -- same "flatten a transform into a new
-// image, then setElement() the base photo to it" technique already used by
-// Remove Background (handleRemoveBackground below), just for rotate/flip
-// instead of a chroma-key cutout.
-function getTransformedImageUrl(
-  sourceUrl: string,
-  transform: { rotation: 0 | 90 | 180 | 270; flipX: boolean; flipY: boolean },
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new window.Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const swapped = transform.rotation === 90 || transform.rotation === 270;
-      const w = swapped ? img.naturalHeight : img.naturalWidth;
-      const h = swapped ? img.naturalWidth : img.naturalHeight;
-      const off = document.createElement("canvas");
-      off.width = w || 1;
-      off.height = h || 1;
-      const ctx = off.getContext("2d");
-      if (!ctx) {
-        reject(new Error("Canvas 2D context unavailable."));
-        return;
-      }
-      ctx.translate(w / 2, h / 2);
-      ctx.rotate((transform.rotation * Math.PI) / 180);
-      ctx.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
-      ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-      resolve(off.toDataURL("image/png"));
-    };
-    img.onerror = () => reject(new Error("Couldn't load the image to rotate/flip it."));
-    img.src = sourceUrl;
-  });
+  ctx.translate(outW / 2, outH / 2);
+  ctx.rotate((transform.rotation * Math.PI) / 180);
+  ctx.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
+  ctx.drawImage(el, cropX, cropY, cropW, cropH, -cropW / 2, -cropH / 2, cropW, cropH);
+  return off.toDataURL("image/jpeg", 0.97);
 }
 
 export type AnnotationSaveAction = (
@@ -255,6 +244,17 @@ export function AnnotationEditor({
   // not just right after "Add Text", so re-selecting an existing text
   // object to restyle it also works.
   const [selectedText, setSelectedText] = useState<fabric.IText | null>(null);
+  // Distinguishes "this text object is selected, show move/resize/rotate
+  // handles" from "the caret is live, I'm typing" -- the two states the
+  // text toolbar needs to look and behave differently for (see the
+  // text:editing:entered/exited listeners below). Fabric's own default way
+  // to reach editing is a double-click/double-tap, which is exactly the
+  // kind of gesture that's unreliable on a touch device (needs two taps
+  // inside a short, easy-to-miss time window, and competes with the
+  // browser's own tap-zoom/selection heuristics) -- the "Edit Text"/"Done"
+  // buttons below (driven by this state) give an explicit, always-hittable
+  // way to cross that boundary instead of relying on it.
+  const [textEditing, setTextEditing] = useState(false);
   // Any FabricImage the user can select is one they added via "Add Logo /
   // Image" -- the canvas's own background image is set non-selectable/
   // non-evented (see the initial-load effect below), so it can never be
@@ -326,6 +326,16 @@ export function AnnotationEditor({
   const [adjustments, setAdjustments] = useState<AdjustmentValues>(NEUTRAL_ADJUSTMENTS);
   const [rotatePanelOpen, setRotatePanelOpen] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [rotateError, setRotateError] = useState<string | undefined>();
+  // `rotating` state only reflects in props on the NEXT render, so a second
+  // rapid tap fired before that render (very plausible on a touch device --
+  // exactly the class of bug a fast, non-latent desktop test would never
+  // reproduce) could still slip past a disabled-button check alone and race
+  // a second applyBaseTransform call against the first, each reading/writing
+  // basePhoto at different points. This ref is set/cleared synchronously
+  // around the async work so a second call can bail out immediately,
+  // regardless of render timing.
+  const rotatingRef = useRef(false);
 
   // For video: a JPEG data URL of whatever frame the user picked (or, when
   // reopening an already-edited video, one captured silently for canvas-
@@ -500,6 +510,7 @@ export function AnnotationEditor({
       setSelectedText(null);
       setSelectedImage(null);
       setSelectedObject(null);
+      setTextEditing(false);
       setAdjustPanelOpen(false);
       setRotatePanelOpen(false);
 
@@ -756,7 +767,14 @@ export function AnnotationEditor({
       setSelectedText(null);
       setSelectedImage(null);
       setSelectedObject(null);
+      setTextEditing(false);
     });
+    // See textEditing's own comment -- these fire regardless of whether
+    // editing was entered via the "Edit Text" button, a real double-click/
+    // double-tap, or activateTool's "Add Text" branch, so all three paths
+    // stay in sync with the same two-state toolbar.
+    canvas.on("text:editing:entered", () => setTextEditing(true));
+    canvas.on("text:editing:exited", () => setTextEditing(false));
     }
 
     return () => {
@@ -911,7 +929,7 @@ export function AnnotationEditor({
   // frame the CANVAS itself would need to resize to the newly-rotated
   // image's own orientation, a materially bigger change than this.
   //
-  // Always transforms getVisibleCropDataUrl's flattened output -- exactly
+  // Always transforms getRotatedCropDataUrl's flattened output -- exactly
   // what's currently on screen, crop included -- not the pristine original.
   // Rotating now bakes the current crop into the new full underlying
   // element (cropX/Y reset to 0, width/height become the new full size),
@@ -922,11 +940,15 @@ export function AnnotationEditor({
     const canvas = fabricRef.current;
     const basePhoto = canvas ? findBasePhoto(canvas) : null;
     if (!canvas || !basePhoto || !targetAspect) return;
+    // See rotatingRef's declaration -- bails out synchronously on a rapid
+    // second tap instead of racing a second setElement() against this one.
+    if (rotatingRef.current) return;
 
+    rotatingRef.current = true;
     setRotating(true);
+    setRotateError(undefined);
     try {
-      const visibleUrl = getVisibleCropDataUrl(basePhoto);
-      const transformedUrl = await getTransformedImageUrl(visibleUrl, { rotation, flipX, flipY });
+      const transformedUrl = getRotatedCropDataUrl(basePhoto, { rotation, flipX, flipY });
       const img = await new Promise<HTMLImageElement>((resolve, reject) => {
         const el = new window.Image();
         el.onload = () => resolve(el);
@@ -960,17 +982,30 @@ export function AnnotationEditor({
       canvas.fire("object:modified", { target: basePhoto });
       setCropZoom(1);
       setCropOffset({ x: 0, y: 0 });
+    } catch (error) {
+      // Previously uncaught -- any failure here (a CORS-tainted canvas
+      // throwing SecurityError on toDataURL, same real failure mode already
+      // handled in handleSave; a decode error; anything else) was silently
+      // swallowed, so on a real device this looked exactly like "I tap
+      // Rotate and nothing happens" with zero feedback.
+      console.error("Failed to rotate/flip image:", error);
+      setRotateError(
+        error instanceof DOMException && error.name === "SecurityError"
+          ? "Couldn't rotate -- this image failed to load securely."
+          : "Couldn't rotate the image. Try again.",
+      );
     } finally {
+      rotatingRef.current = false;
       setRotating(false);
     }
   }
 
   function rotateBasePhoto(deltaDegrees: 90 | -90) {
-    applyBaseTransform(deltaDegrees === 90 ? 90 : 270, false, false);
+    void applyBaseTransform(deltaDegrees === 90 ? 90 : 270, false, false);
   }
 
   function flipBasePhoto(axis: "horizontal" | "vertical") {
-    applyBaseTransform(0, axis === "horizontal", axis === "vertical");
+    void applyBaseTransform(0, axis === "horizontal", axis === "vertical");
   }
 
   // Mirrors Grid's crop math exactly (see grid-crop-overlay.tsx): the frame
@@ -1342,6 +1377,36 @@ export function AnnotationEditor({
     applyTextStyle({ textAlign: align });
   }
 
+  // Explicit entry into the "typing" state for an already-placed text
+  // object -- see textEditing's own comment for why this exists instead of
+  // relying on Fabric's default double-click/double-tap. Cursor lands at
+  // the end (not select-all -- that's specifically for the fresh "Text"
+  // placeholder in activateTool's "Add Text" branch) so re-editing existing
+  // custom content doesn't wipe it out the instant the keyboard opens.
+  function handleEditTextContent() {
+    withCanvas((canvas) => {
+      const active = canvas.getActiveObject();
+      if (!(active instanceof fabric.IText)) return;
+      active.enterEditing();
+      const end = active.text.length;
+      active.setSelectionStart(end);
+      active.setSelectionEnd(end);
+      canvas.requestRenderAll();
+    });
+  }
+
+  // Explicit exit back to the "move/resize/rotate" state -- the object
+  // stays selected (exitEditing doesn't deselect it), just with its normal
+  // transform handles active again instead of a live caret.
+  function handleFinishTextEditing() {
+    withCanvas((canvas) => {
+      const active = canvas.getActiveObject();
+      if (!(active instanceof fabric.IText) || !active.isEditing) return;
+      active.exitEditing();
+      canvas.requestRenderAll();
+    });
+  }
+
   // Live preview only -- does NOT push undo history (a slider drag can fire
   // this dozens of times), see commitAdjustments below for that.
   function handleAdjustmentInput(key: keyof AdjustmentValues, value: number) {
@@ -1586,22 +1651,29 @@ export function AnnotationEditor({
 
       <div className="flex flex-1 flex-col overflow-hidden">
       {rotatePanelOpen && ready && targetAspect && (
-        <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
-          <div className="flex items-center gap-1">
-            <IconToolButton onClick={() => rotateBasePhoto(-90)} label="Rotate left">
-              <RotateIcon direction="left" />
-            </IconToolButton>
-            <IconToolButton onClick={() => rotateBasePhoto(90)} label="Rotate right">
-              <RotateIcon direction="right" />
-            </IconToolButton>
-            <IconToolButton onClick={() => flipBasePhoto("horizontal")} label="Flip horizontal">
-              <FlipIcon axis="horizontal" />
-            </IconToolButton>
-            <IconToolButton onClick={() => flipBasePhoto("vertical")} label="Flip vertical">
-              <FlipIcon axis="vertical" />
-            </IconToolButton>
+        <div className="flex flex-col items-center gap-1 pb-2">
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <div className="flex items-center gap-1">
+              <IconToolButton onClick={() => rotateBasePhoto(-90)} label="Rotate left" disabled={rotating}>
+                <RotateIcon direction="left" />
+              </IconToolButton>
+              <IconToolButton onClick={() => rotateBasePhoto(90)} label="Rotate right" disabled={rotating}>
+                <RotateIcon direction="right" />
+              </IconToolButton>
+              <IconToolButton
+                onClick={() => flipBasePhoto("horizontal")}
+                label="Flip horizontal"
+                disabled={rotating}
+              >
+                <FlipIcon axis="horizontal" />
+              </IconToolButton>
+              <IconToolButton onClick={() => flipBasePhoto("vertical")} label="Flip vertical" disabled={rotating}>
+                <FlipIcon axis="vertical" />
+              </IconToolButton>
+            </div>
+            {rotating && <span className="text-xs text-muted">Rotating…</span>}
           </div>
-          {rotating && <span className="text-xs text-muted">Rotating…</span>}
+          {rotateError && <p className="text-xs text-error">{rotateError}</p>}
         </div>
       )}
       {tool === "draw" && (
@@ -1681,6 +1753,19 @@ export function AnnotationEditor({
 
       {selectedText && (
         <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
+          {/* The explicit editing<->manipulation boundary -- see
+              textEditing's own comment. Placed first/prominent so it reads
+              as the primary action for a selected text object, not one
+              option among the styling controls. */}
+          {textEditing ? (
+            <Button type="button" variant="primary" radius="full" onClick={handleFinishTextEditing}>
+              Done editing
+            </Button>
+          ) : (
+            <Button type="button" variant="secondary" radius="full" onClick={handleEditTextContent}>
+              Edit text
+            </Button>
+          )}
           <ColorPicker value={textColor} onChange={handleTextColorChange} />
           <div className="flex items-center gap-1">
             <button
@@ -2086,9 +2171,33 @@ function AnnotationCropOverlay({
   onOffsetChange: (offset: { x: number; y: number }) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const panRef = useRef<{ startX: number; startY: number; startOffset: { x: number; y: number } } | null>(
-    null,
-  );
+  // Tracks every currently-down pointer on the pan/pinch image by id, not
+  // just the most recent one. The original code kept a single shared
+  // panRef -- fine for a mouse (exactly one pointer, ever) but on a real
+  // touch device the natural gesture to zoom a crop frame is a two-finger
+  // pinch, and a pinch starts as two SIMULTANEOUS pointerdowns on this same
+  // <img>. With only one shared ref, the second finger's pointerdown
+  // silently overwrote the first finger's start position, and both
+  // fingers' subsequent moves fed the same single-pointer pan math --
+  // producing exactly the erratic, "doesn't feel reliable" jumpiness a
+  // fast isolated single-pointer test (mouse, or one synthetic touch)
+  // would never surface. This also means pinch-to-zoom never actually
+  // existed on touch at all -- the only way to zoom was dragging one of
+  // the tiny corner handles (handleCornerPointerDown/Move/Up below, left
+  // untouched here since it's the desktop-mouse path and already works).
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureRef = useRef<{
+    mode: "pan" | "pinch";
+    startOffset: { x: number; y: number };
+    startZoom: number;
+    startX: number;
+    startY: number;
+    startDist: number;
+    startMidX: number;
+    startMidY: number;
+  } | null>(null);
+  // Desktop-mouse-only zoom path (drag a corner handle away from center) --
+  // unrelated to activePointersRef/gestureRef above, left exactly as it was.
   const handleDragRef = useRef<{
     startDist: number;
     startZoom: number;
@@ -2107,25 +2216,96 @@ function AnnotationCropOverlay({
     e.preventDefault();
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
-    panRef.current = { startX: e.clientX, startY: e.clientY, startOffset: offset };
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activePointersRef.current.size === 1) {
+      gestureRef.current = {
+        mode: "pan",
+        startOffset: offset,
+        startZoom: zoom,
+        startX: e.clientX,
+        startY: e.clientY,
+        startDist: 0,
+        startMidX: 0,
+        startMidY: 0,
+      };
+    } else if (activePointersRef.current.size === 2) {
+      const [p1, p2] = [...activePointersRef.current.values()];
+      gestureRef.current = {
+        mode: "pinch",
+        startOffset: offset,
+        startZoom: zoom,
+        startX: 0,
+        startY: 0,
+        startDist: Math.hypot(p1.x - p2.x, p1.y - p2.y),
+        startMidX: (p1.x + p2.x) / 2,
+        startMidY: (p1.y + p2.y) / 2,
+      };
+    }
+    // A third+ simultaneous pointer is tracked (so its later pointerup is
+    // accounted for) but doesn't change the active gesture -- pinch stays
+    // anchored to whichever two pointers started it.
   }
 
   function handleImagePointerMove(e: React.PointerEvent<HTMLImageElement>) {
-    if (!panRef.current || !containerRef.current) return;
+    if (!activePointersRef.current.has(e.pointerId) || !containerRef.current || !gestureRef.current) return;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const rect = containerRef.current.getBoundingClientRect();
-    const dxFrac = (e.clientX - panRef.current.startX) / rect.width;
-    const dyFrac = (e.clientY - panRef.current.startY) / rect.height;
-    onOffsetChange(
-      clampOffset(
-        { x: panRef.current.startOffset.x + dxFrac, y: panRef.current.startOffset.y + dyFrac },
-        zoom,
-      ),
-    );
+    const gesture = gestureRef.current;
+
+    if (gesture.mode === "pan" && activePointersRef.current.size === 1) {
+      const dxFrac = (e.clientX - gesture.startX) / rect.width;
+      const dyFrac = (e.clientY - gesture.startY) / rect.height;
+      onOffsetChange(
+        clampOffset({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, zoom),
+      );
+    } else if (gesture.mode === "pinch" && activePointersRef.current.size === 2) {
+      const [p1, p2] = [...activePointersRef.current.values()];
+      const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+      const midX = (p1.x + p2.x) / 2;
+      const midY = (p1.y + p2.y) / 2;
+      const ratio = gesture.startDist > 0 ? dist / gesture.startDist : 1;
+      const nextZoom = clamp(gesture.startZoom * ratio, CROP_MIN_ZOOM, CROP_MAX_ZOOM);
+      // Pans by the midpoint's own drift too, not just zooming in place --
+      // matches how pinch-zoom behaves everywhere else on a phone (the
+      // point between your fingers stays under your fingers).
+      const dxFrac = (midX - gesture.startMidX) / rect.width;
+      const dyFrac = (midY - gesture.startMidY) / rect.height;
+      onZoomChange(nextZoom);
+      onOffsetChange(
+        clampOffset({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, nextZoom),
+      );
+    }
   }
 
   function handleImagePointerUp(e: React.PointerEvent<HTMLImageElement>) {
-    if (panRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
-    panRef.current = null;
+    if (activePointersRef.current.has(e.pointerId)) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Already released/gone (e.g. a pointercancel already fired) --
+        // nothing left to release.
+      }
+    }
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size === 1) {
+      // Lifting one finger out of a pinch drops straight back to a single-
+      // finger pan, anchored fresh from the CURRENT (post-pinch) offset/
+      // zoom and the still-down finger's last known position -- not the
+      // pinch's original start -- so there's no jump/snap at the handoff.
+      const [[, pt]] = activePointersRef.current;
+      gestureRef.current = {
+        mode: "pan",
+        startOffset: offset,
+        startZoom: zoom,
+        startX: pt.x,
+        startY: pt.y,
+        startDist: 0,
+        startMidX: 0,
+        startMidY: 0,
+      };
+    } else if (activePointersRef.current.size === 0) {
+      gestureRef.current = null;
+    }
   }
 
   function handleCornerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
@@ -2153,7 +2333,13 @@ function AnnotationCropOverlay({
   }
 
   function handleCornerPointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (handleDragRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (handleDragRef.current) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Already released/gone (e.g. a pointercancel already fired).
+      }
+    }
     handleDragRef.current = null;
   }
 
@@ -2173,6 +2359,7 @@ function AnnotationCropOverlay({
         onPointerDown={handleImagePointerDown}
         onPointerMove={handleImagePointerMove}
         onPointerUp={handleImagePointerUp}
+        onPointerCancel={handleImagePointerUp}
         className="absolute inset-0 h-full w-full cursor-move touch-none object-cover opacity-40"
         style={imageStyle}
       />
@@ -2186,6 +2373,7 @@ function AnnotationCropOverlay({
           onPointerDown={handleImagePointerDown}
           onPointerMove={handleImagePointerMove}
           onPointerUp={handleImagePointerUp}
+          onPointerCancel={handleImagePointerUp}
           className="absolute inset-0 h-full w-full cursor-move touch-none object-cover"
           style={imageStyle}
         />
@@ -2198,6 +2386,7 @@ function AnnotationCropOverlay({
           onPointerDown={handleCornerPointerDown}
           onPointerMove={handleCornerPointerMove}
           onPointerUp={handleCornerPointerUp}
+          onPointerCancel={handleCornerPointerUp}
         />
       ))}
     </div>
@@ -2209,11 +2398,13 @@ function CropCornerHandle({
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  onPointerCancel,
 }: {
   corner: "tl" | "tr" | "bl" | "br";
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerUp: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerCancel: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
   const isTop = corner.startsWith("t");
   const isLeft = corner.endsWith("l");
@@ -2222,6 +2413,7 @@ function CropCornerHandle({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       className={`absolute z-10 flex h-9 w-9 touch-none items-center justify-center ${
         isTop && isLeft ? "cursor-nwse-resize" : ""
       } ${isTop && !isLeft ? "cursor-nesw-resize" : ""} ${!isTop && isLeft ? "cursor-nesw-resize" : ""} ${
@@ -2325,10 +2517,12 @@ function AdjustmentSlider({
 function IconToolButton({
   onClick,
   label,
+  disabled,
   children,
 }: {
   onClick: () => void;
   label: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -2336,6 +2530,7 @@ function IconToolButton({
       type="button"
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
+      disabled={disabled}
       title={label}
       aria-label={label}
       // p-3.5 (was p-1.5) -- these 14px icons (Rotate/Flip/Align/Arrange)
@@ -2343,7 +2538,7 @@ function IconToolButton({
       // target; this brings it to ~42px without enlarging the icon itself,
       // same "grow the invisible hit area, not the visual size" approach
       // as FabricObject.ownDefaults.touchCornerSize above.
-      className="flex items-center justify-center rounded p-3.5 text-foreground transition-colors duration-150 hover:bg-black/[.05]"
+      className="flex items-center justify-center rounded p-3.5 text-foreground transition-colors duration-150 hover:bg-black/[.05] disabled:pointer-events-none disabled:opacity-40"
     >
       {children}
     </button>
