@@ -512,11 +512,22 @@ function AddFromLibrarySection({
       {/* Capped to roughly 9 rows on the full page, bounded by viewport
           height too so it doesn't grow unboundedly with a project's full
           media library. Inside the Grid/Stories popup (hideBackLink) the
-          modal itself is already space-constrained, so cap to a single
-          visible row there instead -- scrolls internally either way. */}
+          modal itself is already space-constrained, so cap to about two
+          rows there instead -- scrolls internally either way.
+          grid-cols-3 (mobile) vs sm:grid-cols-6 (unchanged, tablet/desktop
+          -- "desktop can remain as it is") -- 4 columns in a ~310px-wide
+          popup on a real phone worked out to ~65-70px tiles, too small to
+          read the actual photo at a glance; 3 columns gives ~100px tiles,
+          the difference between "recognizable" and "not." aspect-square
+          (mobile) vs sm:aspect-[3/4] (unchanged desktop) for the same
+          reason on the other axis -- object-cover into a TALL 3:4 box
+          crops a wide landscape photo down to a narrow vertical sliver of
+          it; square crops less aggressively for mixed portrait/landscape
+          library content while still reading fine for portrait/square
+          sources. */}
       <div
-        className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
-          hideBackLink ? "max-h-48" : "max-h-[min(1000px,65vh)]"
+        className={`grid grid-cols-3 gap-2 overflow-y-auto sm:grid-cols-6 ${
+          hideBackLink ? "max-h-64 sm:max-h-48" : "max-h-[min(1000px,65vh)]"
         }`}
       >
         {availableMedia.map((item) => (
@@ -524,7 +535,7 @@ function AddFromLibrarySection({
             key={item.id}
             type="button"
             onClick={() => onAdd(item)}
-            className="relative aspect-[3/4] min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
+            className="relative aspect-square min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4]"
           >
             {item.url && item.mediaType === "image" && (
               // eslint-disable-next-line @next/next/no-img-element
