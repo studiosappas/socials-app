@@ -514,25 +514,29 @@ function AddFromLibrarySection({
           media library. Inside the Grid/Stories popup (hideBackLink) the
           modal itself is already space-constrained, so cap to about two
           rows there instead -- scrolls internally either way.
-          grid-cols-2 (mobile) vs sm:grid-cols-6 (unchanged, tablet/desktop
-          -- "desktop can remain as it is") -- measured against the REAL
-          rendered PostEditor component (not a hand-copied approximation) at
-          320/375/390/414px: 2 columns puts tiles at 107-154px, comfortably
-          "recognizable at a glance." (An earlier pass landed on
-          grid-cols-3 here -- 82-113px -- verified only against a
-          hand-copied test replica, which was still too small and never
-          actually got corrected in this file; that mismatch is exactly why
-          this round re-verified against the real exported PostEditor
-          component instead.)
-          object-contain (mobile) vs sm:object-cover (unchanged desktop) --
-          this is an asset-IDENTIFICATION picker, not a preview of what will
-          actually crop into the feed (that's Grid's own tile, untouched);
-          object-cover into ANY fixed box still crops a very wide/tall
-          source down to a sliver of itself regardless of the box's own
-          aspect ratio, which contain can't do -- the whole photo is always
-          visible, letterboxed on a neutral fill instead. */}
+          grid-cols-4 (mobile) vs sm:grid-cols-6 (unchanged -- desktop
+          stays exactly as it was), and -- the actual fix this round --
+          auto-rows-[70px] (mobile only, i.e. grid-auto-rows:70px) instead
+          of leaving row height
+          to `auto` + each tile's own aspect-ratio. Column width from a 1fr
+          grid track is always robust (pure container-driven math, no
+          dependency on any child), but row height from `grid-auto-rows:
+          auto` + a child's `aspect-ratio` depends on the grid correctly
+          computing that child's intrinsic size -- which on a real device,
+          under real asynchronously-arriving network images (not the
+          instant data-URI test images this was previously verified
+          against), could compute wrong/zero and collapse the row, with
+          neighboring rows then rendering on top of each other -- exactly
+          "one tile showing several horizontal strips." An explicit
+          grid-auto-rows height has zero dependency on any child's content
+          or intrinsic size at all, so this entire failure class can't
+          happen regardless of image load timing/format/engine quirks.
+          Each button now simply stretches to fill its cell (both axes
+          already fixed by the grid tracks), so no per-item aspect-ratio
+          is needed on mobile at all -- sm:aspect-[3/4] still sets it for
+          desktop, unaffected by any of this. */}
       <div
-        className={`grid grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-6 ${
+        className={`grid grid-cols-4 auto-rows-[70px] gap-2 overflow-y-auto sm:grid-cols-6 sm:auto-rows-auto ${
           hideBackLink ? "max-h-80 sm:max-h-48" : "max-h-[min(1000px,65vh)]"
         }`}
       >
@@ -541,11 +545,11 @@ function AddFromLibrarySection({
             key={item.id}
             type="button"
             onClick={() => onAdd(item)}
-            className="relative aspect-square min-w-0 overflow-hidden rounded-none border border-border bg-black/[.04] transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4] sm:bg-transparent"
+            className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4]"
           >
             {item.url && item.mediaType === "image" && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.url} alt="" className="h-full w-full object-contain sm:object-cover" />
+              <img src={item.url} alt="" className="h-full w-full object-cover" />
             )}
             {item.url && item.mediaType === "video" && (
               // preload="metadata" -- mobile browsers commonly default video
@@ -555,7 +559,7 @@ function AddFromLibrarySection({
               // native fullscreen playback chrome for it.
               <video
                 src={item.url}
-                className="h-full w-full object-contain sm:object-cover"
+                className="h-full w-full object-cover"
                 muted
                 playsInline
                 preload="metadata"
