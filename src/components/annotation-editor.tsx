@@ -95,6 +95,16 @@ type Tool = "select" | "draw" | "text" | "arrow" | "crop";
 // property here -- see fabric's own FabricObject.customProperties.
 const BASE_PHOTO_ROLE = "basePhoto";
 fabric.FabricObject.customProperties = ["appRole"];
+// touchCornerSize is Fabric's own (already-existing, already-larger-than-
+// cornerSize) invisible hit-area for the resize/rotate corner handles --
+// confirmed live that FabricObject.ownDefaults IS the same object every
+// interactive subclass (IText, FabricImage, etc.) reads its defaults from,
+// so this one assignment reaches every object type. Left at Fabric's
+// default (24) it's still meaningfully smaller than a comfortable finger
+// target; bumped up here without touching cornerSize (13, unchanged) so
+// the handles themselves stay visually identical -- only the invisible
+// region a touch needs to land in to grab one gets bigger.
+fabric.FabricObject.ownDefaults.touchCornerSize = 44;
 
 type TaggableObject = fabric.FabricObject & { appRole?: string };
 function tagAsBasePhoto(obj: fabric.FabricObject) {
@@ -784,6 +794,33 @@ export function AnnotationEditor({
     if (canvas) setCanvasResolution({ width: canvas.getWidth(), height: canvas.getHeight() });
   }, [ready]);
 
+  // Measures the crop frame ONLY after the crop-mode layout (the Apply/
+  // Cancel button row above the canvas, which activateTool's own
+  // state-batch also triggers) has actually painted -- a plain
+  // getBoundingClientRect() inside activateTool itself reads the canvas's
+  // box from BEFORE that row exists, which is taller than the canvas's
+  // real box once it does, silently sizing/positioning the crop overlay
+  // against a stale frame. Double rAF (not a single one, and not just
+  // this effect's own commit) because the button row's own layout only
+  // settles on the frame AFTER this render commits -- one rAF can still
+  // land before the browser has actually laid out and painted that new
+  // row, especially on a slower mobile device.
+  useEffect(() => {
+    if (!cropping) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const rect = canvasElRef.current?.getBoundingClientRect();
+        setCropFrameSize(rect ? { width: rect.width, height: rect.height } : null);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [cropping]);
+
   function withCanvas(fn: (canvas: fabric.Canvas) => void) {
     const canvas = fabricRef.current;
     if (!canvas) return;
@@ -816,6 +853,12 @@ export function AnnotationEditor({
         canvas.add(text);
         canvas.setActiveObject(text);
         text.enterEditing();
+        // Selects the placeholder "Text" the instant editing starts, so
+        // the first character typed (mobile keyboard or otherwise)
+        // replaces it outright instead of the user having to manually
+        // select-all or backspace it away first.
+        text.selectAll();
+        canvas.requestRenderAll();
         setTool("select");
         canvas.isDrawingMode = false;
       }
@@ -845,8 +888,14 @@ export function AnnotationEditor({
         setTool("select");
       }
       if (next === "crop") {
-        const rect = canvasElRef.current?.getBoundingClientRect();
-        setCropFrameSize(rect ? { width: rect.width, height: rect.height } : null);
+        // cropFrameSize itself is measured in the effect below, not here --
+        // this fires inside the same state batch that flips `cropping` to
+        // true, which is what makes the Apply/Cancel button row appear
+        // above the canvas. React hasn't painted that layout change yet at
+        // this point, so a getBoundingClientRect() read here would capture
+        // the canvas's PRE-crop-mode box -- taller than its actual size
+        // once the button row has taken its own space -- and the crop
+        // overlay would then be sized/positioned against a stale frame.
         setCropZoom(1);
         setCropOffset({ x: 0, y: 0 });
         const basePhoto = findBasePhoto(canvas);
@@ -1452,6 +1501,20 @@ export function AnnotationEditor({
         </div>
       ) : (
         <>
+      {/* flex-col (mobile) vs sm:flex-row (unchanged desktop) -- this is
+          the actual fix for "Adjust covers the image." Adjust used to be
+          a direct sibling of the sidebar+center block below, both laid
+          out in a single ALWAYS-horizontal row -- on a real phone that
+          meant a ~176px fixed-width side column permanently eating into
+          the ~300px or so left for everything else (left icon rail
+          included), squeezing the canvas down to a sliver rather than
+          actually reserving its own space. Below sm:, this wrapper
+          stacks its two children instead: the sidebar+center block (its
+          own always-horizontal row, unchanged) on top, Adjust as a
+          full-width panel below it -- see Adjust's own block further
+          down for the rest of this. At sm: and up this reverts to a
+          row, reproducing today's exact side-by-side desktop layout. */}
+      <div className="flex flex-1 flex-col overflow-hidden sm:flex-row">
       <div className="flex flex-1 overflow-hidden">
       {/* LEFT: every tool-switching button in one minimal vertical rail
           (icon + short label) -- replaces what used to be a horizontal row
@@ -1738,14 +1801,31 @@ export function AnnotationEditor({
               upper-canvas construction-time staleness bug documented above. */}
           <canvas
             // Keyed on canvasNonce, same reasoning as the wrapper div above.
-            key={canvasNonce}
+            // className/style here are STATIC (never toggled by `cropping`
+            // or anything else) -- see the comment above this element about
+            // why: Fabric clones this element's className into its own
+            // internally-created "upper-canvas" once, at construction time,
+            // not reactively. A `cropping`-conditional "invisible" class
+            // used to live here, which correctly hid the React-owned
+            // canvas but left Fabric's own upper-canvas (cloned from the
+            // ORIGINAL, pre-toggle className) fully visible and, critically,
+            // still receiving every pointer event in that screen region --
+            // sitting on top of the crop overlay below and intercepting an
+            // unpredictable subset of its drag/corner-handle touches. The
+            // crop overlay's own opaque image (bg-background wrapper,
+            // full-frame-coverage clipped copy) already visually replaces
+            // what the canvas shows during crop, so hiding the canvas
+            // itself was never actually necessary.
             ref={canvasElRef}
-            className={cropping ? "invisible" : ""}
-            style={{ maxWidth: "100%", maxHeight: "100%", height: "auto" }}
+            style={{ maxWidth: "100%", maxHeight: "100%", height: "auto", touchAction: "none" }}
           />
           {cropping && cropSourceUrl && cropFrameSize && (
             <div
-              className="absolute"
+              // bg-background -- opaque, so this fully visually replaces
+              // the (now always-visible) canvas underneath it; see the
+              // canvas element's own comment above for why it's no longer
+              // hidden via a className toggle.
+              className="absolute z-10 bg-background"
               style={{
                 top: "50%",
                 left: "50%",
@@ -1806,9 +1886,21 @@ export function AnnotationEditor({
         </div>
       </div>
       </div>
+      </div>
 
       {adjustPanelOpen && ready && (
-        <div className="flex w-44 shrink-0 flex-col gap-3 overflow-y-auto border-l border-border px-3 py-4 sm:w-60 sm:px-4">
+        // w-full + a capped height + its own scroll (mobile) vs the
+        // original sm:w-60 fixed-width side column (unchanged desktop).
+        // The canvas doesn't need any JS-driven resize to make room for
+        // this -- it already renders via maxWidth/maxHeight:100% (see the
+        // <canvas> element's own style above), so when this panel takes
+        // its own real space in the now-column layout, the canvas's
+        // flex-1 area simply shrinks and the canvas scales itself down to
+        // match, same as it already does for any other viewport
+        // constraint. max-h-[38vh] leaves the majority of a typical
+        // phone's viewport for the canvas above it; sm:max-h-none reverts
+        // to the unconstrained side-column height.
+        <div className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto border-t border-border px-3 py-4 max-h-[38vh] sm:w-60 sm:max-h-none sm:border-t-0 sm:border-l sm:px-4">
           <div className="flex items-center justify-between">
             <span className="text-xs tracking-wide text-muted uppercase">Adjustments</span>
             <button
@@ -2246,7 +2338,12 @@ function IconToolButton({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="flex items-center justify-center rounded p-1.5 text-foreground transition-colors duration-150 hover:bg-black/[.05]"
+      // p-3.5 (was p-1.5) -- these 14px icons (Rotate/Flip/Align/Arrange)
+      // had only a ~26px tap target, well under a comfortable finger
+      // target; this brings it to ~42px without enlarging the icon itself,
+      // same "grow the invisible hit area, not the visual size" approach
+      // as FabricObject.ownDefaults.touchCornerSize above.
+      className="flex items-center justify-center rounded p-3.5 text-foreground transition-colors duration-150 hover:bg-black/[.05]"
     >
       {children}
     </button>
