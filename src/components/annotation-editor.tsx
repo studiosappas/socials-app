@@ -17,6 +17,13 @@ const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
 const CROP_MIN_ZOOM = 1;
 const CROP_MAX_ZOOM = 4;
+// The crop overlay is now always mounted (see its own render-site comment)
+// even before cropSourceUrl exists -- a real, valid src is still required,
+// and an empty string one triggers a React/browser warning about
+// potentially refetching the whole page. A 1x1 transparent gif is a
+// harmless placeholder that's never actually visible (the overlay is
+// display:none until cropSourceUrl is set).
+const EMPTY_IMAGE_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 // Minimum export pixel width for every targetAspect-locked frame (cover
 // 1080x1350, carousel slide 1080x1440) -- the height follows from
 // targetAspect itself, so only the width needs to be a shared constant.
@@ -105,6 +112,22 @@ fabric.FabricObject.customProperties = ["appRole"];
 // the handles themselves stay visually identical -- only the invisible
 // region a touch needs to land in to grab one gets bigger.
 fabric.FabricObject.ownDefaults.touchCornerSize = 44;
+// touchCornerSize (above) only widens the invisible hit-area for the
+// resize/rotate CORNER controls -- grabbing an object anywhere on its own
+// BODY to drag/move it is a completely separate hit-test
+// (_pointIsInObjectSelectionArea in fabric's own SelectableCanvas, which
+// expands the object's coords outward by exactly `padding` on every side
+// before checking whether a pointer landed inside). Left at fabric's
+// default of 0, a short/small text object (the common case here -- a
+// single line at a modest font size) has a genuinely tiny drag target:
+// only the tight pixel box around the glyphs themselves counts as "on the
+// object," well under a finger's actual contact area, so a real touch
+// drag started a few pixels off (very easy on a phone) grabs nothing and
+// silently does nothing instead of moving the object -- this is what made
+// text "not practically movable" specifically on touch, independent of
+// the corner-control fix above. Same ownDefaults object every interactive
+// subclass reads from, so this one assignment covers every object type.
+fabric.FabricObject.ownDefaults.padding = 20;
 
 type TaggableObject = fabric.FabricObject & { appRole?: string };
 function tagAsBasePhoto(obj: fabric.FabricObject) {
@@ -232,6 +255,12 @@ export function AnnotationEditor({
   // cover) never constructs on top of a still-in-flight disposal. See that
   // effect for the crash this prevents.
   const disposePromiseRef = useRef<Promise<boolean> | null>(null);
+  // See handleAdjustmentInput below -- coalesces rapid slider ticks so the
+  // expensive full-resolution filter pass runs at most once per animation
+  // frame instead of once per native 'input' event (which fires far more
+  // often than the screen can even repaint during a fast drag).
+  const pendingAdjustmentsRef = useRef<AdjustmentValues | null>(null);
+  const adjustmentRafRef = useRef<number | null>(null);
 
   const [tool, setTool] = useState<Tool>("select");
   const [saving, setSaving] = useState(false);
@@ -783,6 +812,11 @@ export function AnnotationEditor({
         disposePromiseRef.current = canvas.dispose();
       }
       fabricRef.current = null;
+      if (adjustmentRafRef.current !== null) {
+        cancelAnimationFrame(adjustmentRafRef.current);
+        adjustmentRafRef.current = null;
+      }
+      pendingAdjustmentsRef.current = null;
     };
     // canvasNonce is a real dependency, not just a React key: the "reset
     // picker state" effect above bumps it on every open (for every media
@@ -847,6 +881,20 @@ export function AnnotationEditor({
 
   function activateTool(next: Tool) {
     withCanvas((canvas) => {
+      // Rotate/Flip (applyBaseTransform) resets the base photo's element
+      // AND its crop window (cropX/Y reset to 0, width/height to the new
+      // full size -- see applyBaseTransform) -- entirely disjoint from
+      // whatever cropSourceUrl/cropZoom/cropOffset the crop overlay is
+      // mid-gesture with, or from the base photo any other tool is about
+      // to act on. Nothing previously stopped the Rotate panel from
+      // staying open (or being opened) while another tool was also active,
+      // so a rotate fired mid-crop-gesture left the crop overlay showing
+      // a stale image at a stale zoom/pan while Apply would have read the
+      // ALREADY-rotated element underneath it -- a real "what I see isn't
+      // what gets applied" case, not just visual clutter. Closing it here
+      // makes Rotate and every other tool mutually exclusive, same as
+      // Crop/Draw/Text/Arrow already are via `tool`.
+      setRotatePanelOpen(false);
       setCropping(next === "crop");
       setTool(next);
       canvas.isDrawingMode = next === "draw";
@@ -920,6 +968,22 @@ export function AnnotationEditor({
         setCropSourceUrl(basePhoto ? (basePhoto.getElement() as HTMLImageElement).src : null);
       }
     });
+  }
+
+  // The Rotate sidebar button used to just toggle rotatePanelOpen directly
+  // -- see activateTool's own comment on why that let Rotate stay open (or
+  // be opened) alongside an in-progress Crop gesture. Routes through
+  // activateTool("select") first so opening Rotate always cleanly exits
+  // whatever else was active (discarding any uncommitted crop pan/zoom,
+  // same as tapping "Cancel crop" would). Reads the CURRENT rotatePanelOpen
+  // before that reset (which itself closes it) rather than chaining a
+  // functional update after -- two setRotatePanelOpen calls in the same
+  // batch would otherwise compose against each other, not against the
+  // pre-click value, turning "close" into "close then immediately reopen."
+  function toggleRotatePanel() {
+    const opening = !rotatePanelOpen;
+    activateTool("select");
+    if (opening) setRotatePanelOpen(true);
   }
 
   // Rotate/mirror the base photo itself -- never whatever's selected (text/
@@ -1032,7 +1096,12 @@ export function AnnotationEditor({
   async function handleApplyCrop() {
     const canvas = fabricRef.current;
     const basePhoto = canvas ? findBasePhoto(canvas) : null;
-    if (!canvas || !basePhoto) return;
+    if (!canvas || !basePhoto || !cropFrameSize) return;
+    // frameW/frameH (Fabric's INTERNAL canvas resolution, i.e. canvas
+    // units) are only used below for the final PLACEMENT onto the canvas
+    // -- scaleX/scaleY/left/top -- since that's the coordinate space Fabric
+    // actually renders in, independent of how big the canvas is drawn on
+    // screen.
     const frameW = canvas.getWidth();
     const frameH = canvas.getHeight();
 
@@ -1047,18 +1116,54 @@ export function AnnotationEditor({
     const freshImg = await fabric.FabricImage.fromURL(sourceUrl, { crossOrigin: "anonymous" });
     const naturalW = freshImg.width ?? frameW;
     const naturalH = freshImg.height ?? frameH;
-    // Same "cover" baseline as the initial image load: at zoom 1 the full
-    // image exactly fills the frame (cropping whichever axis overflows).
-    const coverScale = Math.max(frameW / naturalW, frameH / naturalH);
-    const cropW = clamp(frameW / (coverScale * cropZoom), 0, naturalW);
-    const cropH = clamp(frameH / (coverScale * cropZoom), 0, naturalH);
+    // THE ACTUAL BUG this fixes: the crop overlay the user drags/pinches is
+    // sized and CSS-`object-cover`-fit against cropFrameSize -- the
+    // canvas element's live CSS DISPLAY box (measured via
+    // getBoundingClientRect() when crop mode opens). That box is NOT
+    // guaranteed to equal canvas.getWidth()/getHeight() (Fabric's internal
+    // resolution) -- entering crop mode adds the Apply/Cancel button row
+    // above the canvas, which can shrink the canvas's available CSS height
+    // below its own intrinsic resolution on a real, viewport-constrained
+    // phone (this never reproduces on a spacious desktop test, or even a
+    // roomy mobile-emulated one). Computing "cover scale" from
+    // frameW/frameH here -- a DIFFERENT box than the one the overlay
+    // visually panned/zoomed against -- silently cropped a different
+    // window than what was shown, which is exactly the "Apply jumps to a
+    // different framing" bug. Using cropFrameSize here instead is the
+    // SAME number that already determines the overlay's own rendered
+    // size/scale (see its JSX below), so by construction there is no
+    // second, possibly-diverging "frame size" for this math to disagree
+    // with -- whatever box the user saw is exactly the box this crops
+    // against.
+    const coverScale = Math.max(cropFrameSize.width / naturalW, cropFrameSize.height / naturalH);
+    const cropW = clamp(cropFrameSize.width / (coverScale * cropZoom), 0, naturalW);
+    const cropH = clamp(cropFrameSize.height / (coverScale * cropZoom), 0, naturalH);
     // offset is a fraction of the FRAME (matching Grid's own drag-delta
     // convention), which is the same as a fraction of the crop window's
     // own natural size -- both are scaled by the same factor to fill the
     // frame, so a "one frame-width" drag is exactly "one crop-window-
     // width" in natural pixels, regardless of zoom.
-    const cropX = clamp((naturalW - cropW) / 2 + cropOffset.x * cropW, 0, naturalW - cropW);
-    const cropY = clamp((naturalH - cropH) / 2 + cropOffset.y * cropH, 0, naturalH - cropH);
+    //
+    // THE ACTUAL "Apply doesn't match the preview" BUG: this used to ADD
+    // cropOffset here, but the overlay's own gesture and the crop window
+    // it's supposed to describe move in OPPOSITE directions. The overlay
+    // pans by moving the IMAGE via `transform: translate(offset%, ...)` --
+    // dragging right increases offset.x, which slides the image content
+    // right on screen. But sliding the image right under a FIXED frame
+    // reveals content from further toward the image's LEFT (smaller
+    // natural-x), the same as sliding a photo right under a fixed peephole
+    // -- so the crop window's left edge should DECREASE as offset.x
+    // increases, not increase. Adding cropOffset here did the opposite:
+    // every pan moved the crop window the wrong way, and every pinch-zoom
+    // (which re-centers around the current offset, see
+    // AnnotationCropOverlay's pinch handler) compounded that same wrong-
+    // direction shift. Confirmed empirically -- extracting the source
+    // image at the ADDED-offset coordinates the old formula computed
+    // produced a visibly different, more-zoomed-out framing than what the
+    // overlay showed; extracting it at these SUBTRACTED-offset coordinates
+    // instead matches the overlay's preview.
+    const cropX = clamp((naturalW - cropW) / 2 - cropOffset.x * cropW, 0, naturalW - cropW);
+    const cropY = clamp((naturalH - cropH) / 2 - cropOffset.y * cropH, 0, naturalH - cropH);
 
     // The base photo is a regular (tagged) entry in json.objects now, not
     // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
@@ -1407,18 +1512,53 @@ export function AnnotationEditor({
     });
   }
 
+  // Actually runs the (expensive -- full native-resolution, multi-filter,
+  // pure-JS Canvas2D pixel pass, see applyAdjustments/image-adjustments.ts)
+  // filter application, at most once per animation frame -- see
+  // handleAdjustmentInput below for why this is split out.
+  function flushPendingAdjustments() {
+    adjustmentRafRef.current = null;
+    const next = pendingAdjustmentsRef.current;
+    if (!next) return;
+    pendingAdjustmentsRef.current = null;
+    withCanvas((canvas) => {
+      const basePhoto = findBasePhoto(canvas);
+      if (basePhoto) {
+        applyAdjustments(basePhoto, next);
+        canvas.requestRenderAll();
+      }
+    });
+  }
+
   // Live preview only -- does NOT push undo history (a slider drag can fire
   // this dozens of times), see commitAdjustments below for that.
+  //
+  // A native range input fires its 'input' event on every pixel of finger
+  // movement -- far more often than Fabric's filter pass can actually keep
+  // up with on a real phone (readAdjustments/applyFilters reprocesses the
+  // FULL native-resolution source through every active filter, in pure JS,
+  // on every single call -- see image-adjustments.ts). Calling that
+  // synchronously per tick queued up a growing backlog the main thread
+  // fell further behind on with every additional tick, which is what
+  // "adjustment changes have noticeable latency" actually was: not one
+  // slow render, but an ever-growing pile of stale-by-the-time-they-ran
+  // ones -- and, since that backlog occupies the main thread, it's also
+  // very likely why "Save Changes" appeared unresponsive immediately after
+  // using Adjust (its tap handler couldn't even run until the backlog
+  // drained). Only ever keeping the LATEST pending value and flushing at
+  // most once per rAF means a fast drag naturally sheds intermediate
+  // frames instead of queuing them -- the exact same
+  // full-resolution/full-quality computation, just never allowed to pile
+  // up. React state (`adjustments`) still updates on every tick so the
+  // slider/number label track the finger exactly; only the expensive
+  // canvas-side work is throttled.
   function handleAdjustmentInput(key: keyof AdjustmentValues, value: number) {
     setAdjustments((prev) => {
       const next = { ...prev, [key]: value };
-      withCanvas((canvas) => {
-        const basePhoto = findBasePhoto(canvas);
-        if (basePhoto) {
-          applyAdjustments(basePhoto, next);
-          canvas.requestRenderAll();
-        }
-      });
+      pendingAdjustmentsRef.current = next;
+      if (adjustmentRafRef.current === null) {
+        adjustmentRafRef.current = requestAnimationFrame(flushPendingAdjustments);
+      }
       return next;
     });
   }
@@ -1427,6 +1567,14 @@ export function AnnotationEditor({
   // once a slider is released -- that's what the history stack listens on,
   // so one undo step covers the whole gesture instead of every tick.
   function commitAdjustments() {
+    // A release can land between rAF ticks with a pending value still
+    // queued -- flush it synchronously first so the committed/undo-stack
+    // state is always the exact final value, never a stale in-between frame.
+    if (adjustmentRafRef.current !== null) {
+      cancelAnimationFrame(adjustmentRafRef.current);
+      adjustmentRafRef.current = null;
+    }
+    flushPendingAdjustments();
     withCanvas((canvas) => {
       const basePhoto = findBasePhoto(canvas);
       if (basePhoto) canvas.fire("object:modified", { target: basePhoto });
@@ -1475,16 +1623,46 @@ export function AnnotationEditor({
         targetAspect && basePhoto && basePhoto.scaleX
           ? Math.max(exportScaleRef.current, 1 / basePhoto.scaleX)
           : exportScaleRef.current;
-      const dataUrl = canvas.toDataURL({
+      // canvas.toBlob() (Fabric's own, not a native <canvas> method -- it
+      // still builds the same full-resolution temp canvas internally, see
+      // toCanvasElement) goes straight to a real Blob via the browser's
+      // native, off-main-thread-friendly HTMLCanvasElement.toBlob(). The
+      // previous toDataURL()+fetch() pattern built a base64 STRING (~33%
+      // larger than the raw bytes) of the full-resolution export, held it
+      // entirely in memory, then had fetch() parse that whole string back
+      // into a second, separate binary buffer to produce the Blob --
+      // meaning peak memory during Save was roughly double what the actual
+      // export needed, exactly during the highest-memory-pressure moment
+      // (a full native-resolution multi-megapixel JPEG). On a memory-
+      // constrained real phone that's a plausible reason Save could stall
+      // or fail outright with no error a modest desktop test would ever
+      // trigger.
+      const blob = await canvas.toBlob({
         format: "jpeg",
         quality: 0.92,
         multiplier: nativeMultiplier,
       });
-      const blob = await (await fetch(dataUrl)).blob();
+      if (!blob) {
+        throw new Error("Couldn't render the edited image.");
+      }
       const formData = new FormData();
       formData.set("file", new File([blob], "annotated-preview.jpg", { type: "image/jpeg" }));
       formData.set("annotation_json", annotationJson);
-      const result = await saveAction(projectId, attachmentId, formData);
+      // A dropped mobile connection mid-upload (common on cellular, rare on
+      // a desktop test's wifi/wired connection) can leave the underlying
+      // fetch simply never settling -- neither resolving nor rejecting --
+      // which previously meant "Saving…" stayed on screen forever with no
+      // way out and no feedback, indistinguishable from the button having
+      // done nothing at all. 60s is generous enough not to false-trigger on
+      // a genuinely slow-but-working upload of a large native-resolution
+      // export over a weak connection, while still giving up eventually
+      // instead of hanging indefinitely.
+      const result = await Promise.race([
+        saveAction(projectId, attachmentId, formData),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("TIMEOUT")), 60_000),
+        ),
+      ]);
       if (result.previewUrl) {
         onSaved(result.previewUrl);
       } else {
@@ -1508,7 +1686,9 @@ export function AnnotationEditor({
       setSaveError(
         error instanceof DOMException && error.name === "SecurityError"
           ? "Couldn't save -- an image on this canvas failed to load securely. Try re-adding it and save again."
-          : "Couldn't save changes. Try again.",
+          : error instanceof Error && error.message === "TIMEOUT"
+            ? "Couldn't save -- the connection timed out. Check your connection and try again."
+            : "Couldn't save changes. Try again.",
       );
     } finally {
       setSaving(false);
@@ -1618,12 +1798,7 @@ export function AnnotationEditor({
           <AdjustIcon />
         </SidebarToolButton>
         {targetAspect && (
-          <SidebarToolButton
-            active={rotatePanelOpen}
-            onClick={() => setRotatePanelOpen((v) => !v)}
-            label="Rotate"
-            title="Rotate / Flip Photo"
-          >
+          <SidebarToolButton active={rotatePanelOpen} onClick={toggleRotatePanel} label="Rotate" title="Rotate / Flip Photo">
             <RotateIcon direction="right" />
           </SidebarToolButton>
         )}
@@ -1865,12 +2040,35 @@ export function AnnotationEditor({
               canvas.add() working fine, since those don't depend on the
               upper-canvas receiving events at all. The canvas element here
               must always keep the exact same className/style. */}
-          {!ready && loadUrl && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/[.015]">
-              <p className="text-sm text-muted">Loading image…</p>
-            </div>
-          )}
-          {!loadUrl && <p className="p-24 text-2xl tracking-wide text-muted">IMAGE</p>}
+          {
+            // Both placeholders below are ALWAYS mounted (never
+            // conditionally added/removed) -- visibility toggled via style
+            // instead. Same "don't conditionally mount/unmount siblings of
+            // the Fabric-touched canvas" principle as the canvas element's
+            // own static className/style further down: React inserting or
+            // removing an element here as `loadUrl`/`ready` change means it
+            // has to figure out the correct position relative to the canvas
+            // via sibling-relative DOM ops, and Fabric has restructured
+            // that exact neighborhood (wrapped the canvas in its own
+            // container, added an upper-canvas) outside React's
+            // bookkeeping -- exactly the "insertBefore: node is not a
+            // child of this node" crash this file already documents for
+            // the canvas's own className. Toggling `display` on elements
+            // that are ALWAYS present is a plain attribute update, never a
+            // sibling-relative insert/remove.
+          }
+          <div
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/[.015]"
+            style={{ display: loadUrl && !ready ? "flex" : "none" }}
+          >
+            <p className="text-sm text-muted">Loading image…</p>
+          </div>
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            style={{ display: loadUrl ? "none" : "flex" }}
+          >
+            <p className="p-24 text-2xl tracking-wide text-muted">IMAGE</p>
+          </div>
           {/* max-width/height here is a display-only fallback (e.g. reopening
               an annotation that was originally saved at a larger desktop
               resolution) -- Fabric's own pointer scaling already accounts
@@ -1904,70 +2102,94 @@ export function AnnotationEditor({
             ref={canvasElRef}
             style={{ maxWidth: "100%", maxHeight: "100%", height: "auto", touchAction: "none" }}
           />
-          {cropping && cropSourceUrl && cropFrameSize && (
-            <div
-              // bg-background -- opaque, so this fully visually replaces
-              // the (now always-visible) canvas underneath it; see the
-              // canvas element's own comment above for why it's no longer
-              // hidden via a className toggle.
-              className="absolute z-10 bg-background"
-              style={{
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                width: cropFrameSize.width,
-                height: cropFrameSize.height,
-              }}
-            >
-              <AnnotationCropOverlay
-                imageUrl={cropSourceUrl}
-                zoom={cropZoom}
-                offset={cropOffset}
-                onZoomChange={setCropZoom}
-                onOffsetChange={setCropOffset}
-              />
-            </div>
-          )}
+          {
+            // Always mounted (never a conditional `{cropping && ... && (...)}`
+            // branch) -- same reasoning as the loading/IMAGE placeholders
+            // above: this div is a sibling of the Fabric-controlled canvas
+            // inside the canvasNonce-keyed container, and Fabric restructures
+            // that neighborhood outside React's bookkeeping. Mounting/
+            // unmounting this on every crop-mode enter/exit (`cropping`
+            // flipping true<->false, e.g. right after Apply crop) hit the
+            // exact same "insertBefore: node is not a child of this node" /
+            // "Cannot read properties of undefined (reading 'clearRect')"
+            // crash confirmed for the loading placeholder -- toggling
+            // `display` on an always-present element sidesteps it instead.
+            // cropSourceUrl/cropFrameSize can be null before crop mode has
+            // ever been entered once; AnnotationCropOverlay tolerates an
+            // empty imageUrl and a 0x0 frame fine since it's not visible.
+          }
+          <div
+            // bg-background -- opaque, so this fully visually replaces
+            // the (now always-visible) canvas underneath it; see the
+            // canvas element's own comment above for why it's no longer
+            // hidden via a className toggle.
+            className="absolute z-10 bg-background"
+            style={{
+              display: cropping && cropSourceUrl && cropFrameSize ? "block" : "none",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              width: cropFrameSize?.width ?? 0,
+              height: cropFrameSize?.height ?? 0,
+            }}
+          >
+            <AnnotationCropOverlay
+              imageUrl={cropSourceUrl ?? EMPTY_IMAGE_SRC}
+              zoom={cropZoom}
+              offset={cropOffset}
+              onZoomChange={setCropZoom}
+              onOffsetChange={setCropOffset}
+            />
+          </div>
           {/* Unconditionally mounted (not gated on guides.x/y like the lines
-              inside it) -- this div sits as a direct sibling of the
-              Fabric-controlled <canvas>, and Fabric wraps that canvas in its
-              own extra DOM (a "canvas-container" div + upper-canvas) that
-              React never finds out about. Toggling THIS wrapper's own
-              presence in/out of the tree on every mousemove during a drag
-              (guides.x/y flip null<->set constantly while dragging) raced
-              against Fabric's internal DOM writes and crashed with "Failed
-              to execute 'insertBefore' ... not a child of this node" --
-              severe enough to blank the whole app, not just this dialog.
-              Keeping the wrapper itself always present (mounted once
-              per image load, same low frequency as the crop overlay below,
-              which never showed this crash) and only toggling the two line
-              elements INSIDE it avoids ever touching this div's own
-              sibling position relative to the canvas. */}
-          {!cropping && canvasBox && canvasResolution && (
-            <div
-              className="pointer-events-none absolute"
-              style={{
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                width: canvasBox.width,
-                height: canvasBox.height,
-              }}
-            >
-              {guides.x !== null && (
-                <div
-                  className="absolute top-0 bottom-0 w-px bg-[#b25450]"
-                  style={{ left: `${(guides.x / canvasResolution.width) * 100}%` }}
-                />
-              )}
-              {guides.y !== null && (
-                <div
-                  className="absolute left-0 right-0 h-px bg-[#b25450]"
-                  style={{ top: `${(guides.y / canvasResolution.height) * 100}%` }}
-                />
-              )}
-            </div>
-          )}
+              inside it, and -- since the SAME crash this comment already
+              describes turned out to apply to ITS OWN mount/unmount too,
+              see below -- not gated on `cropping` either anymore) -- this
+              div sits as a direct sibling of the Fabric-controlled
+              <canvas>, and Fabric wraps that canvas in its own extra DOM
+              (a "canvas-container" div + upper-canvas) that React never
+              finds out about. Toggling THIS wrapper's own presence in/out
+              of the tree on every mousemove during a drag (guides.x/y flip
+              null<->set constantly while dragging) raced against Fabric's
+              internal DOM writes and crashed with "Failed to execute
+              'insertBefore' ... not a child of this node" -- severe enough
+              to blank the whole app, not just this dialog. The original fix
+              here only stopped toggling on guides.x/y and moved to
+              toggling the two line elements INSIDE instead -- but the
+              wrapper itself was still gated on `!cropping`, which flips at
+              the exact same "crop mode just exited" moment already
+              confirmed to trigger this same crash class elsewhere (see the
+              crop overlay above) -- entering/exiting crop mode still
+              mounted/unmounted this whole div. Same fix as there: always
+              mounted, visibility toggled via style. canvasBox/
+              canvasResolution can be null before the first image load
+              settles; the guide lines inside are already independently
+              gated on guides.x/y !== null and simply won't render meaningful
+              positions while hidden regardless. */}
+          <div
+            className="pointer-events-none absolute"
+            style={{
+              display: !cropping && canvasBox && canvasResolution ? "block" : "none",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              width: canvasBox?.width ?? 0,
+              height: canvasBox?.height ?? 0,
+            }}
+          >
+            {guides.x !== null && canvasResolution && (
+              <div
+                className="absolute top-0 bottom-0 w-px bg-[#b25450]"
+                style={{ left: `${(guides.x / canvasResolution.width) * 100}%` }}
+              />
+            )}
+            {guides.y !== null && canvasResolution && (
+              <div
+                className="absolute left-0 right-0 h-px bg-[#b25450]"
+                style={{ top: `${(guides.y / canvasResolution.height) * 100}%` }}
+              />
+            )}
+          </div>
         </div>
       </div>
       </div>
@@ -1982,11 +2204,20 @@ export function AnnotationEditor({
         // its own real space in the now-column layout, the canvas's
         // flex-1 area simply shrinks and the canvas scales itself down to
         // match, same as it already does for any other viewport
-        // constraint. max-h-[38vh] leaves the majority of a typical
-        // phone's viewport for the canvas above it; sm:max-h-none reverts
-        // to the unconstrained side-column height.
-        <div className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto border-t border-border px-3 py-4 max-h-[38vh] sm:w-60 sm:max-h-none sm:border-t-0 sm:border-l sm:px-4">
-          <div className="flex items-center justify-between">
+        // constraint.
+        //
+        // max-h-[38vh] (Round 1) still left the image feeling squeezed on
+        // a real phone -- dropped further to 26vh here, combined with
+        // AdjustmentSlider's own single-row layout (was label-row-then-
+        // slider-row) and a tighter gap-1 between rows, so the panel's
+        // real footprint shrinks on BOTH axes at once instead of just
+        // being clipped shorter with the same dense content still fighting
+        // for space inside it. All 9 controls still reach via its own
+        // vertical scroll -- explicitly acceptable per spec, the goal is
+        // the image staying dominant, not fitting every slider unscrolled.
+        // sm:max-h-none reverts to the unconstrained side-column height.
+        <div className="flex w-full shrink-0 flex-col gap-1 overflow-y-auto border-t border-border px-3 py-2 max-h-[26vh] sm:w-60 sm:max-h-none sm:gap-3 sm:border-t-0 sm:border-l sm:px-4 sm:py-4">
+          <div className="flex items-center justify-between pb-1">
             <span className="text-xs tracking-wide text-muted uppercase">Adjustments</span>
             <button
               type="button"
@@ -2463,11 +2694,15 @@ function SidebarToolButton({
   );
 }
 
-// Label + native range slider + live value, with double-click-to-reset as a
-// lightweight bonus alongside the panel's own "Reset All" -- keeps to just
-// one control element per row, matching the "compact vertical list" the
-// Adjustments panel spec asked for. onCommit fires only on release (mouse/
-// touch up), not on every drag tick -- see commitAdjustments' own comment.
+// Single row -- label, slider, and value all inline -- rather than a label
+// row stacked above the slider. Mobile Adjust was still hiding too much of
+// the image behind the panel even after Round 1's height cap; the biggest
+// lever left, short of shrinking type past legibility, was cutting each
+// control's own footprint roughly in half by not giving the label/value
+// their own dedicated row. Double-click-to-reset is a lightweight bonus
+// alongside the panel's own "Reset All". onCommit fires only on release
+// (mouse/touch up), not on every drag tick -- see commitAdjustments' own
+// comment.
 function AdjustmentSlider({
   label,
   value,
@@ -2488,10 +2723,9 @@ function AdjustmentSlider({
   trackBackground?: string;
 }) {
   return (
-    <label className="flex flex-col gap-1 text-xs">
-      <span className="flex items-center justify-between">
-        <span className="tracking-wide text-muted uppercase">{label}</span>
-        <span className="tabular-nums text-muted">{value}</span>
+    <label className="flex items-center gap-2 text-xs">
+      <span className="w-20 shrink-0 truncate tracking-wide text-muted uppercase" title={label}>
+        {label}
       </span>
       <input
         type="range"
@@ -2503,13 +2737,14 @@ function AdjustmentSlider({
         onTouchEnd={onCommit}
         onDoubleClick={onReset}
         title={`${label} (double-click to reset)`}
-        className="w-full accent-foreground"
+        className="min-w-0 flex-1 accent-foreground"
         style={
           trackBackground
             ? { background: trackBackground, WebkitAppearance: "none", appearance: "none", height: 6, borderRadius: 9999 }
             : undefined
         }
       />
+      <span className="w-7 shrink-0 text-right tabular-nums text-muted">{value}</span>
     </label>
   );
 }
