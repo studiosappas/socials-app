@@ -323,6 +323,21 @@ export function AnnotationEditor({
   // per axis -- only ever the single closest match, matching what actually
   // gets snapped to.
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
+  // The modal is `fixed inset-0` -- pinned to the LAYOUT viewport, which on
+  // iOS Safari does NOT shrink when the on-screen keyboard opens (the
+  // keyboard is a separate overlay; CSS %, vh, and a plain inset-0 fixed
+  // element all keep measuring the full, keyboard-underneath size). The
+  // bottom portion of the modal -- concretely the Save button, and
+  // whatever part of the canvas falls in that region -- was genuinely
+  // covered by the keyboard with no way to reach it, not just visually
+  // obscured. `window.visualViewport` is the one thing that DOES track
+  // the actually-visible area (shrinks for the keyboard, and for pinch-
+  // zoom); tracked here and applied to the modal's own height/top below
+  // instead of relying on inset-0's implicit full-viewport sizing. Falls
+  // back to `null` (today's plain inset-0 behavior, unaffected) wherever
+  // visualViewport isn't available -- desktop browsers included, where
+  // its height already equals the full window height anyway.
+  const [visualViewportBox, setVisualViewportBox] = useState<{ height: number; top: number } | null>(null);
   const [canvasBox, setCanvasBox] = useState<{ width: number; height: number } | null>(null);
   // The canvas's internal pixel resolution (distinct from canvasBox's CSS
   // display size) -- needed to convert a guide's canvas-space position into
@@ -885,6 +900,29 @@ export function AnnotationEditor({
     // instance via disposePromiseRef, then constructing fresh) against
     // whichever canvas node is actually live.
   }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce]);
+
+  // See visualViewportBox's own declaration. `resize` fires when the
+  // visible area's SIZE changes (keyboard opening/closing, pinch-zoom);
+  // `scroll` fires when its OFFSET changes without a size change (iOS
+  // Safari auto-scrolling the page to keep a focused input above the
+  // keyboard, which shifts visualViewport.offsetTop out from under a
+  // `fixed` element pinned to the layout viewport's own origin) -- both
+  // matter here, since either alone can put part of a `fixed inset-0`
+  // modal behind the keyboard or off the top of the visible area.
+  useEffect(() => {
+    if (!open || typeof window === "undefined" || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    function update() {
+      setVisualViewportBox({ height: vv.height, top: vv.offsetTop });
+    }
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, [open]);
 
   // The canvas's on-screen box only actually changes when a new image
   // loads (ready flips false -> true) -- measured here once rather than on
@@ -1788,6 +1826,26 @@ export function AnnotationEditor({
   async function handleSave() {
     const canvas = fabricRef.current;
     if (!canvas || !attachmentId) return;
+    // The user should not have to manually tap "Done editing" before
+    // Save -- on mobile especially, tapping Save while the keyboard is
+    // still open for an IText is an entirely normal thing to do. IText's
+    // hiddenTextarea already syncs its .text property on every keystroke,
+    // so canvas.toJSON() below already reflects the latest typed content
+    // regardless of editing state -- but LEAVING it in editing mode
+    // through the export risks the live blinking-cursor/selection-
+    // highlight repaint (part of IText's own render step, not gated by
+    // the skipControlsDrawing flag toCanvasElement already uses to omit
+    // selection handles) getting baked into the saved bitmap if it lands
+    // on a "cursor visible" blink frame, and leaves a real DOM
+    // hiddenTextarea/keyboard focus dangling through a flow that's about
+    // to close the whole editor. exitEditing() is synchronous (no
+    // pendingEditRef registration needed) and safe to call unconditionally
+    // -- a no-op for any object that isn't currently editing.
+    for (const obj of canvas.getObjects()) {
+      if (obj instanceof fabric.IText && obj.isEditing) {
+        obj.exitEditing();
+      }
+    }
     setSaving(true);
     setSaveError(undefined);
     try {
@@ -1918,7 +1976,23 @@ export function AnnotationEditor({
     // canvas was scoped. Forcing the ENTIRE modal subtree fresh on every
     // new canvas session eliminates any possibility of React trying to
     // reconcile into DOM Fabric has touched, anywhere in this tree.
-    <div key={canvasNonce} className="fixed inset-0 z-50 flex flex-col bg-background">
+    <div
+      key={canvasNonce}
+      className="fixed inset-x-0 top-0 z-50 flex flex-col bg-background"
+      // See visualViewportBox's own declaration -- overrides inset-0's
+      // implicit "always the full layout viewport" height/position once a
+      // real visualViewport reading is available, so the modal (and, via
+      // its flex-1 canvas area, the canvas itself) actually SHRINKS to fit
+      // above an open keyboard instead of extending behind it. `bottom:0`
+      // (part of the original inset-0) is deliberately dropped in favor of
+      // an explicit height here -- the two would otherwise fight over the
+      // same edge.
+      style={
+        visualViewportBox
+          ? { height: visualViewportBox.height, top: visualViewportBox.top }
+          : { top: 0, bottom: 0 }
+      }
+    >
       <div className="flex items-center justify-end px-6 py-4">
         <button
           type="button"
