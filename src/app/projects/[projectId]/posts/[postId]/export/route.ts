@@ -107,10 +107,15 @@ export async function GET(
     }
 
     try {
+      // SLIDE_W/targetH here only pin the crop's aspect ratio (4:5 / 3:4) --
+      // nativeResolution:true makes applyCoverTransform skip its final
+      // resize-to-that-fixed-size step, so the output is the crop's own
+      // native pixel dimensions (derived from this original's real
+      // resolution), never downscaled to a fixed 1080-ish target.
       const targetH = isCover ? COVER_H : SLIDE_H;
-      const pipeline = await applyCoverTransform(buf, transform, SLIDE_W, targetH);
-      const resized = await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
-      zip.file(`${isCover ? "cover" : `slide-${index + 1}`}.jpg`, resized);
+      const pipeline = await applyCoverTransform(buf, transform, SLIDE_W, targetH, { nativeResolution: true });
+      const cropped = await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+      zip.file(`${isCover ? "cover" : `slide-${index + 1}`}.jpg`, cropped);
     } catch {
       // Skip a single unreadable asset rather than failing the whole export.
     }
