@@ -912,11 +912,37 @@ const GridSlot = memo(function GridSlot({
 
   const [cropMode, setCropMode] = useState(false);
   const [contentMenuOpen, setContentMenuOpen] = useState(false);
-  // Stable regardless of how often this slot re-renders (see the
-  // dnd-kit note below) -- setContentMenuOpen is itself stable, so an
-  // empty-deps useCallback here never breaks GridSlotBody's memo.
-  const handleToggleMenu = useCallback(() => setContentMenuOpen((v) => !v), []);
+  // Gated on reorderMode -- same reasoning as handleClick's own reorderMode
+  // guard below ("the only thing this mode does is let you drag"). Without
+  // this, the ⋮ menu's "Crop Image" action was still reachable while Edit
+  // Grid mode was on, which could open GridCropOverlay (an interactive,
+  // pointer-handling layer) on top of a tile mid-reorder-session -- exactly
+  // the "something crop-related competing with the drag gesture" shape,
+  // even though it required a deliberate menu tap rather than merely
+  // having a saved crop. Not empty-deps anymore (reorderMode changes only
+  // on a deliberate Edit Grid toggle, not per drag frame), so this still
+  // doesn't break GridSlotBody's memo the way a per-render-fresh closure
+  // would.
+  const handleToggleMenu = useCallback(() => {
+    if (reorderMode) return;
+    setContentMenuOpen((v) => !v);
+  }, [reorderMode]);
   const contentMenuRef = useOutsideClick<HTMLDivElement>(contentMenuOpen, () => setContentMenuOpen(false));
+  // Defensive close for both -- covers the moment Edit Grid mode turns on
+  // while a menu/crop session was already open on this tile, so nothing
+  // crop-related can be mid-interaction the instant dragging becomes
+  // available. "Adjust state during render" (matching prevSlot/
+  // overrideTransform's own idiom just below) rather than a useEffect --
+  // this needs to take effect in the SAME commit reorderMode flips in, not
+  // one render later.
+  const [prevReorderMode, setPrevReorderMode] = useState(reorderMode);
+  if (reorderMode !== prevReorderMode) {
+    setPrevReorderMode(reorderMode);
+    if (reorderMode) {
+      setContentMenuOpen(false);
+      setCropMode(false);
+    }
+  }
   const [, startDeleteTransition] = useTransition();
   const [prevSlot, setPrevSlot] = useState(slot);
   const [overrideTransform, setOverrideTransform] = useState<GridCoverTransform | null | undefined>(
@@ -1112,7 +1138,14 @@ const GridSlot = memo(function GridSlot({
       role={effectiveSlot.postId || canManage ? "button" : undefined}
       tabIndex={effectiveSlot.postId || canManage ? 0 : undefined}
       onClick={effectiveSlot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
-      className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 ${
+      // select-none + -webkit-touch-callout:none -- iOS Safari's own
+      // long-press-on-an-image gesture (its "Save Photo/Copy/Share" system
+      // callout) is a well-known conflict with a custom long-press-to-drag
+      // interaction; nothing in this app suppressed it before. Applied to
+      // the whole draggable tile (not just the cover image) so it can never
+      // compete with dnd-kit's own long-press activation, regardless of
+      // which element inside the tile the touch happens to land on.
+      className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
         effectiveSlot.postId && canManage && dragEnabled
           ? "cursor-grab touch-none"
           : effectiveSlot.postId || canManage
@@ -1223,7 +1256,18 @@ const GridSlotBody = memo(function GridSlotBody({
             src={slot.thumbnailUrl}
             alt=""
             loading="lazy"
-            className="h-full w-full animate-settle-in object-cover"
+            // pointer-events-none -- this image never has interactive
+            // behavior of its own (clicks/drag are handled by the tile's
+            // outer wrapper); making that structural instead of incidental
+            // guarantees a touch landing anywhere on a cropped tile's
+            // (CSS-transformed) image resolves straight to the wrapper's
+            // dnd-kit listeners, with no dependency on how the browser
+            // hit-tests a transformed element. GridCropOverlay -- the only
+            // element that DOES need pointer events on the image itself --
+            // is a separate, later sibling layered on top (z-20) only while
+            // cropMode is true, so this never conflicts with actual
+            // cropping.
+            className="pointer-events-none h-full w-full animate-settle-in object-cover"
             draggable={false}
             style={coverTransformStyle(transform)}
           />
