@@ -85,6 +85,13 @@ function ScheduledIcon({ className }: { className?: string }) {
 export type MediaLibraryItem = {
   id: string;
   url: string | null;
+  // The true original asset's signed URL, always from storage_path -- unlike
+  // `url` above, which may prefer a smaller edited preview for display. Only
+  // getPostMediaLibrary populates this; Post Editor's add/replace-from-
+  // library actions use it (not `url`) for the optimistic asset's download
+  // source, so Download resolves to the real original immediately instead
+  // of whatever the library happened to show.
+  originalUrl?: string | null;
   mediaType: MediaType;
   // Optional because posts.ts/stories.ts build their own lighter-weight
   // MediaLibraryItem-shaped picker lists that never needed these -- only

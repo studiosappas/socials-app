@@ -167,7 +167,10 @@ export function PostEditor({
       postAssetId: tempId,
       mediaAssetId: item.id,
       url: item.url,
-      originalUrl: item.url,
+      // item.originalUrl (always storage_path), not item.url -- item.url may
+      // point at a preview for display, and Download must always resolve to
+      // the real original (see the type's own comment in grid-board.tsx).
+      originalUrl: item.originalUrl ?? item.url,
       annotationJson: null,
       mediaType: item.mediaType as "image" | "video",
       posterUrl: null,
@@ -216,7 +219,8 @@ export function PostEditor({
               ...a,
               mediaAssetId: item.id,
               url: item.url,
-              originalUrl: item.url,
+              // Same reasoning as handleAddFromLibrary above.
+              originalUrl: item.originalUrl ?? item.url,
               annotationJson: null,
               mediaType: item.mediaType as "image" | "video",
               posterUrl: null,

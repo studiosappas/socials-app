@@ -267,9 +267,16 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
 
   return (mediaAssets ?? []).map((asset) => {
     const preview = previewPathByMediaId.get(asset.id);
+    const originalUrl = urlByPath.get(asset.storage_path) ?? null;
     return {
       id: asset.id,
-      url: preview ? urlByPath.get(preview) ?? urlByPath.get(asset.storage_path) ?? null : urlByPath.get(asset.storage_path) ?? null,
+      url: preview ? urlByPath.get(preview) ?? originalUrl : originalUrl,
+      // Always storage_path, never the preview -- see handleAddFromLibrary/
+      // handleReplaceFromLibrary in post-editor.tsx, which need the real
+      // original url (not this list's display-only `url`) for their
+      // optimistic PostAssetItem so Download resolves correctly before the
+      // page's next real fetch.
+      originalUrl,
       mediaType: asset.media_type,
       usedInCarousel: usedInCarouselIds.has(asset.id),
     };

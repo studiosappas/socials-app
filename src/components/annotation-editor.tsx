@@ -17,9 +17,12 @@ const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
 const CROP_MIN_ZOOM = 1;
 const CROP_MAX_ZOOM = 4;
-// Fixed export pixel width for every targetAspect-locked frame (cover
+// Minimum export pixel width for every targetAspect-locked frame (cover
 // 1080x1350, carousel slide 1080x1440) -- the height follows from
 // targetAspect itself, so only the width needs to be a shared constant.
+// handleSave scales this up further when the source's native resolution
+// at the current crop is larger, so this is a floor, not the actual
+// output size.
 const TARGET_EXPORT_W = 1080;
 
 function clamp(value: number, min: number, max: number) {
@@ -510,10 +513,11 @@ export function AnnotationEditor({
       // With a targetAspect, the frame is locked to that ratio (both
       // supported ratios -- 4:5 cover, 3:4 slide -- are portrait, so height
       // is always the binding dimension against maxDisplay) instead of the
-      // source image's own shape, and exportScaleRef targets a FIXED final
-      // pixel width (1080) rather than "scale back up to this image's own
-      // native resolution" -- so toDataURL always produces exactly
-      // 1080xN regardless of source size or maxDisplay.
+      // source image's own shape. exportScaleRef here is only a FLOOR of
+      // TARGET_EXPORT_W (1080) -- handleSave re-reads the base photo's
+      // then-current scale and exports at whichever is larger, that or the
+      // crop's actual native resolution, so a large source no longer gets
+      // silently downgraded to 1080xN.
       const canvasW = targetAspect ? maxDisplay * (targetAspect.w / targetAspect.h) : naturalW * displayScale;
       const canvasH = targetAspect ? maxDisplay : naturalH * displayScale;
       exportScaleRef.current = targetAspect
@@ -1339,10 +1343,28 @@ export function AnnotationEditor({
     setSaveError(undefined);
     try {
       const annotationJson = JSON.stringify(canvas.toJSON());
+      // For a targetAspect-locked frame, exportScaleRef.current is a FIXED
+      // TARGET_EXPORT_W/canvasW ratio (see setupCanvas) -- it always produces
+      // exactly TARGET_EXPORT_W regardless of the source's real resolution,
+      // which silently saved every cropped cover/attachment at ~1080px even
+      // when the original was much larger. basePhoto.scaleX is how many
+      // canvas-units currently map to 1 native source pixel for the CURRENT
+      // crop/zoom (see handleApplyCrop: scaleX = frameW / cropW), so its
+      // reciprocal is exactly the multiplier that renders this same frame at
+      // the crop's native resolution -- same idea as the non-cropping
+      // branch's `1 / displayScale` below, just re-read at save time instead
+      // of frozen at load time, since crop/zoom can change after that. Only
+      // ever scales UP from the existing multiplier (never below it), so an
+      // already-small source still exports at exactly what it did before.
+      const basePhoto = findBasePhoto(canvas);
+      const nativeMultiplier =
+        targetAspect && basePhoto && basePhoto.scaleX
+          ? Math.max(exportScaleRef.current, 1 / basePhoto.scaleX)
+          : exportScaleRef.current;
       const dataUrl = canvas.toDataURL({
         format: "jpeg",
         quality: 0.92,
-        multiplier: exportScaleRef.current,
+        multiplier: nativeMultiplier,
       });
       const blob = await (await fetch(dataUrl)).blob();
       const formData = new FormData();
