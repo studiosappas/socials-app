@@ -514,20 +514,26 @@ function AddFromLibrarySection({
           media library. Inside the Grid/Stories popup (hideBackLink) the
           modal itself is already space-constrained, so cap to about two
           rows there instead -- scrolls internally either way.
-          grid-cols-3 (mobile) vs sm:grid-cols-6 (unchanged, tablet/desktop
-          -- "desktop can remain as it is") -- 4 columns in a ~310px-wide
-          popup on a real phone worked out to ~65-70px tiles, too small to
-          read the actual photo at a glance; 3 columns gives ~100px tiles,
-          the difference between "recognizable" and "not." aspect-square
-          (mobile) vs sm:aspect-[3/4] (unchanged desktop) for the same
-          reason on the other axis -- object-cover into a TALL 3:4 box
-          crops a wide landscape photo down to a narrow vertical sliver of
-          it; square crops less aggressively for mixed portrait/landscape
-          library content while still reading fine for portrait/square
-          sources. */}
+          grid-cols-2 (mobile) vs sm:grid-cols-6 (unchanged, tablet/desktop
+          -- "desktop can remain as it is") -- measured against the REAL
+          rendered PostEditor component (not a hand-copied approximation) at
+          320/375/390/414px: 2 columns puts tiles at 107-154px, comfortably
+          "recognizable at a glance." (An earlier pass landed on
+          grid-cols-3 here -- 82-113px -- verified only against a
+          hand-copied test replica, which was still too small and never
+          actually got corrected in this file; that mismatch is exactly why
+          this round re-verified against the real exported PostEditor
+          component instead.)
+          object-contain (mobile) vs sm:object-cover (unchanged desktop) --
+          this is an asset-IDENTIFICATION picker, not a preview of what will
+          actually crop into the feed (that's Grid's own tile, untouched);
+          object-cover into ANY fixed box still crops a very wide/tall
+          source down to a sliver of itself regardless of the box's own
+          aspect ratio, which contain can't do -- the whole photo is always
+          visible, letterboxed on a neutral fill instead. */}
       <div
-        className={`grid grid-cols-3 gap-2 overflow-y-auto sm:grid-cols-6 ${
-          hideBackLink ? "max-h-64 sm:max-h-48" : "max-h-[min(1000px,65vh)]"
+        className={`grid grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-6 ${
+          hideBackLink ? "max-h-80 sm:max-h-48" : "max-h-[min(1000px,65vh)]"
         }`}
       >
         {availableMedia.map((item) => (
@@ -535,11 +541,11 @@ function AddFromLibrarySection({
             key={item.id}
             type="button"
             onClick={() => onAdd(item)}
-            className="relative aspect-square min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4]"
+            className="relative aspect-square min-w-0 overflow-hidden rounded-none border border-border bg-black/[.04] transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4] sm:bg-transparent"
           >
             {item.url && item.mediaType === "image" && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.url} alt="" className="h-full w-full object-cover" />
+              <img src={item.url} alt="" className="h-full w-full object-contain sm:object-cover" />
             )}
             {item.url && item.mediaType === "video" && (
               // preload="metadata" -- mobile browsers commonly default video
@@ -549,7 +555,7 @@ function AddFromLibrarySection({
               // native fullscreen playback chrome for it.
               <video
                 src={item.url}
-                className="h-full w-full object-cover"
+                className="h-full w-full object-contain sm:object-cover"
                 muted
                 playsInline
                 preload="metadata"
