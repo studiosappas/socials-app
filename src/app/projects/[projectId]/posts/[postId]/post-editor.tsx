@@ -509,14 +509,31 @@ function AddFromLibrarySection({
   return (
     <section className="flex flex-col gap-2">
       <span className={labelClass}>Add from library</span>
-      {/* Capped to roughly 9 rows on the full page, bounded by viewport
-          height too so it doesn't grow unboundedly with a project's full
-          media library. Inside the Grid/Stories popup (hideBackLink) the
-          modal itself is already space-constrained, so cap to a single
-          visible row there instead -- scrolls internally either way. */}
+      {/* grid-cols-4 (mobile) vs sm:grid-cols-6 (unchanged -- desktop stays
+          exactly as it was). Row height stays an EXPLICIT value (no
+          per-item aspect-ratio on mobile) for the same reason established
+          last round: a real device's async image loading made
+          `auto`-sized rows driven by a child's aspect-ratio collapse,
+          which read as tiles splitting into repeated horizontal strips --
+          an explicit grid-auto-rows value has zero dependency on any
+          child's content/load state, so that failure class can't recur.
+          What's new this round is making that fixed height a 3:4-ratio
+          match for the tile's own (also fixed, track-driven) width at
+          each of the four widths this was asked to be tuned against --
+          320/375/390/414px measured out to ~60/73/77/83px tile widths, so
+          --tile-row-h below is each of those times 4/3. Both auto-rows and
+          the container's own max-height (roughly one row + a 1/3-height
+          peek of the next, the scroll affordance) derive from that same
+          custom property via var()/calc(), instead of two separately
+          hand-computed numbers that could drift out of sync with each
+          other. sm: reverts both to their original desktop values --
+          auto-rows-auto + sm:aspect-[3/4] on the tile, max-h-48 on the
+          container -- untouched by any of this. */}
       <div
-        className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
-          hideBackLink ? "max-h-48" : "max-h-[min(1000px,65vh)]"
+        className={`grid grid-cols-4 gap-2 overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:80px] min-[375px]:[--tile-row-h:98px] min-[390px]:[--tile-row-h:103px] min-[414px]:[--tile-row-h:111px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 sm:auto-rows-auto ${
+          hideBackLink
+            ? "max-h-[calc(var(--tile-row-h)*4/3+0.5rem)] sm:max-h-48"
+            : "max-h-[min(1000px,65vh)]"
         }`}
       >
         {availableMedia.map((item) => (
@@ -524,14 +541,25 @@ function AddFromLibrarySection({
             key={item.id}
             type="button"
             onClick={() => onAdd(item)}
-            className="relative aspect-[3/4] min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
+            className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4]"
           >
             {item.url && item.mediaType === "image" && (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={item.url} alt="" className="h-full w-full object-cover" />
             )}
             {item.url && item.mediaType === "video" && (
-              <video src={item.url} className="h-full w-full object-cover" muted />
+              // preload="metadata" -- mobile browsers commonly default video
+              // preload to "none" to save cellular data, which otherwise
+              // leaves this thumbnail with no visible frame at all until
+              // played. playsInline avoids iOS Safari trying to launch
+              // native fullscreen playback chrome for it.
+              <video
+                src={item.url}
+                className="h-full w-full object-cover"
+                muted
+                playsInline
+                preload="metadata"
+              />
             )}
             {item.usedInCarousel && (
               <span
