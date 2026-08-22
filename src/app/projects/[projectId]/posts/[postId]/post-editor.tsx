@@ -509,35 +509,31 @@ function AddFromLibrarySection({
   return (
     <section className="flex flex-col gap-2">
       <span className={labelClass}>Add from library</span>
-      {/* Capped to roughly 9 rows on the full page, bounded by viewport
-          height too so it doesn't grow unboundedly with a project's full
-          media library. Inside the Grid/Stories popup (hideBackLink) the
-          modal itself is already space-constrained, so cap to about two
-          rows there instead -- scrolls internally either way.
-          grid-cols-4 (mobile) vs sm:grid-cols-6 (unchanged -- desktop
-          stays exactly as it was), and -- the actual fix this round --
-          auto-rows-[70px] (mobile only, i.e. grid-auto-rows:70px) instead
-          of leaving row height
-          to `auto` + each tile's own aspect-ratio. Column width from a 1fr
-          grid track is always robust (pure container-driven math, no
-          dependency on any child), but row height from `grid-auto-rows:
-          auto` + a child's `aspect-ratio` depends on the grid correctly
-          computing that child's intrinsic size -- which on a real device,
-          under real asynchronously-arriving network images (not the
-          instant data-URI test images this was previously verified
-          against), could compute wrong/zero and collapse the row, with
-          neighboring rows then rendering on top of each other -- exactly
-          "one tile showing several horizontal strips." An explicit
-          grid-auto-rows height has zero dependency on any child's content
-          or intrinsic size at all, so this entire failure class can't
-          happen regardless of image load timing/format/engine quirks.
-          Each button now simply stretches to fill its cell (both axes
-          already fixed by the grid tracks), so no per-item aspect-ratio
-          is needed on mobile at all -- sm:aspect-[3/4] still sets it for
-          desktop, unaffected by any of this. */}
+      {/* grid-cols-4 (mobile) vs sm:grid-cols-6 (unchanged -- desktop stays
+          exactly as it was). Row height stays an EXPLICIT value (no
+          per-item aspect-ratio on mobile) for the same reason established
+          last round: a real device's async image loading made
+          `auto`-sized rows driven by a child's aspect-ratio collapse,
+          which read as tiles splitting into repeated horizontal strips --
+          an explicit grid-auto-rows value has zero dependency on any
+          child's content/load state, so that failure class can't recur.
+          What's new this round is making that fixed height a 3:4-ratio
+          match for the tile's own (also fixed, track-driven) width at
+          each of the four widths this was asked to be tuned against --
+          320/375/390/414px measured out to ~60/73/77/83px tile widths, so
+          --tile-row-h below is each of those times 4/3. Both auto-rows and
+          the container's own max-height (roughly one row + a 1/3-height
+          peek of the next, the scroll affordance) derive from that same
+          custom property via var()/calc(), instead of two separately
+          hand-computed numbers that could drift out of sync with each
+          other. sm: reverts both to their original desktop values --
+          auto-rows-auto + sm:aspect-[3/4] on the tile, max-h-48 on the
+          container -- untouched by any of this. */}
       <div
-        className={`grid grid-cols-4 auto-rows-[70px] gap-2 overflow-y-auto sm:grid-cols-6 sm:auto-rows-auto ${
-          hideBackLink ? "max-h-80 sm:max-h-48" : "max-h-[min(1000px,65vh)]"
+        className={`grid grid-cols-4 gap-2 overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:80px] min-[375px]:[--tile-row-h:98px] min-[390px]:[--tile-row-h:103px] min-[414px]:[--tile-row-h:111px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 sm:auto-rows-auto ${
+          hideBackLink
+            ? "max-h-[calc(var(--tile-row-h)*4/3+0.5rem)] sm:max-h-48"
+            : "max-h-[min(1000px,65vh)]"
         }`}
       >
         {availableMedia.map((item) => (
