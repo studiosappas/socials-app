@@ -1916,6 +1916,20 @@ export function AnnotationEditor({
       if (!blob) {
         throw new Error("Couldn't render the edited image.");
       }
+      // Server Actions on this project are capped at 20MB (bodySizeLimit AND
+      // proxyClientMaxBodySize in next.config.ts -- the proxy has its own,
+      // separate buffering limit that silently truncates a larger body
+      // *before* bodySizeLimit ever gets a say, turning an oversized upload
+      // into an opaque multipart parse failure instead of a clean rejection).
+      // Catching it here, before ever sending, turns an edge-case failure
+      // into an immediate, specific, actionable message instead of a vague
+      // one surfacing after a real round-trip.
+      if (blob.size > 19 * 1024 * 1024) {
+        setSaveError(
+          `This image is too large to save at full quality (${(blob.size / 1024 / 1024).toFixed(1)}MB). Try applying a smaller crop and save again.`,
+        );
+        return;
+      }
       const formData = new FormData();
       formData.set("file", new File([blob], "annotated-preview.jpg", { type: "image/jpeg" }));
       formData.set("annotation_json", annotationJson);
