@@ -1,4 +1,5 @@
 import { AppFooter, AppHeader } from "@/components/app-header";
+import { PresenceHeartbeat } from "@/components/presence-heartbeat";
 import { createClient } from "@/lib/supabase/server";
 import { getUserProjectsForNav } from "@/lib/nav-data";
 import { getRecentNotifications } from "@/lib/notifications-data";
@@ -24,6 +25,7 @@ export default async function TasksShellLayout({ children }: { children: React.R
 
   return (
     <div className="flex flex-1 flex-col">
+      {user && <PresenceHeartbeat />}
       <AppHeader
         projects={projects}
         notificationItems={notifications.items}

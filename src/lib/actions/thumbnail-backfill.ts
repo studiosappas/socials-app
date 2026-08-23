@@ -1,7 +1,6 @@
 "use server";
 
-import { createClient } from "@/lib/supabase/server";
-import { createServiceRoleClient } from "@/lib/supabase/service-role";
+import { requireAdminServiceClient } from "@/lib/admin-auth";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
@@ -14,30 +13,6 @@ import type { Database } from "@/types/database";
 // stays on Vercel's default function duration for now -- batch size is
 // kept conservative (10 images/call) specifically because of this, and
 // duration can be revisited once the page itself is confirmed loading.
-
-// This tool needs to see every project in the system, not just ones the
-// logged-in admin happens to be a member of (some were created from other
-// accounts entirely) -- ordinary RLS can't do that, so the actual data
-// operations below run through the service-role client instead, which
-// bypasses RLS completely.
-//
-// That means THIS check is the only thing standing between "any logged-in
-// user" and full cross-project read/write access, so it deliberately runs
-// on the normal, session-bound client (the real cookie-based identity of
-// whoever is making the request) -- never on the service-role client
-// itself, which has no concept of "who's asking" at all. The service-role
-// client is only ever constructed and returned after this passes.
-async function requireAdminServiceClient(): Promise<SupabaseClient<Database>> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) throw new Error("You must be logged in.");
-  const { data: profile, error } = await supabase.from("profiles").select("is_admin").eq("id", user.id).maybeSingle();
-  if (error) throw new Error(`Couldn't check admin status: ${error.message}`);
-  if (!profile?.is_admin) throw new Error("This tool is restricted to site admins.");
-  return createServiceRoleClient();
-}
 
 type ProjectInfo = { id: string; name: string };
 
