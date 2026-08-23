@@ -1473,6 +1473,25 @@ export function AnnotationEditor({
         if (!active || ("isEditing" in active && (active as fabric.IText).isEditing)) return;
         e.preventDefault();
         handleDeleteSelected();
+        return;
+      }
+      if (e.key === "Enter") {
+        // Same DOM-target guard as Delete/Backspace above, plus BUTTON --
+        // pressing Enter while a toolbar button happens to be focused (e.g.
+        // via Tab) should activate that button like normal, not get
+        // hijacked into deselecting whatever's still selected on the canvas.
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "BUTTON" || target.isContentEditable)) return;
+        const canvas = fabricRef.current;
+        const active = canvas?.getActiveObject();
+        if (!canvas || !active) return;
+        // An IText being actively typed into needs Enter to behave as
+        // normal text input (newline) -- Fabric's own isEditing flag is the
+        // same signal the Delete/Backspace guard above already relies on.
+        if ("isEditing" in active && (active as fabric.IText).isEditing) return;
+        e.preventDefault();
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
       }
     }
     document.addEventListener("keydown", handleKeyDown);
