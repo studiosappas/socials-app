@@ -17,6 +17,13 @@ const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
 const CROP_MIN_ZOOM = 1;
 const CROP_MAX_ZOOM = 4;
+// The crop overlay is now always mounted (see its own render-site comment)
+// even before cropSourceUrl exists -- a real, valid src is still required,
+// and an empty string one triggers a React/browser warning about
+// potentially refetching the whole page. A 1x1 transparent gif is a
+// harmless placeholder that's never actually visible (the overlay is
+// display:none until cropSourceUrl is set).
+const EMPTY_IMAGE_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 // Minimum export pixel width for every targetAspect-locked frame (cover
 // 1080x1350, carousel slide 1080x1440) -- the height follows from
 // targetAspect itself, so only the width needs to be a shared constant.
@@ -95,6 +102,32 @@ type Tool = "select" | "draw" | "text" | "arrow" | "crop";
 // property here -- see fabric's own FabricObject.customProperties.
 const BASE_PHOTO_ROLE = "basePhoto";
 fabric.FabricObject.customProperties = ["appRole"];
+// touchCornerSize is Fabric's own (already-existing, already-larger-than-
+// cornerSize) invisible hit-area for the resize/rotate corner handles --
+// confirmed live that FabricObject.ownDefaults IS the same object every
+// interactive subclass (IText, FabricImage, etc.) reads its defaults from,
+// so this one assignment reaches every object type. Left at Fabric's
+// default (24) it's still meaningfully smaller than a comfortable finger
+// target; bumped up here without touching cornerSize (13, unchanged) so
+// the handles themselves stay visually identical -- only the invisible
+// region a touch needs to land in to grab one gets bigger.
+fabric.FabricObject.ownDefaults.touchCornerSize = 44;
+// touchCornerSize (above) only widens the invisible hit-area for the
+// resize/rotate CORNER controls -- grabbing an object anywhere on its own
+// BODY to drag/move it is a completely separate hit-test
+// (_pointIsInObjectSelectionArea in fabric's own SelectableCanvas, which
+// expands the object's coords outward by exactly `padding` on every side
+// before checking whether a pointer landed inside). Left at fabric's
+// default of 0, a short/small text object (the common case here -- a
+// single line at a modest font size) has a genuinely tiny drag target:
+// only the tight pixel box around the glyphs themselves counts as "on the
+// object," well under a finger's actual contact area, so a real touch
+// drag started a few pixels off (very easy on a phone) grabs nothing and
+// silently does nothing instead of moving the object -- this is what made
+// text "not practically movable" specifically on touch, independent of
+// the corner-control fix above. Same ownDefaults object every interactive
+// subclass reads from, so this one assignment covers every object type.
+fabric.FabricObject.ownDefaults.padding = 20;
 
 type TaggableObject = fabric.FabricObject & { appRole?: string };
 function tagAsBasePhoto(obj: fabric.FabricObject) {
@@ -111,60 +144,49 @@ function findBasePhoto(canvas: fabric.Canvas): fabric.FabricImage | null {
 
 // Fabric's cropX/cropY/width/height are just a WINDOW into the base photo's
 // underlying element (getElement()) -- the element itself stays the full,
-// un-cropped source no matter what's currently visible. This flattens
-// exactly what's currently VISIBLE (respecting whatever crop window, if
-// any, is already applied) into one standalone image, as a data URL.
-// rotateBasePhoto/flipBasePhoto use this so rotating after cropping rotates
-// the cropped result, not a version from before the crop.
-function getVisibleCropDataUrl(basePhoto: fabric.FabricImage): string {
+// un-cropped source no matter what's currently visible. This crops AND
+// rotates/flips the currently-visible region in ONE canvas pass, returning
+// the result as a data URL -- rotateBasePhoto/flipBasePhoto use it so
+// rotating after cropping rotates the cropped result, not a version from
+// before the crop.
+//
+// Originally two separate functions (flatten the visible crop to a PNG
+// data URL, then load THAT back into an <img> and rotate it into a SECOND
+// PNG data URL) -- each full-resolution PNG round-trip allocates its own
+// uncompressed canvas buffer and base64 string, and on a real phone with a
+// large (multi-megapixel, this app now genuinely produces native-
+// resolution originals) source image, doing that twice per rotation was a
+// plausible memory/performance cliff a small desktop-test image would
+// never hit. Combining into one pass halves the peak memory and the
+// number of async image-decode round trips (which also halves the window
+// for a second rapid tap to race against the first -- see the `rotating`
+// guard on the buttons below). JPEG instead of PNG for the same reason:
+// smaller buffers/strings at a real phone's memory budget, negligible
+// quality cost at 0.97 -- the app's own final Save already re-encodes to
+// JPEG at 0.92 regardless (see handleSave), so this isn't introducing a
+// new category of loss, just an earlier one at a much higher quality.
+function getRotatedCropDataUrl(
+  basePhoto: fabric.FabricImage,
+  transform: { rotation: 0 | 90 | 180 | 270; flipX: boolean; flipY: boolean },
+): string {
   const el = basePhoto.getElement() as HTMLImageElement;
   const cropX = basePhoto.cropX ?? 0;
   const cropY = basePhoto.cropY ?? 0;
   const cropW = basePhoto.width || el.naturalWidth || 1;
   const cropH = basePhoto.height || el.naturalHeight || 1;
+  const swapped = transform.rotation === 90 || transform.rotation === 270;
+  const outW = swapped ? cropH : cropW;
+  const outH = swapped ? cropW : cropH;
   const off = document.createElement("canvas");
-  off.width = cropW;
-  off.height = cropH;
+  off.width = outW || 1;
+  off.height = outH || 1;
   const ctx = off.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D context unavailable.");
-  ctx.drawImage(el, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-  return off.toDataURL("image/png");
-}
-
-// Renders `sourceUrl` onto an offscreen canvas rotated/flipped by exactly
-// this one increment (dimensions swapped for a 90/270 rotation), and
-// returns the result as a data URL -- same "flatten a transform into a new
-// image, then setElement() the base photo to it" technique already used by
-// Remove Background (handleRemoveBackground below), just for rotate/flip
-// instead of a chroma-key cutout.
-function getTransformedImageUrl(
-  sourceUrl: string,
-  transform: { rotation: 0 | 90 | 180 | 270; flipX: boolean; flipY: boolean },
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new window.Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const swapped = transform.rotation === 90 || transform.rotation === 270;
-      const w = swapped ? img.naturalHeight : img.naturalWidth;
-      const h = swapped ? img.naturalWidth : img.naturalHeight;
-      const off = document.createElement("canvas");
-      off.width = w || 1;
-      off.height = h || 1;
-      const ctx = off.getContext("2d");
-      if (!ctx) {
-        reject(new Error("Canvas 2D context unavailable."));
-        return;
-      }
-      ctx.translate(w / 2, h / 2);
-      ctx.rotate((transform.rotation * Math.PI) / 180);
-      ctx.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
-      ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-      resolve(off.toDataURL("image/png"));
-    };
-    img.onerror = () => reject(new Error("Couldn't load the image to rotate/flip it."));
-    img.src = sourceUrl;
-  });
+  ctx.translate(outW / 2, outH / 2);
+  ctx.rotate((transform.rotation * Math.PI) / 180);
+  ctx.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
+  ctx.drawImage(el, cropX, cropY, cropW, cropH, -cropW / 2, -cropH / 2, cropW, cropH);
+  return off.toDataURL("image/jpeg", 0.97);
 }
 
 export type AnnotationSaveAction = (
@@ -233,6 +255,33 @@ export function AnnotationEditor({
   // cover) never constructs on top of a still-in-flight disposal. See that
   // effect for the crash this prevents.
   const disposePromiseRef = useRef<Promise<boolean> | null>(null);
+  // The explicit "editor idle" contract: Rotate and Crop Apply are the two
+  // operations that asynchronously mutate the AUTHORITATIVE canvas state
+  // (basePhoto's element/crop/scale) -- both read something (a fresh
+  // Image load, a fetched FabricImage) that takes real, unbounded time,
+  // then write the result back. Neither previously checked, after that
+  // await, whether the canvas they were about to mutate was still the
+  // live one -- if the user rotated or applied a crop and then quickly
+  // moved on (another edit, Save, or closing the editor) before that
+  // await resolved, the eventual completion still called
+  // basePhoto.setElement()/canvas.loadFromJSON()/canvas.requestRenderAll()
+  // regardless, sometimes against a canvas mid-disposal (Fabric's own
+  // dispose() had already deleted its internal DOM-manager state) --
+  // "Cannot read properties of undefined (reading 'clearRect')" and
+  // friends, reproducible only under a fast combined sequence, never in
+  // an isolated single-tool test. This ref is a serialized queue both
+  // operations register into (trackPendingEdit below); Save awaits it
+  // before snapshotting, and the disposal cleanup effect awaits it before
+  // actually calling canvas.dispose() -- so persistence and teardown both
+  // wait for in-flight editor mutations to genuinely settle first,
+  // structurally, rather than by guessing at a delay.
+  const pendingEditRef = useRef<Promise<void>>(Promise.resolve());
+  // See handleAdjustmentInput below -- coalesces rapid slider ticks so the
+  // expensive full-resolution filter pass runs at most once per animation
+  // frame instead of once per native 'input' event (which fires far more
+  // often than the screen can even repaint during a fast drag).
+  const pendingAdjustmentsRef = useRef<AdjustmentValues | null>(null);
+  const adjustmentRafRef = useRef<number | null>(null);
 
   const [tool, setTool] = useState<Tool>("select");
   const [saving, setSaving] = useState(false);
@@ -245,6 +294,17 @@ export function AnnotationEditor({
   // not just right after "Add Text", so re-selecting an existing text
   // object to restyle it also works.
   const [selectedText, setSelectedText] = useState<fabric.IText | null>(null);
+  // Distinguishes "this text object is selected, show move/resize/rotate
+  // handles" from "the caret is live, I'm typing" -- the two states the
+  // text toolbar needs to look and behave differently for (see the
+  // text:editing:entered/exited listeners below). Fabric's own default way
+  // to reach editing is a double-click/double-tap, which is exactly the
+  // kind of gesture that's unreliable on a touch device (needs two taps
+  // inside a short, easy-to-miss time window, and competes with the
+  // browser's own tap-zoom/selection heuristics) -- the "Edit Text"/"Done"
+  // buttons below (driven by this state) give an explicit, always-hittable
+  // way to cross that boundary instead of relying on it.
+  const [textEditing, setTextEditing] = useState(false);
   // Any FabricImage the user can select is one they added via "Add Logo /
   // Image" -- the canvas's own background image is set non-selectable/
   // non-evented (see the initial-load effect below), so it can never be
@@ -263,6 +323,21 @@ export function AnnotationEditor({
   // per axis -- only ever the single closest match, matching what actually
   // gets snapped to.
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
+  // The modal is `fixed inset-0` -- pinned to the LAYOUT viewport, which on
+  // iOS Safari does NOT shrink when the on-screen keyboard opens (the
+  // keyboard is a separate overlay; CSS %, vh, and a plain inset-0 fixed
+  // element all keep measuring the full, keyboard-underneath size). The
+  // bottom portion of the modal -- concretely the Save button, and
+  // whatever part of the canvas falls in that region -- was genuinely
+  // covered by the keyboard with no way to reach it, not just visually
+  // obscured. `window.visualViewport` is the one thing that DOES track
+  // the actually-visible area (shrinks for the keyboard, and for pinch-
+  // zoom); tracked here and applied to the modal's own height/top below
+  // instead of relying on inset-0's implicit full-viewport sizing. Falls
+  // back to `null` (today's plain inset-0 behavior, unaffected) wherever
+  // visualViewport isn't available -- desktop browsers included, where
+  // its height already equals the full window height anyway.
+  const [visualViewportBox, setVisualViewportBox] = useState<{ height: number; top: number } | null>(null);
   const [canvasBox, setCanvasBox] = useState<{ width: number; height: number } | null>(null);
   // The canvas's internal pixel resolution (distinct from canvasBox's CSS
   // display size) -- needed to convert a guide's canvas-space position into
@@ -301,6 +376,11 @@ export function AnnotationEditor({
   const [cropZoom, setCropZoom] = useState(1);
   const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
   const [cropFrameSize, setCropFrameSize] = useState<{ width: number; height: number } | null>(null);
+  // handleApplyCrop previously had no error handling or in-flight feedback
+  // at all -- a failed fetch/loadFromJSON was an uncaught rejection, and
+  // there was no way to tell "still applying" from "silently did nothing."
+  const [applyingCrop, setApplyingCrop] = useState(false);
+  const [cropError, setCropError] = useState<string | undefined>();
   // The base photo's CURRENT full source (getElement().src), captured fresh
   // every time the crop tool opens -- must match whatever handleApplyCrop
   // itself crops from, or the live drag-to-position preview shows the wrong
@@ -316,6 +396,23 @@ export function AnnotationEditor({
   const [adjustments, setAdjustments] = useState<AdjustmentValues>(NEUTRAL_ADJUSTMENTS);
   const [rotatePanelOpen, setRotatePanelOpen] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [rotateError, setRotateError] = useState<string | undefined>();
+  // `rotating` state only reflects in props on the NEXT render, so a second
+  // rapid tap fired before that render (very plausible on a touch device --
+  // exactly the class of bug a fast, non-latent desktop test would never
+  // reproduce) could still slip past a disabled-button check alone and race
+  // a second applyBaseTransform call against the first, each reading/writing
+  // basePhoto at different points. This ref is set/cleared synchronously
+  // around the async work so a second call can bail out immediately,
+  // regardless of render timing.
+  const rotatingRef = useRef(false);
+  // Same synchronous-mutex reasoning as rotatingRef, for handleApplyCrop --
+  // which previously had NO such guard at all. A rapid double-tap on
+  // "Apply crop" (or any other trigger firing it twice back to back)
+  // could start a second async apply while the first was still awaiting
+  // its own fetch/loadFromJSON, each independently reading/mutating the
+  // same basePhoto.
+  const applyingCropRef = useRef(false);
 
   // For video: a JPEG data URL of whatever frame the user picked (or, when
   // reopening an already-edited video, one captured silently for canvas-
@@ -490,6 +587,7 @@ export function AnnotationEditor({
       setSelectedText(null);
       setSelectedImage(null);
       setSelectedObject(null);
+      setTextEditing(false);
       setAdjustPanelOpen(false);
       setRotatePanelOpen(false);
 
@@ -746,15 +844,46 @@ export function AnnotationEditor({
       setSelectedText(null);
       setSelectedImage(null);
       setSelectedObject(null);
+      setTextEditing(false);
     });
+    // See textEditing's own comment -- these fire regardless of whether
+    // editing was entered via the "Edit Text" button, a real double-click/
+    // double-tap, or activateTool's "Add Text" branch, so all three paths
+    // stay in sync with the same two-state toolbar.
+    canvas.on("text:editing:entered", () => setTextEditing(true));
+    canvas.on("text:editing:exited", () => setTextEditing(false));
     }
 
     return () => {
       disposed = true;
-      if (canvas) {
-        disposePromiseRef.current = canvas.dispose();
-      }
+      // Nulled IMMEDIATELY/synchronously, before the canvas is actually
+      // disposed below -- this is the signal applyBaseTransform/
+      // handleApplyCrop check (fabricRef.current !== canvas) to bail out
+      // of a still-in-flight operation as early as possible, rather than
+      // only once the (potentially delayed, see below) actual teardown
+      // happens.
       fabricRef.current = null;
+      if (adjustmentRafRef.current !== null) {
+        cancelAnimationFrame(adjustmentRafRef.current);
+        adjustmentRafRef.current = null;
+      }
+      pendingAdjustmentsRef.current = null;
+      if (canvas) {
+        const canvasToDispose = canvas;
+        // See pendingEditRef's own declaration -- actually tearing the
+        // canvas down (which deletes Fabric's internal DOM-manager state)
+        // is deferred until any Rotate/Crop Apply still in flight against
+        // THIS canvas has settled. pendingEditRef never rejects (see
+        // trackPendingEdit), so no .catch needed. Combined with the
+        // fabricRef.current nulling above (which makes that in-flight
+        // operation bail out on its own the moment it next checks), this
+        // guarantees dispose() never runs while that operation is
+        // mid-mutation, and -- since the NEXT open's construction effect
+        // itself awaits disposePromiseRef before building a new canvas --
+        // that no old async work can ever reach a newly-constructed
+        // canvas either.
+        disposePromiseRef.current = pendingEditRef.current.then(() => canvasToDispose.dispose());
+      }
     };
     // canvasNonce is a real dependency, not just a React key: the "reset
     // picker state" effect above bumps it on every open (for every media
@@ -772,6 +901,29 @@ export function AnnotationEditor({
     // whichever canvas node is actually live.
   }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce]);
 
+  // See visualViewportBox's own declaration. `resize` fires when the
+  // visible area's SIZE changes (keyboard opening/closing, pinch-zoom);
+  // `scroll` fires when its OFFSET changes without a size change (iOS
+  // Safari auto-scrolling the page to keep a focused input above the
+  // keyboard, which shifts visualViewport.offsetTop out from under a
+  // `fixed` element pinned to the layout viewport's own origin) -- both
+  // matter here, since either alone can put part of a `fixed inset-0`
+  // modal behind the keyboard or off the top of the visible area.
+  useEffect(() => {
+    if (!open || typeof window === "undefined" || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    function update() {
+      setVisualViewportBox({ height: vv.height, top: vv.offsetTop });
+    }
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, [open]);
+
   // The canvas's on-screen box only actually changes when a new image
   // loads (ready flips false -> true) -- measured here once rather than on
   // every drag frame, since it's what the guide-line overlay below sizes
@@ -784,14 +936,87 @@ export function AnnotationEditor({
     if (canvas) setCanvasResolution({ width: canvas.getWidth(), height: canvas.getHeight() });
   }, [ready]);
 
+  // Measures the crop frame ONLY after the crop-mode layout (the Apply/
+  // Cancel button row above the canvas, which activateTool's own
+  // state-batch also triggers) has actually painted -- a plain
+  // getBoundingClientRect() inside activateTool itself reads the canvas's
+  // box from BEFORE that row exists, which is taller than the canvas's
+  // real box once it does, silently sizing/positioning the crop overlay
+  // against a stale frame. Double rAF (not a single one, and not just
+  // this effect's own commit) because the button row's own layout only
+  // settles on the frame AFTER this render commits -- one rAF can still
+  // land before the browser has actually laid out and painted that new
+  // row, especially on a slower mobile device.
+  useEffect(() => {
+    if (!cropping) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const rect = canvasElRef.current?.getBoundingClientRect();
+        setCropFrameSize(rect ? { width: rect.width, height: rect.height } : null);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [cropping]);
+
   function withCanvas(fn: (canvas: fabric.Canvas) => void) {
     const canvas = fabricRef.current;
     if (!canvas) return;
     fn(canvas);
   }
 
+  // See pendingEditRef's own declaration for why this exists. Chains `run`
+  // after whatever edit was already pending (so two overlapping
+  // authoritative-state mutations serialize instead of racing each other),
+  // and leaves pendingEditRef holding an always-resolving tracker promise
+  // (never rejecting) so a failed edit doesn't permanently wedge every
+  // future Save/disposal into waiting on an already-rejected promise --
+  // the ORIGINAL caller still observes whatever `run` actually
+  // resolves/rejects with, via the returned promise, which is `run`'s own
+  // promise, not the tracker.
+  function trackPendingEdit<T>(run: () => Promise<T>): Promise<T> {
+    const started = pendingEditRef.current.then(run, run);
+    pendingEditRef.current = started.then(
+      () => undefined,
+      () => undefined,
+    );
+    return started;
+  }
+
   function activateTool(next: Tool) {
+    // Rotate and Crop Apply both asynchronously read/replace the base
+    // photo's element (a fetch/decode that takes real, unbounded time) --
+    // switching to ANY other tool while one is still in flight, most
+    // concretely entering Crop, would capture/act on a basePhoto that's
+    // about to change out from under it the moment that operation
+    // completes (e.g. Crop's own cropSourceUrl snapshot going stale the
+    // instant a still-pending Rotate finishes and calls setElement()).
+    // Both buttons already disable themselves while their OWN operation is
+    // running (rotating/applyingCrop); refusing every OTHER tool switch
+    // here too closes off the cross-tool version of the same race
+    // structurally, rather than only guarding the one case (Crop) known to
+    // read basePhoto on entry -- correct regardless of what a future tool
+    // might also read from it.
+    if (rotatingRef.current || applyingCropRef.current) return;
     withCanvas((canvas) => {
+      // Rotate/Flip (applyBaseTransform) resets the base photo's element
+      // AND its crop window (cropX/Y reset to 0, width/height to the new
+      // full size -- see applyBaseTransform) -- entirely disjoint from
+      // whatever cropSourceUrl/cropZoom/cropOffset the crop overlay is
+      // mid-gesture with, or from the base photo any other tool is about
+      // to act on. Nothing previously stopped the Rotate panel from
+      // staying open (or being opened) while another tool was also active,
+      // so a rotate fired mid-crop-gesture left the crop overlay showing
+      // a stale image at a stale zoom/pan while Apply would have read the
+      // ALREADY-rotated element underneath it -- a real "what I see isn't
+      // what gets applied" case, not just visual clutter. Closing it here
+      // makes Rotate and every other tool mutually exclusive, same as
+      // Crop/Draw/Text/Arrow already are via `tool`.
+      setRotatePanelOpen(false);
       setCropping(next === "crop");
       setTool(next);
       canvas.isDrawingMode = next === "draw";
@@ -816,6 +1041,12 @@ export function AnnotationEditor({
         canvas.add(text);
         canvas.setActiveObject(text);
         text.enterEditing();
+        // Selects the placeholder "Text" the instant editing starts, so
+        // the first character typed (mobile keyboard or otherwise)
+        // replaces it outright instead of the user having to manually
+        // select-all or backspace it away first.
+        text.selectAll();
+        canvas.requestRenderAll();
         setTool("select");
         canvas.isDrawingMode = false;
       }
@@ -845,14 +1076,36 @@ export function AnnotationEditor({
         setTool("select");
       }
       if (next === "crop") {
-        const rect = canvasElRef.current?.getBoundingClientRect();
-        setCropFrameSize(rect ? { width: rect.width, height: rect.height } : null);
+        // cropFrameSize itself is measured in the effect below, not here --
+        // this fires inside the same state batch that flips `cropping` to
+        // true, which is what makes the Apply/Cancel button row appear
+        // above the canvas. React hasn't painted that layout change yet at
+        // this point, so a getBoundingClientRect() read here would capture
+        // the canvas's PRE-crop-mode box -- taller than its actual size
+        // once the button row has taken its own space -- and the crop
+        // overlay would then be sized/positioned against a stale frame.
         setCropZoom(1);
         setCropOffset({ x: 0, y: 0 });
         const basePhoto = findBasePhoto(canvas);
         setCropSourceUrl(basePhoto ? (basePhoto.getElement() as HTMLImageElement).src : null);
       }
     });
+  }
+
+  // The Rotate sidebar button used to just toggle rotatePanelOpen directly
+  // -- see activateTool's own comment on why that let Rotate stay open (or
+  // be opened) alongside an in-progress Crop gesture. Routes through
+  // activateTool("select") first so opening Rotate always cleanly exits
+  // whatever else was active (discarding any uncommitted crop pan/zoom,
+  // same as tapping "Cancel crop" would). Reads the CURRENT rotatePanelOpen
+  // before that reset (which itself closes it) rather than chaining a
+  // functional update after -- two setRotatePanelOpen calls in the same
+  // batch would otherwise compose against each other, not against the
+  // pre-click value, turning "close" into "close then immediately reopen."
+  function toggleRotatePanel() {
+    const opening = !rotatePanelOpen;
+    activateTool("select");
+    if (opening) setRotatePanelOpen(true);
   }
 
   // Rotate/mirror the base photo itself -- never whatever's selected (text/
@@ -862,7 +1115,7 @@ export function AnnotationEditor({
   // frame the CANVAS itself would need to resize to the newly-rotated
   // image's own orientation, a materially bigger change than this.
   //
-  // Always transforms getVisibleCropDataUrl's flattened output -- exactly
+  // Always transforms getRotatedCropDataUrl's flattened output -- exactly
   // what's currently on screen, crop included -- not the pristine original.
   // Rotating now bakes the current crop into the new full underlying
   // element (cropX/Y reset to 0, width/height become the new full size),
@@ -873,55 +1126,93 @@ export function AnnotationEditor({
     const canvas = fabricRef.current;
     const basePhoto = canvas ? findBasePhoto(canvas) : null;
     if (!canvas || !basePhoto || !targetAspect) return;
+    // See rotatingRef's declaration -- bails out synchronously on a rapid
+    // second tap instead of racing a second setElement() against this one.
+    if (rotatingRef.current) return;
 
+    rotatingRef.current = true;
     setRotating(true);
-    try {
-      const visibleUrl = getVisibleCropDataUrl(basePhoto);
-      const transformedUrl = await getTransformedImageUrl(visibleUrl, { rotation, flipX, flipY });
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const el = new window.Image();
-        el.onload = () => resolve(el);
-        el.onerror = () => reject(new Error("Couldn't load the rotated image."));
-        el.src = transformedUrl;
-      });
+    setRotateError(undefined);
+    // See pendingEditRef's own declaration -- registers this operation so
+    // Save and disposal both know a mutation is in flight and wait for it,
+    // instead of racing its eventual completion.
+    await trackPendingEdit(async () => {
+      try {
+        const transformedUrl = getRotatedCropDataUrl(basePhoto, { rotation, flipX, flipY });
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new window.Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error("Couldn't load the rotated image."));
+          el.src = transformedUrl;
+        });
 
-      const naturalW = img.naturalWidth;
-      const naturalH = img.naturalHeight;
-      const frameW = canvas.getWidth();
-      const frameH = canvas.getHeight();
-      // Same cover-fit formula as the initial load (targetAspect branch) --
-      // naturalW/H already reflect the swapped dimensions for a 90/270
-      // rotation, so this re-centers/re-covers correctly with no separate
-      // "swapped" case to handle.
-      const imgScale = Math.max(frameW / naturalW, frameH / naturalH);
+        // The await above can take arbitrarily long (decoding a large
+        // native-resolution frame). If the canvas this operation started
+        // against has since been disposed/replaced (the user closed the
+        // editor, or another open/reopen cycle already swapped in a fresh
+        // instance), fabricRef.current no longer points at THIS canvas --
+        // bail out instead of mutating/rendering a torn-down or stale
+        // instance, which is exactly what produced Fabric-internal crashes
+        // ("Cannot read properties of undefined (reading 'clearRect')")
+        // under a fast combined sequence.
+        if (fabricRef.current !== canvas) return;
 
-      basePhoto.setElement(img);
-      basePhoto.set({
-        scaleX: imgScale,
-        scaleY: imgScale,
-        left: (frameW - naturalW * imgScale) / 2,
-        top: (frameH - naturalH * imgScale) / 2,
-        cropX: 0,
-        cropY: 0,
-        width: naturalW,
-        height: naturalH,
-      });
-      basePhoto.setCoords();
-      canvas.requestRenderAll();
-      canvas.fire("object:modified", { target: basePhoto });
-      setCropZoom(1);
-      setCropOffset({ x: 0, y: 0 });
-    } finally {
-      setRotating(false);
-    }
+        const naturalW = img.naturalWidth;
+        const naturalH = img.naturalHeight;
+        const frameW = canvas.getWidth();
+        const frameH = canvas.getHeight();
+        // Same cover-fit formula as the initial load (targetAspect branch) --
+        // naturalW/H already reflect the swapped dimensions for a 90/270
+        // rotation, so this re-centers/re-covers correctly with no separate
+        // "swapped" case to handle.
+        const imgScale = Math.max(frameW / naturalW, frameH / naturalH);
+
+        basePhoto.setElement(img);
+        basePhoto.set({
+          scaleX: imgScale,
+          scaleY: imgScale,
+          left: (frameW - naturalW * imgScale) / 2,
+          top: (frameH - naturalH * imgScale) / 2,
+          cropX: 0,
+          cropY: 0,
+          width: naturalW,
+          height: naturalH,
+        });
+        basePhoto.setCoords();
+        canvas.requestRenderAll();
+        canvas.fire("object:modified", { target: basePhoto });
+        setCropZoom(1);
+        setCropOffset({ x: 0, y: 0 });
+      } catch (error) {
+        // Previously uncaught -- any failure here (a CORS-tainted canvas
+        // throwing SecurityError on toDataURL, same real failure mode already
+        // handled in handleSave; a decode error; anything else) was silently
+        // swallowed, so on a real device this looked exactly like "I tap
+        // Rotate and nothing happens" with zero feedback.
+        console.error("Failed to rotate/flip image:", error);
+        // Also stale-guarded: don't surface an error banner for an
+        // operation whose canvas has already been torn down/replaced --
+        // there's no dialog left for it to mean anything to.
+        if (fabricRef.current === canvas) {
+          setRotateError(
+            error instanceof DOMException && error.name === "SecurityError"
+              ? "Couldn't rotate -- this image failed to load securely."
+              : "Couldn't rotate the image. Try again.",
+          );
+        }
+      } finally {
+        rotatingRef.current = false;
+        setRotating(false);
+      }
+    });
   }
 
   function rotateBasePhoto(deltaDegrees: 90 | -90) {
-    applyBaseTransform(deltaDegrees === 90 ? 90 : 270, false, false);
+    void applyBaseTransform(deltaDegrees === 90 ? 90 : 270, false, false);
   }
 
   function flipBasePhoto(axis: "horizontal" | "vertical") {
-    applyBaseTransform(0, axis === "horizontal", axis === "vertical");
+    void applyBaseTransform(0, axis === "horizontal", axis === "vertical");
   }
 
   // Mirrors Grid's crop math exactly (see grid-crop-overlay.tsx): the frame
@@ -948,93 +1239,208 @@ export function AnnotationEditor({
   async function handleApplyCrop() {
     const canvas = fabricRef.current;
     const basePhoto = canvas ? findBasePhoto(canvas) : null;
-    if (!canvas || !basePhoto) return;
-    const frameW = canvas.getWidth();
-    const frameH = canvas.getHeight();
+    if (!canvas || !basePhoto || !cropFrameSize) return;
+    // See applyingCropRef's own declaration -- bails out synchronously on a
+    // rapid double-tap instead of racing a second fetch/loadFromJSON
+    // against this one.
+    if (applyingCropRef.current) return;
 
-    // basePhoto.getElement() is always the current FULL underlying source
-    // -- cropX/Y/width/height are just Fabric's window into it, never the
-    // element itself -- so this already correctly reflects any prior
-    // rotate/flip (rotateBasePhoto/flipBasePhoto bake those directly into
-    // this same element) without needing to separately track/reapply a
-    // transform here.
-    const sourceUrl = (basePhoto.getElement() as HTMLImageElement).src;
+    applyingCropRef.current = true;
+    setApplyingCrop(true);
+    setCropError(undefined);
+    // See pendingEditRef's own declaration -- registers this operation so
+    // Save and disposal both know a mutation is in flight and wait for it,
+    // instead of racing its eventual completion.
+    await trackPendingEdit(async () => {
+      try {
+        // frameW/frameH (Fabric's INTERNAL canvas resolution, i.e. canvas
+        // units) are only used below for the final PLACEMENT onto the canvas
+        // -- scaleX/scaleY/left/top -- since that's the coordinate space Fabric
+        // actually renders in, independent of how big the canvas is drawn on
+        // screen.
+        const frameW = canvas.getWidth();
+        const frameH = canvas.getHeight();
 
-    const freshImg = await fabric.FabricImage.fromURL(sourceUrl, { crossOrigin: "anonymous" });
-    const naturalW = freshImg.width ?? frameW;
-    const naturalH = freshImg.height ?? frameH;
-    // Same "cover" baseline as the initial image load: at zoom 1 the full
-    // image exactly fills the frame (cropping whichever axis overflows).
-    const coverScale = Math.max(frameW / naturalW, frameH / naturalH);
-    const cropW = clamp(frameW / (coverScale * cropZoom), 0, naturalW);
-    const cropH = clamp(frameH / (coverScale * cropZoom), 0, naturalH);
-    // offset is a fraction of the FRAME (matching Grid's own drag-delta
-    // convention), which is the same as a fraction of the crop window's
-    // own natural size -- both are scaled by the same factor to fill the
-    // frame, so a "one frame-width" drag is exactly "one crop-window-
-    // width" in natural pixels, regardless of zoom.
-    const cropX = clamp((naturalW - cropW) / 2 + cropOffset.x * cropW, 0, naturalW - cropW);
-    const cropY = clamp((naturalH - cropH) / 2 + cropOffset.y * cropH, 0, naturalH - cropH);
+        // basePhoto.getElement() is always the current FULL underlying source
+        // -- cropX/Y/width/height are just Fabric's window into it, never the
+        // element itself -- so this already correctly reflects any prior
+        // rotate/flip (rotateBasePhoto/flipBasePhoto bake those directly into
+        // this same element) without needing to separately track/reapply a
+        // transform here.
+        const sourceUrl = (basePhoto.getElement() as HTMLImageElement).src;
 
-    // The base photo is a regular (tagged) entry in json.objects now, not
-    // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
-    const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
-    const objects = json.objects ?? [];
-    const photoIndex = objects.findIndex((o) => o.appRole === BASE_PHOTO_ROLE);
-    const updatedPhoto = {
-      ...(photoIndex >= 0 ? objects[photoIndex] : {}),
-      appRole: BASE_PHOTO_ROLE,
-      src: sourceUrl,
-      cropX,
-      cropY,
-      width: cropW,
-      height: cropH,
-      scaleX: frameW / cropW,
-      scaleY: frameH / cropH,
-      left: 0,
-      top: 0,
-      // See the identical note on the initial-load path -- without this,
-      // the object renders centered on (left,top) instead of anchored
-      // there, which is why the crop never appeared to visually apply.
-      originX: "left",
-      originY: "top",
-    };
-    if (photoIndex >= 0) {
-      objects[photoIndex] = updatedPhoto;
-    } else {
-      objects.unshift(updatedPhoto);
-    }
-    json.objects = objects;
-    await canvas.loadFromJSON(json);
-    canvas.requestRenderAll();
-    setCropping(false);
-    setTool("select");
+        const freshImg = await fabric.FabricImage.fromURL(sourceUrl, { crossOrigin: "anonymous" });
+        // The await above (a network fetch/decode) can take arbitrarily
+        // long. If the canvas this operation started against has since
+        // been disposed/replaced (editor closed, or a fresh open/reopen
+        // cycle already swapped in a new instance), fabricRef.current no
+        // longer points at THIS canvas -- bail out instead of mutating a
+        // torn-down or stale instance. Same reasoning/failure mode as
+        // applyBaseTransform's identical guard.
+        if (fabricRef.current !== canvas) return;
+        const naturalW = freshImg.width ?? frameW;
+        const naturalH = freshImg.height ?? frameH;
+        // THE ACTUAL BUG this fixes: the crop overlay the user drags/pinches is
+        // sized and CSS-`object-cover`-fit against cropFrameSize -- the
+        // canvas element's live CSS DISPLAY box (measured via
+        // getBoundingClientRect() when crop mode opens). That box is NOT
+        // guaranteed to equal canvas.getWidth()/getHeight() (Fabric's internal
+        // resolution) -- entering crop mode adds the Apply/Cancel button row
+        // above the canvas, which can shrink the canvas's available CSS height
+        // below its own intrinsic resolution on a real, viewport-constrained
+        // phone (this never reproduces on a spacious desktop test, or even a
+        // roomy mobile-emulated one). Computing "cover scale" from
+        // frameW/frameH here -- a DIFFERENT box than the one the overlay
+        // visually panned/zoomed against -- silently cropped a different
+        // window than what was shown, which is exactly the "Apply jumps to a
+        // different framing" bug. Using cropFrameSize here instead is the
+        // SAME number that already determines the overlay's own rendered
+        // size/scale (see its JSX below), so by construction there is no
+        // second, possibly-diverging "frame size" for this math to disagree
+        // with -- whatever box the user saw is exactly the box this crops
+        // against.
+        const coverScale = Math.max(cropFrameSize.width / naturalW, cropFrameSize.height / naturalH);
+        const cropW = clamp(cropFrameSize.width / (coverScale * cropZoom), 0, naturalW);
+        const cropH = clamp(cropFrameSize.height / (coverScale * cropZoom), 0, naturalH);
+        // offset is a fraction of the FRAME (matching Grid's own drag-delta
+        // convention), which is the same as a fraction of the crop window's
+        // own natural size -- both are scaled by the same factor to fill the
+        // frame, so a "one frame-width" drag is exactly "one crop-window-
+        // width" in natural pixels, regardless of zoom.
+        //
+        // THE ACTUAL "Apply doesn't match the preview" BUG: this used to ADD
+        // cropOffset here, but the overlay's own gesture and the crop window
+        // it's supposed to describe move in OPPOSITE directions. The overlay
+        // pans by moving the IMAGE via `transform: translate(offset%, ...)` --
+        // dragging right increases offset.x, which slides the image content
+        // right on screen. But sliding the image right under a FIXED frame
+        // reveals content from further toward the image's LEFT (smaller
+        // natural-x), the same as sliding a photo right under a fixed peephole
+        // -- so the crop window's left edge should DECREASE as offset.x
+        // increases, not increase. Adding cropOffset here did the opposite:
+        // every pan moved the crop window the wrong way, and every pinch-zoom
+        // (which re-centers around the current offset, see
+        // AnnotationCropOverlay's pinch handler) compounded that same wrong-
+        // direction shift. Confirmed empirically -- extracting the source
+        // image at the ADDED-offset coordinates the old formula computed
+        // produced a visibly different, more-zoomed-out framing than what the
+        // overlay showed; extracting it at these SUBTRACTED-offset coordinates
+        // instead matches the overlay's preview.
+        const cropX = clamp((naturalW - cropW) / 2 - cropOffset.x * cropW, 0, naturalW - cropW);
+        const cropY = clamp((naturalH - cropH) / 2 - cropOffset.y * cropH, 0, naturalH - cropH);
+
+        // The base photo is a regular (tagged) entry in json.objects now, not
+        // the special json.backgroundImage key -- see BASE_PHOTO_ROLE.
+        const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
+        const objects = json.objects ?? [];
+        const photoIndex = objects.findIndex((o) => o.appRole === BASE_PHOTO_ROLE);
+        const updatedPhoto = {
+          ...(photoIndex >= 0 ? objects[photoIndex] : {}),
+          appRole: BASE_PHOTO_ROLE,
+          src: sourceUrl,
+          cropX,
+          cropY,
+          width: cropW,
+          height: cropH,
+          scaleX: frameW / cropW,
+          scaleY: frameH / cropH,
+          left: 0,
+          top: 0,
+          // See the identical note on the initial-load path -- without this,
+          // the object renders centered on (left,top) instead of anchored
+          // there, which is why the crop never appeared to visually apply.
+          originX: "left",
+          originY: "top",
+        };
+        if (photoIndex >= 0) {
+          objects[photoIndex] = updatedPhoto;
+        } else {
+          objects.unshift(updatedPhoto);
+        }
+        json.objects = objects;
+        await canvas.loadFromJSON(json);
+        // Second async boundary -- re-check for the same reason as above.
+        // loadFromJSON reconstructs every object (including re-fetching the
+        // base photo's own image), which can take real time on a large
+        // native-resolution source; the canvas could have been torn down
+        // during THIS await too, independent of the first check.
+        if (fabricRef.current !== canvas) return;
+        canvas.requestRenderAll();
+        setCropping(false);
+        setTool("select");
+      } catch (error) {
+        // Previously completely unhandled -- a failed fetch or a
+        // loadFromJSON rejection was an uncaught promise rejection, so
+        // tapping "Apply crop" and having it silently do nothing (no
+        // error, crop mode just stayed open) was indistinguishable from
+        // the tap not having registered at all.
+        console.error("Failed to apply crop:", error);
+        if (fabricRef.current === canvas) {
+          setCropError(
+            error instanceof DOMException && error.name === "SecurityError"
+              ? "Couldn't crop -- this image failed to load securely."
+              : "Couldn't apply the crop. Try again.",
+          );
+        }
+      } finally {
+        applyingCropRef.current = false;
+        setApplyingCrop(false);
+      }
+    });
   }
+
+  // Same class of bug as Rotate/Crop Apply had: loadFromJSON is
+  // asynchronous (re-fetches/reconstructs every object, including the base
+  // photo's own image), and this previously had neither a same-operation
+  // mutex (a rapid double-tap on Undo could start a second restore before
+  // the first's loadFromJSON resolved, each independently mutating the
+  // canvas and racing to finish last) nor a staleness check (its .then()
+  // ran unconditionally, regardless of whether the canvas it captured was
+  // still the live one by the time it fired). historyOperationRef +
+  // trackPendingEdit + the fabricRef.current check give it the identical
+  // protection.
+  const historyOperationRef = useRef(false);
 
   function handleUndo() {
     withCanvas((canvas) => {
-      if (historyIndexRef.current <= 0) return;
+      if (historyIndexRef.current <= 0 || historyOperationRef.current) return;
       historyIndexRef.current -= 1;
+      const json = JSON.parse(historyRef.current[historyIndexRef.current]);
+      historyOperationRef.current = true;
       restoringRef.current = true;
-      canvas.loadFromJSON(JSON.parse(historyRef.current[historyIndexRef.current])).then(() => {
-        canvas.requestRenderAll();
-        restoringRef.current = false;
-        const basePhoto = findBasePhoto(canvas);
-        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+      void trackPendingEdit(async () => {
+        try {
+          await canvas.loadFromJSON(json);
+          if (fabricRef.current !== canvas) return;
+          canvas.requestRenderAll();
+          const basePhoto = findBasePhoto(canvas);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+        } finally {
+          restoringRef.current = false;
+          historyOperationRef.current = false;
+        }
       });
     });
   }
 
   function handleRedo() {
     withCanvas((canvas) => {
-      if (historyIndexRef.current >= historyRef.current.length - 1) return;
+      if (historyIndexRef.current >= historyRef.current.length - 1 || historyOperationRef.current) return;
       historyIndexRef.current += 1;
+      const json = JSON.parse(historyRef.current[historyIndexRef.current]);
+      historyOperationRef.current = true;
       restoringRef.current = true;
-      canvas.loadFromJSON(JSON.parse(historyRef.current[historyIndexRef.current])).then(() => {
-        canvas.requestRenderAll();
-        restoringRef.current = false;
-        const basePhoto = findBasePhoto(canvas);
-        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+      void trackPendingEdit(async () => {
+        try {
+          await canvas.loadFromJSON(json);
+          if (fabricRef.current !== canvas) return;
+          canvas.requestRenderAll();
+          const basePhoto = findBasePhoto(canvas);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+        } finally {
+          restoringRef.current = false;
+          historyOperationRef.current = false;
+        }
       });
     });
   }
@@ -1184,59 +1590,67 @@ export function AnnotationEditor({
     if (!canvas || !(active instanceof fabric.FabricImage)) return;
 
     setRemovingBackground(true);
-    try {
-      const { width, height } = active.getOriginalSize();
-      if (!width || !height) return;
-      const off = document.createElement("canvas");
-      off.width = width;
-      off.height = height;
-      const ctx = off.getContext("2d", { willReadFrequently: true });
-      if (!ctx) return;
-      ctx.drawImage(active.getElement() as CanvasImageSource, 0, 0, width, height);
+    // Same class of bug as Rotate/Crop Apply/Undo/Redo: this awaits an
+    // image decode (real, unbounded time) then mutates the canvas
+    // afterward -- registers into pendingEditRef so Save/disposal wait for
+    // it too, and re-checks fabricRef.current afterward so it can't touch
+    // a canvas that's since been disposed or replaced.
+    await trackPendingEdit(async () => {
+      try {
+        const { width, height } = active.getOriginalSize();
+        if (!width || !height) return;
+        const off = document.createElement("canvas");
+        off.width = width;
+        off.height = height;
+        const ctx = off.getContext("2d", { willReadFrequently: true });
+        if (!ctx) return;
+        ctx.drawImage(active.getElement() as CanvasImageSource, 0, 0, width, height);
 
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const data = imageData.data;
-      function pixelAt(x: number, y: number): [number, number, number] {
-        const i = (y * width + x) * 4;
-        return [data[i], data[i + 1], data[i + 2]];
-      }
-      const corners = [pixelAt(0, 0), pixelAt(width - 1, 0), pixelAt(0, height - 1), pixelAt(width - 1, height - 1)];
-      const bg = [0, 1, 2].map((c) => corners.reduce((sum, p) => sum + p[c], 0) / corners.length);
-
-      const TOLERANCE = 40;
-      const FEATHER = 25;
-      for (let i = 0; i < data.length; i += 4) {
-        const dr = data[i] - bg[0];
-        const dg = data[i + 1] - bg[1];
-        const db = data[i + 2] - bg[2];
-        const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-        if (dist < TOLERANCE) {
-          data[i + 3] = 0;
-        } else if (dist < TOLERANCE + FEATHER) {
-          data[i + 3] = Math.round(data[i + 3] * ((dist - TOLERANCE) / FEATHER));
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+        function pixelAt(x: number, y: number): [number, number, number] {
+          const i = (y * width + x) * 4;
+          return [data[i], data[i + 1], data[i + 2]];
         }
+        const corners = [pixelAt(0, 0), pixelAt(width - 1, 0), pixelAt(0, height - 1), pixelAt(width - 1, height - 1)];
+        const bg = [0, 1, 2].map((c) => corners.reduce((sum, p) => sum + p[c], 0) / corners.length);
+
+        const TOLERANCE = 40;
+        const FEATHER = 25;
+        for (let i = 0; i < data.length; i += 4) {
+          const dr = data[i] - bg[0];
+          const dg = data[i + 1] - bg[1];
+          const db = data[i + 2] - bg[2];
+          const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+          if (dist < TOLERANCE) {
+            data[i + 3] = 0;
+          } else if (dist < TOLERANCE + FEATHER) {
+            data[i + 3] = Math.round(data[i + 3] * ((dist - TOLERANCE) / FEATHER));
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        const resultUrl = off.toDataURL("image/png");
+        const resultEl = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const img = new window.Image();
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = resultUrl;
+        });
+        if (fabricRef.current !== canvas) return;
+
+        // Swaps which element this SAME object renders, rather than
+        // replacing the object -- position/scale/rotation/selection all stay
+        // exactly as they were, no remove+re-add bookkeeping needed.
+        active.setElement(resultEl);
+        canvas.requestRenderAll();
+        canvas.fire("object:modified", { target: active });
+      } catch (error) {
+        console.error("Failed to remove background:", error);
+      } finally {
+        setRemovingBackground(false);
       }
-      ctx.putImageData(imageData, 0, 0);
-
-      const resultUrl = off.toDataURL("image/png");
-      const resultEl = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const img = new window.Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = resultUrl;
-      });
-
-      // Swaps which element this SAME object renders, rather than
-      // replacing the object -- position/scale/rotation/selection all stay
-      // exactly as they were, no remove+re-add bookkeeping needed.
-      active.setElement(resultEl);
-      canvas.requestRenderAll();
-      canvas.fire("object:modified", { target: active });
-    } catch (error) {
-      console.error("Failed to remove background:", error);
-    } finally {
-      setRemovingBackground(false);
-    }
+    });
   }
 
   function handleBrushColorChange(color: string) {
@@ -1293,18 +1707,83 @@ export function AnnotationEditor({
     applyTextStyle({ textAlign: align });
   }
 
+  // Explicit entry into the "typing" state for an already-placed text
+  // object -- see textEditing's own comment for why this exists instead of
+  // relying on Fabric's default double-click/double-tap. Cursor lands at
+  // the end (not select-all -- that's specifically for the fresh "Text"
+  // placeholder in activateTool's "Add Text" branch) so re-editing existing
+  // custom content doesn't wipe it out the instant the keyboard opens.
+  function handleEditTextContent() {
+    withCanvas((canvas) => {
+      const active = canvas.getActiveObject();
+      if (!(active instanceof fabric.IText)) return;
+      active.enterEditing();
+      const end = active.text.length;
+      active.setSelectionStart(end);
+      active.setSelectionEnd(end);
+      canvas.requestRenderAll();
+    });
+  }
+
+  // Explicit exit back to the "move/resize/rotate" state -- the object
+  // stays selected (exitEditing doesn't deselect it), just with its normal
+  // transform handles active again instead of a live caret.
+  function handleFinishTextEditing() {
+    withCanvas((canvas) => {
+      const active = canvas.getActiveObject();
+      if (!(active instanceof fabric.IText) || !active.isEditing) return;
+      active.exitEditing();
+      canvas.requestRenderAll();
+    });
+  }
+
+  // Actually runs the (expensive -- full native-resolution, multi-filter,
+  // pure-JS Canvas2D pixel pass, see applyAdjustments/image-adjustments.ts)
+  // filter application, at most once per animation frame -- see
+  // handleAdjustmentInput below for why this is split out.
+  function flushPendingAdjustments() {
+    adjustmentRafRef.current = null;
+    const next = pendingAdjustmentsRef.current;
+    if (!next) return;
+    pendingAdjustmentsRef.current = null;
+    withCanvas((canvas) => {
+      const basePhoto = findBasePhoto(canvas);
+      if (basePhoto) {
+        applyAdjustments(basePhoto, next);
+        canvas.requestRenderAll();
+      }
+    });
+  }
+
   // Live preview only -- does NOT push undo history (a slider drag can fire
   // this dozens of times), see commitAdjustments below for that.
+  //
+  // A native range input fires its 'input' event on every pixel of finger
+  // movement -- far more often than Fabric's filter pass can actually keep
+  // up with on a real phone (readAdjustments/applyFilters reprocesses the
+  // FULL native-resolution source through every active filter, in pure JS,
+  // on every single call -- see image-adjustments.ts). Calling that
+  // synchronously per tick queued up a growing backlog the main thread
+  // fell further behind on with every additional tick, which is what
+  // "adjustment changes have noticeable latency" actually was: not one
+  // slow render, but an ever-growing pile of stale-by-the-time-they-ran
+  // ones -- and, since that backlog occupies the main thread, it's also
+  // very likely why "Save Changes" appeared unresponsive immediately after
+  // using Adjust (its tap handler couldn't even run until the backlog
+  // drained). Only ever keeping the LATEST pending value and flushing at
+  // most once per rAF means a fast drag naturally sheds intermediate
+  // frames instead of queuing them -- the exact same
+  // full-resolution/full-quality computation, just never allowed to pile
+  // up. React state (`adjustments`) still updates on every tick so the
+  // slider/number label track the finger exactly; only the expensive
+  // canvas-side work is throttled.
   function handleAdjustmentInput(key: keyof AdjustmentValues, value: number) {
     setAdjustments((prev) => {
       const next = { ...prev, [key]: value };
-      withCanvas((canvas) => {
-        const basePhoto = findBasePhoto(canvas);
-        if (basePhoto) {
-          applyAdjustments(basePhoto, next);
-          canvas.requestRenderAll();
-        }
-      });
+      pendingAdjustmentsRef.current = next;
+      if (adjustmentRafRef.current === null) {
+        adjustmentRafRef.current = requestAnimationFrame(flushPendingAdjustments);
+      }
       return next;
     });
   }
@@ -1313,6 +1792,14 @@ export function AnnotationEditor({
   // once a slider is released -- that's what the history stack listens on,
   // so one undo step covers the whole gesture instead of every tick.
   function commitAdjustments() {
+    // A release can land between rAF ticks with a pending value still
+    // queued -- flush it synchronously first so the committed/undo-stack
+    // state is always the exact final value, never a stale in-between frame.
+    if (adjustmentRafRef.current !== null) {
+      cancelAnimationFrame(adjustmentRafRef.current);
+      adjustmentRafRef.current = null;
+    }
+    flushPendingAdjustments();
     withCanvas((canvas) => {
       const basePhoto = findBasePhoto(canvas);
       if (basePhoto) canvas.fire("object:modified", { target: basePhoto });
@@ -1339,9 +1826,55 @@ export function AnnotationEditor({
   async function handleSave() {
     const canvas = fabricRef.current;
     if (!canvas || !attachmentId) return;
+    // The user should not have to manually tap "Done editing" before
+    // Save -- on mobile especially, tapping Save while the keyboard is
+    // still open for an IText is an entirely normal thing to do. IText's
+    // hiddenTextarea already syncs its .text property on every keystroke,
+    // so canvas.toJSON() below already reflects the latest typed content
+    // regardless of editing state -- but LEAVING it in editing mode
+    // through the export risks the live blinking-cursor/selection-
+    // highlight repaint (part of IText's own render step, not gated by
+    // the skipControlsDrawing flag toCanvasElement already uses to omit
+    // selection handles) getting baked into the saved bitmap if it lands
+    // on a "cursor visible" blink frame, and leaves a real DOM
+    // hiddenTextarea/keyboard focus dangling through a flow that's about
+    // to close the whole editor. exitEditing() is synchronous (no
+    // pendingEditRef registration needed) and safe to call unconditionally
+    // -- a no-op for any object that isn't currently editing.
+    for (const obj of canvas.getObjects()) {
+      if (obj instanceof fabric.IText && obj.isEditing) {
+        obj.exitEditing();
+      }
+    }
     setSaving(true);
     setSaveError(undefined);
     try {
+      // Establishes "the editor is idle" before snapshotting -- see
+      // pendingEditRef's own declaration. An Adjust slider release already
+      // flushes synchronously (commitAdjustments), but a release that
+      // hasn't fired yet (or a drag still in progress) leaves a value
+      // queued for the next animation frame rather than applied yet;
+      // cancel-then-flush here too (same pair commitAdjustments itself
+      // uses) means Save never captures a canvas that's one rAF behind the
+      // sliders' displayed values, and never runs that same pending frame
+      // a second time redundantly after this manual flush already did it.
+      // Rotate/Crop Apply are asynchronous (a fetch/decode that can take
+      // real time on a large source) and register themselves into
+      // pendingEditRef -- if either is still in flight, awaiting it here
+      // means Save always snapshots the SETTLED result of the user's most
+      // recent edit, never a canvas mid-mutation.
+      if (adjustmentRafRef.current !== null) {
+        cancelAnimationFrame(adjustmentRafRef.current);
+        adjustmentRafRef.current = null;
+      }
+      flushPendingAdjustments();
+      await pendingEditRef.current;
+      // The wait above can take a while on a slow rotate/crop. If the
+      // editor closed (or reopened into a fresh instance) during that
+      // wait, fabricRef.current no longer points at THIS canvas -- there's
+      // no dialog left for a save result to mean anything to, so stop
+      // rather than snapshot/export a canvas that's no longer live.
+      if (fabricRef.current !== canvas) return;
       const annotationJson = JSON.stringify(canvas.toJSON());
       // For a targetAspect-locked frame, exportScaleRef.current is a FIXED
       // TARGET_EXPORT_W/canvasW ratio (see setupCanvas) -- it always produces
@@ -1361,16 +1894,60 @@ export function AnnotationEditor({
         targetAspect && basePhoto && basePhoto.scaleX
           ? Math.max(exportScaleRef.current, 1 / basePhoto.scaleX)
           : exportScaleRef.current;
-      const dataUrl = canvas.toDataURL({
+      // canvas.toBlob() (Fabric's own, not a native <canvas> method -- it
+      // still builds the same full-resolution temp canvas internally, see
+      // toCanvasElement) goes straight to a real Blob via the browser's
+      // native, off-main-thread-friendly HTMLCanvasElement.toBlob(). The
+      // previous toDataURL()+fetch() pattern built a base64 STRING (~33%
+      // larger than the raw bytes) of the full-resolution export, held it
+      // entirely in memory, then had fetch() parse that whole string back
+      // into a second, separate binary buffer to produce the Blob --
+      // meaning peak memory during Save was roughly double what the actual
+      // export needed, exactly during the highest-memory-pressure moment
+      // (a full native-resolution multi-megapixel JPEG). On a memory-
+      // constrained real phone that's a plausible reason Save could stall
+      // or fail outright with no error a modest desktop test would ever
+      // trigger.
+      const blob = await canvas.toBlob({
         format: "jpeg",
         quality: 0.92,
         multiplier: nativeMultiplier,
       });
-      const blob = await (await fetch(dataUrl)).blob();
+      if (!blob) {
+        throw new Error("Couldn't render the edited image.");
+      }
+      // Server Actions on this project are capped at 20MB (bodySizeLimit AND
+      // proxyClientMaxBodySize in next.config.ts -- the proxy has its own,
+      // separate buffering limit that silently truncates a larger body
+      // *before* bodySizeLimit ever gets a say, turning an oversized upload
+      // into an opaque multipart parse failure instead of a clean rejection).
+      // Catching it here, before ever sending, turns an edge-case failure
+      // into an immediate, specific, actionable message instead of a vague
+      // one surfacing after a real round-trip.
+      if (blob.size > 19 * 1024 * 1024) {
+        setSaveError(
+          `This image is too large to save at full quality (${(blob.size / 1024 / 1024).toFixed(1)}MB). Try applying a smaller crop and save again.`,
+        );
+        return;
+      }
       const formData = new FormData();
       formData.set("file", new File([blob], "annotated-preview.jpg", { type: "image/jpeg" }));
       formData.set("annotation_json", annotationJson);
-      const result = await saveAction(projectId, attachmentId, formData);
+      // A dropped mobile connection mid-upload (common on cellular, rare on
+      // a desktop test's wifi/wired connection) can leave the underlying
+      // fetch simply never settling -- neither resolving nor rejecting --
+      // which previously meant "Saving…" stayed on screen forever with no
+      // way out and no feedback, indistinguishable from the button having
+      // done nothing at all. 60s is generous enough not to false-trigger on
+      // a genuinely slow-but-working upload of a large native-resolution
+      // export over a weak connection, while still giving up eventually
+      // instead of hanging indefinitely.
+      const result = await Promise.race([
+        saveAction(projectId, attachmentId, formData),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("TIMEOUT")), 60_000),
+        ),
+      ]);
       if (result.previewUrl) {
         onSaved(result.previewUrl);
       } else {
@@ -1394,7 +1971,9 @@ export function AnnotationEditor({
       setSaveError(
         error instanceof DOMException && error.name === "SecurityError"
           ? "Couldn't save -- an image on this canvas failed to load securely. Try re-adding it and save again."
-          : "Couldn't save changes. Try again.",
+          : error instanceof Error && error.message === "TIMEOUT"
+            ? "Couldn't save -- the connection timed out. Check your connection and try again."
+            : "Couldn't save changes. Try again.",
       );
     } finally {
       setSaving(false);
@@ -1411,7 +1990,23 @@ export function AnnotationEditor({
     // canvas was scoped. Forcing the ENTIRE modal subtree fresh on every
     // new canvas session eliminates any possibility of React trying to
     // reconcile into DOM Fabric has touched, anywhere in this tree.
-    <div key={canvasNonce} className="fixed inset-0 z-50 flex flex-col bg-background">
+    <div
+      key={canvasNonce}
+      className="fixed inset-x-0 top-0 z-50 flex flex-col bg-background"
+      // See visualViewportBox's own declaration -- overrides inset-0's
+      // implicit "always the full layout viewport" height/position once a
+      // real visualViewport reading is available, so the modal (and, via
+      // its flex-1 canvas area, the canvas itself) actually SHRINKS to fit
+      // above an open keyboard instead of extending behind it. `bottom:0`
+      // (part of the original inset-0) is deliberately dropped in favor of
+      // an explicit height here -- the two would otherwise fight over the
+      // same edge.
+      style={
+        visualViewportBox
+          ? { height: visualViewportBox.height, top: visualViewportBox.top }
+          : { top: 0, bottom: 0 }
+      }
+    >
       <div className="flex items-center justify-end px-6 py-4">
         <button
           type="button"
@@ -1452,6 +2047,20 @@ export function AnnotationEditor({
         </div>
       ) : (
         <>
+      {/* flex-col (mobile) vs sm:flex-row (unchanged desktop) -- this is
+          the actual fix for "Adjust covers the image." Adjust used to be
+          a direct sibling of the sidebar+center block below, both laid
+          out in a single ALWAYS-horizontal row -- on a real phone that
+          meant a ~176px fixed-width side column permanently eating into
+          the ~300px or so left for everything else (left icon rail
+          included), squeezing the canvas down to a sliver rather than
+          actually reserving its own space. Below sm:, this wrapper
+          stacks its two children instead: the sidebar+center block (its
+          own always-horizontal row, unchanged) on top, Adjust as a
+          full-width panel below it -- see Adjust's own block further
+          down for the rest of this. At sm: and up this reverts to a
+          row, reproducing today's exact side-by-side desktop layout. */}
+      <div className="flex flex-1 flex-col overflow-hidden sm:flex-row">
       <div className="flex flex-1 overflow-hidden">
       {/* LEFT: every tool-switching button in one minimal vertical rail
           (icon + short label) -- replaces what used to be a horizontal row
@@ -1490,12 +2099,7 @@ export function AnnotationEditor({
           <AdjustIcon />
         </SidebarToolButton>
         {targetAspect && (
-          <SidebarToolButton
-            active={rotatePanelOpen}
-            onClick={() => setRotatePanelOpen((v) => !v)}
-            label="Rotate"
-            title="Rotate / Flip Photo"
-          >
+          <SidebarToolButton active={rotatePanelOpen} onClick={toggleRotatePanel} label="Rotate" title="Rotate / Flip Photo">
             <RotateIcon direction="right" />
           </SidebarToolButton>
         )}
@@ -1523,22 +2127,29 @@ export function AnnotationEditor({
 
       <div className="flex flex-1 flex-col overflow-hidden">
       {rotatePanelOpen && ready && targetAspect && (
-        <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
-          <div className="flex items-center gap-1">
-            <IconToolButton onClick={() => rotateBasePhoto(-90)} label="Rotate left">
-              <RotateIcon direction="left" />
-            </IconToolButton>
-            <IconToolButton onClick={() => rotateBasePhoto(90)} label="Rotate right">
-              <RotateIcon direction="right" />
-            </IconToolButton>
-            <IconToolButton onClick={() => flipBasePhoto("horizontal")} label="Flip horizontal">
-              <FlipIcon axis="horizontal" />
-            </IconToolButton>
-            <IconToolButton onClick={() => flipBasePhoto("vertical")} label="Flip vertical">
-              <FlipIcon axis="vertical" />
-            </IconToolButton>
+        <div className="flex flex-col items-center gap-1 pb-2">
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <div className="flex items-center gap-1">
+              <IconToolButton onClick={() => rotateBasePhoto(-90)} label="Rotate left" disabled={rotating}>
+                <RotateIcon direction="left" />
+              </IconToolButton>
+              <IconToolButton onClick={() => rotateBasePhoto(90)} label="Rotate right" disabled={rotating}>
+                <RotateIcon direction="right" />
+              </IconToolButton>
+              <IconToolButton
+                onClick={() => flipBasePhoto("horizontal")}
+                label="Flip horizontal"
+                disabled={rotating}
+              >
+                <FlipIcon axis="horizontal" />
+              </IconToolButton>
+              <IconToolButton onClick={() => flipBasePhoto("vertical")} label="Flip vertical" disabled={rotating}>
+                <FlipIcon axis="vertical" />
+              </IconToolButton>
+            </div>
+            {rotating && <span className="text-xs text-muted">Rotating…</span>}
           </div>
-          {rotating && <span className="text-xs text-muted">Rotating…</span>}
+          {rotateError && <p className="text-xs text-error">{rotateError}</p>}
         </div>
       )}
       {tool === "draw" && (
@@ -1618,6 +2229,19 @@ export function AnnotationEditor({
 
       {selectedText && (
         <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
+          {/* The explicit editing<->manipulation boundary -- see
+              textEditing's own comment. Placed first/prominent so it reads
+              as the primary action for a selected text object, not one
+              option among the styling controls. */}
+          {textEditing ? (
+            <Button type="button" variant="primary" radius="full" onClick={handleFinishTextEditing}>
+              Done editing
+            </Button>
+          ) : (
+            <Button type="button" variant="secondary" radius="full" onClick={handleEditTextContent}>
+              Edit text
+            </Button>
+          )}
           <ColorPicker value={textColor} onChange={handleTextColorChange} />
           <div className="flex items-center gap-1">
             <button
@@ -1671,13 +2295,28 @@ export function AnnotationEditor({
       )}
 
       {tool === "crop" && (
-        <div className="flex items-center justify-center gap-2 pb-2">
-          <Button type="button" variant="primary" radius="full" onClick={handleApplyCrop}>
-            Apply crop
-          </Button>
-          <Button type="button" variant="secondary" radius="full" onClick={() => activateTool("select")}>
-            Cancel crop
-          </Button>
+        <div className="flex flex-col items-center gap-1 pb-2">
+          <div className="flex items-center justify-center gap-2">
+            <Button
+              type="button"
+              variant="primary"
+              radius="full"
+              onClick={handleApplyCrop}
+              disabled={applyingCrop}
+            >
+              {applyingCrop ? "Applying…" : "Apply crop"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              radius="full"
+              onClick={() => activateTool("select")}
+              disabled={applyingCrop}
+            >
+              Cancel crop
+            </Button>
+          </div>
+          {cropError && <p className="text-xs text-error">{cropError}</p>}
         </div>
       )}
 
@@ -1717,12 +2356,35 @@ export function AnnotationEditor({
               canvas.add() working fine, since those don't depend on the
               upper-canvas receiving events at all. The canvas element here
               must always keep the exact same className/style. */}
-          {!ready && loadUrl && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/[.015]">
-              <p className="text-sm text-muted">Loading image…</p>
-            </div>
-          )}
-          {!loadUrl && <p className="p-24 text-2xl tracking-wide text-muted">IMAGE</p>}
+          {
+            // Both placeholders below are ALWAYS mounted (never
+            // conditionally added/removed) -- visibility toggled via style
+            // instead. Same "don't conditionally mount/unmount siblings of
+            // the Fabric-touched canvas" principle as the canvas element's
+            // own static className/style further down: React inserting or
+            // removing an element here as `loadUrl`/`ready` change means it
+            // has to figure out the correct position relative to the canvas
+            // via sibling-relative DOM ops, and Fabric has restructured
+            // that exact neighborhood (wrapped the canvas in its own
+            // container, added an upper-canvas) outside React's
+            // bookkeeping -- exactly the "insertBefore: node is not a
+            // child of this node" crash this file already documents for
+            // the canvas's own className. Toggling `display` on elements
+            // that are ALWAYS present is a plain attribute update, never a
+            // sibling-relative insert/remove.
+          }
+          <div
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/[.015]"
+            style={{ display: loadUrl && !ready ? "flex" : "none" }}
+          >
+            <p className="text-sm text-muted">Loading image…</p>
+          </div>
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            style={{ display: loadUrl ? "none" : "flex" }}
+          >
+            <p className="p-24 text-2xl tracking-wide text-muted">IMAGE</p>
+          </div>
           {/* max-width/height here is a display-only fallback (e.g. reopening
               an annotation that was originally saved at a larger desktop
               resolution) -- Fabric's own pointer scaling already accounts
@@ -1738,78 +2400,140 @@ export function AnnotationEditor({
               upper-canvas construction-time staleness bug documented above. */}
           <canvas
             // Keyed on canvasNonce, same reasoning as the wrapper div above.
-            key={canvasNonce}
+            // className/style here are STATIC (never toggled by `cropping`
+            // or anything else) -- see the comment above this element about
+            // why: Fabric clones this element's className into its own
+            // internally-created "upper-canvas" once, at construction time,
+            // not reactively. A `cropping`-conditional "invisible" class
+            // used to live here, which correctly hid the React-owned
+            // canvas but left Fabric's own upper-canvas (cloned from the
+            // ORIGINAL, pre-toggle className) fully visible and, critically,
+            // still receiving every pointer event in that screen region --
+            // sitting on top of the crop overlay below and intercepting an
+            // unpredictable subset of its drag/corner-handle touches. The
+            // crop overlay's own opaque image (bg-background wrapper,
+            // full-frame-coverage clipped copy) already visually replaces
+            // what the canvas shows during crop, so hiding the canvas
+            // itself was never actually necessary.
             ref={canvasElRef}
-            className={cropping ? "invisible" : ""}
-            style={{ maxWidth: "100%", maxHeight: "100%", height: "auto" }}
+            style={{ maxWidth: "100%", maxHeight: "100%", height: "auto", touchAction: "none" }}
           />
-          {cropping && cropSourceUrl && cropFrameSize && (
-            <div
-              className="absolute"
-              style={{
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                width: cropFrameSize.width,
-                height: cropFrameSize.height,
-              }}
-            >
-              <AnnotationCropOverlay
-                imageUrl={cropSourceUrl}
-                zoom={cropZoom}
-                offset={cropOffset}
-                onZoomChange={setCropZoom}
-                onOffsetChange={setCropOffset}
-              />
-            </div>
-          )}
+          {
+            // Always mounted (never a conditional `{cropping && ... && (...)}`
+            // branch) -- same reasoning as the loading/IMAGE placeholders
+            // above: this div is a sibling of the Fabric-controlled canvas
+            // inside the canvasNonce-keyed container, and Fabric restructures
+            // that neighborhood outside React's bookkeeping. Mounting/
+            // unmounting this on every crop-mode enter/exit (`cropping`
+            // flipping true<->false, e.g. right after Apply crop) hit the
+            // exact same "insertBefore: node is not a child of this node" /
+            // "Cannot read properties of undefined (reading 'clearRect')"
+            // crash confirmed for the loading placeholder -- toggling
+            // `display` on an always-present element sidesteps it instead.
+            // cropSourceUrl/cropFrameSize can be null before crop mode has
+            // ever been entered once; AnnotationCropOverlay tolerates an
+            // empty imageUrl and a 0x0 frame fine since it's not visible.
+          }
+          <div
+            // bg-background -- opaque, so this fully visually replaces
+            // the (now always-visible) canvas underneath it; see the
+            // canvas element's own comment above for why it's no longer
+            // hidden via a className toggle.
+            className="absolute z-10 bg-background"
+            style={{
+              display: cropping && cropSourceUrl && cropFrameSize ? "block" : "none",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              width: cropFrameSize?.width ?? 0,
+              height: cropFrameSize?.height ?? 0,
+            }}
+          >
+            <AnnotationCropOverlay
+              imageUrl={cropSourceUrl ?? EMPTY_IMAGE_SRC}
+              zoom={cropZoom}
+              offset={cropOffset}
+              onZoomChange={setCropZoom}
+              onOffsetChange={setCropOffset}
+            />
+          </div>
           {/* Unconditionally mounted (not gated on guides.x/y like the lines
-              inside it) -- this div sits as a direct sibling of the
-              Fabric-controlled <canvas>, and Fabric wraps that canvas in its
-              own extra DOM (a "canvas-container" div + upper-canvas) that
-              React never finds out about. Toggling THIS wrapper's own
-              presence in/out of the tree on every mousemove during a drag
-              (guides.x/y flip null<->set constantly while dragging) raced
-              against Fabric's internal DOM writes and crashed with "Failed
-              to execute 'insertBefore' ... not a child of this node" --
-              severe enough to blank the whole app, not just this dialog.
-              Keeping the wrapper itself always present (mounted once
-              per image load, same low frequency as the crop overlay below,
-              which never showed this crash) and only toggling the two line
-              elements INSIDE it avoids ever touching this div's own
-              sibling position relative to the canvas. */}
-          {!cropping && canvasBox && canvasResolution && (
-            <div
-              className="pointer-events-none absolute"
-              style={{
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                width: canvasBox.width,
-                height: canvasBox.height,
-              }}
-            >
-              {guides.x !== null && (
-                <div
-                  className="absolute top-0 bottom-0 w-px bg-[#b25450]"
-                  style={{ left: `${(guides.x / canvasResolution.width) * 100}%` }}
-                />
-              )}
-              {guides.y !== null && (
-                <div
-                  className="absolute left-0 right-0 h-px bg-[#b25450]"
-                  style={{ top: `${(guides.y / canvasResolution.height) * 100}%` }}
-                />
-              )}
-            </div>
-          )}
+              inside it, and -- since the SAME crash this comment already
+              describes turned out to apply to ITS OWN mount/unmount too,
+              see below -- not gated on `cropping` either anymore) -- this
+              div sits as a direct sibling of the Fabric-controlled
+              <canvas>, and Fabric wraps that canvas in its own extra DOM
+              (a "canvas-container" div + upper-canvas) that React never
+              finds out about. Toggling THIS wrapper's own presence in/out
+              of the tree on every mousemove during a drag (guides.x/y flip
+              null<->set constantly while dragging) raced against Fabric's
+              internal DOM writes and crashed with "Failed to execute
+              'insertBefore' ... not a child of this node" -- severe enough
+              to blank the whole app, not just this dialog. The original fix
+              here only stopped toggling on guides.x/y and moved to
+              toggling the two line elements INSIDE instead -- but the
+              wrapper itself was still gated on `!cropping`, which flips at
+              the exact same "crop mode just exited" moment already
+              confirmed to trigger this same crash class elsewhere (see the
+              crop overlay above) -- entering/exiting crop mode still
+              mounted/unmounted this whole div. Same fix as there: always
+              mounted, visibility toggled via style. canvasBox/
+              canvasResolution can be null before the first image load
+              settles; the guide lines inside are already independently
+              gated on guides.x/y !== null and simply won't render meaningful
+              positions while hidden regardless. */}
+          <div
+            className="pointer-events-none absolute"
+            style={{
+              display: !cropping && canvasBox && canvasResolution ? "block" : "none",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              width: canvasBox?.width ?? 0,
+              height: canvasBox?.height ?? 0,
+            }}
+          >
+            {guides.x !== null && canvasResolution && (
+              <div
+                className="absolute top-0 bottom-0 w-px bg-[#b25450]"
+                style={{ left: `${(guides.x / canvasResolution.width) * 100}%` }}
+              />
+            )}
+            {guides.y !== null && canvasResolution && (
+              <div
+                className="absolute left-0 right-0 h-px bg-[#b25450]"
+                style={{ top: `${(guides.y / canvasResolution.height) * 100}%` }}
+              />
+            )}
+          </div>
         </div>
+      </div>
       </div>
       </div>
 
       {adjustPanelOpen && ready && (
-        <div className="flex w-44 shrink-0 flex-col gap-3 overflow-y-auto border-l border-border px-3 py-4 sm:w-60 sm:px-4">
-          <div className="flex items-center justify-between">
+        // w-full + a capped height + its own scroll (mobile) vs the
+        // original sm:w-60 fixed-width side column (unchanged desktop).
+        // The canvas doesn't need any JS-driven resize to make room for
+        // this -- it already renders via maxWidth/maxHeight:100% (see the
+        // <canvas> element's own style above), so when this panel takes
+        // its own real space in the now-column layout, the canvas's
+        // flex-1 area simply shrinks and the canvas scales itself down to
+        // match, same as it already does for any other viewport
+        // constraint.
+        //
+        // max-h-[38vh] (Round 1) still left the image feeling squeezed on
+        // a real phone -- dropped further to 26vh here, combined with
+        // AdjustmentSlider's own single-row layout (was label-row-then-
+        // slider-row) and a tighter gap-1 between rows, so the panel's
+        // real footprint shrinks on BOTH axes at once instead of just
+        // being clipped shorter with the same dense content still fighting
+        // for space inside it. All 9 controls still reach via its own
+        // vertical scroll -- explicitly acceptable per spec, the goal is
+        // the image staying dominant, not fitting every slider unscrolled.
+        // sm:max-h-none reverts to the unconstrained side-column height.
+        <div className="flex w-full shrink-0 flex-col gap-1 overflow-y-auto border-t border-border px-3 py-2 max-h-[26vh] sm:w-60 sm:max-h-none sm:gap-3 sm:border-t-0 sm:border-l sm:px-4 sm:py-4">
+          <div className="flex items-center justify-between pb-1">
             <span className="text-xs tracking-wide text-muted uppercase">Adjustments</span>
             <button
               type="button"
@@ -1994,9 +2718,33 @@ function AnnotationCropOverlay({
   onOffsetChange: (offset: { x: number; y: number }) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const panRef = useRef<{ startX: number; startY: number; startOffset: { x: number; y: number } } | null>(
-    null,
-  );
+  // Tracks every currently-down pointer on the pan/pinch image by id, not
+  // just the most recent one. The original code kept a single shared
+  // panRef -- fine for a mouse (exactly one pointer, ever) but on a real
+  // touch device the natural gesture to zoom a crop frame is a two-finger
+  // pinch, and a pinch starts as two SIMULTANEOUS pointerdowns on this same
+  // <img>. With only one shared ref, the second finger's pointerdown
+  // silently overwrote the first finger's start position, and both
+  // fingers' subsequent moves fed the same single-pointer pan math --
+  // producing exactly the erratic, "doesn't feel reliable" jumpiness a
+  // fast isolated single-pointer test (mouse, or one synthetic touch)
+  // would never surface. This also means pinch-to-zoom never actually
+  // existed on touch at all -- the only way to zoom was dragging one of
+  // the tiny corner handles (handleCornerPointerDown/Move/Up below, left
+  // untouched here since it's the desktop-mouse path and already works).
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureRef = useRef<{
+    mode: "pan" | "pinch";
+    startOffset: { x: number; y: number };
+    startZoom: number;
+    startX: number;
+    startY: number;
+    startDist: number;
+    startMidX: number;
+    startMidY: number;
+  } | null>(null);
+  // Desktop-mouse-only zoom path (drag a corner handle away from center) --
+  // unrelated to activePointersRef/gestureRef above, left exactly as it was.
   const handleDragRef = useRef<{
     startDist: number;
     startZoom: number;
@@ -2015,25 +2763,96 @@ function AnnotationCropOverlay({
     e.preventDefault();
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
-    panRef.current = { startX: e.clientX, startY: e.clientY, startOffset: offset };
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activePointersRef.current.size === 1) {
+      gestureRef.current = {
+        mode: "pan",
+        startOffset: offset,
+        startZoom: zoom,
+        startX: e.clientX,
+        startY: e.clientY,
+        startDist: 0,
+        startMidX: 0,
+        startMidY: 0,
+      };
+    } else if (activePointersRef.current.size === 2) {
+      const [p1, p2] = [...activePointersRef.current.values()];
+      gestureRef.current = {
+        mode: "pinch",
+        startOffset: offset,
+        startZoom: zoom,
+        startX: 0,
+        startY: 0,
+        startDist: Math.hypot(p1.x - p2.x, p1.y - p2.y),
+        startMidX: (p1.x + p2.x) / 2,
+        startMidY: (p1.y + p2.y) / 2,
+      };
+    }
+    // A third+ simultaneous pointer is tracked (so its later pointerup is
+    // accounted for) but doesn't change the active gesture -- pinch stays
+    // anchored to whichever two pointers started it.
   }
 
   function handleImagePointerMove(e: React.PointerEvent<HTMLImageElement>) {
-    if (!panRef.current || !containerRef.current) return;
+    if (!activePointersRef.current.has(e.pointerId) || !containerRef.current || !gestureRef.current) return;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const rect = containerRef.current.getBoundingClientRect();
-    const dxFrac = (e.clientX - panRef.current.startX) / rect.width;
-    const dyFrac = (e.clientY - panRef.current.startY) / rect.height;
-    onOffsetChange(
-      clampOffset(
-        { x: panRef.current.startOffset.x + dxFrac, y: panRef.current.startOffset.y + dyFrac },
-        zoom,
-      ),
-    );
+    const gesture = gestureRef.current;
+
+    if (gesture.mode === "pan" && activePointersRef.current.size === 1) {
+      const dxFrac = (e.clientX - gesture.startX) / rect.width;
+      const dyFrac = (e.clientY - gesture.startY) / rect.height;
+      onOffsetChange(
+        clampOffset({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, zoom),
+      );
+    } else if (gesture.mode === "pinch" && activePointersRef.current.size === 2) {
+      const [p1, p2] = [...activePointersRef.current.values()];
+      const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+      const midX = (p1.x + p2.x) / 2;
+      const midY = (p1.y + p2.y) / 2;
+      const ratio = gesture.startDist > 0 ? dist / gesture.startDist : 1;
+      const nextZoom = clamp(gesture.startZoom * ratio, CROP_MIN_ZOOM, CROP_MAX_ZOOM);
+      // Pans by the midpoint's own drift too, not just zooming in place --
+      // matches how pinch-zoom behaves everywhere else on a phone (the
+      // point between your fingers stays under your fingers).
+      const dxFrac = (midX - gesture.startMidX) / rect.width;
+      const dyFrac = (midY - gesture.startMidY) / rect.height;
+      onZoomChange(nextZoom);
+      onOffsetChange(
+        clampOffset({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, nextZoom),
+      );
+    }
   }
 
   function handleImagePointerUp(e: React.PointerEvent<HTMLImageElement>) {
-    if (panRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
-    panRef.current = null;
+    if (activePointersRef.current.has(e.pointerId)) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Already released/gone (e.g. a pointercancel already fired) --
+        // nothing left to release.
+      }
+    }
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size === 1) {
+      // Lifting one finger out of a pinch drops straight back to a single-
+      // finger pan, anchored fresh from the CURRENT (post-pinch) offset/
+      // zoom and the still-down finger's last known position -- not the
+      // pinch's original start -- so there's no jump/snap at the handoff.
+      const [[, pt]] = activePointersRef.current;
+      gestureRef.current = {
+        mode: "pan",
+        startOffset: offset,
+        startZoom: zoom,
+        startX: pt.x,
+        startY: pt.y,
+        startDist: 0,
+        startMidX: 0,
+        startMidY: 0,
+      };
+    } else if (activePointersRef.current.size === 0) {
+      gestureRef.current = null;
+    }
   }
 
   function handleCornerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
@@ -2061,7 +2880,13 @@ function AnnotationCropOverlay({
   }
 
   function handleCornerPointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (handleDragRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (handleDragRef.current) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Already released/gone (e.g. a pointercancel already fired).
+      }
+    }
     handleDragRef.current = null;
   }
 
@@ -2081,6 +2906,7 @@ function AnnotationCropOverlay({
         onPointerDown={handleImagePointerDown}
         onPointerMove={handleImagePointerMove}
         onPointerUp={handleImagePointerUp}
+        onPointerCancel={handleImagePointerUp}
         className="absolute inset-0 h-full w-full cursor-move touch-none object-cover opacity-40"
         style={imageStyle}
       />
@@ -2094,6 +2920,7 @@ function AnnotationCropOverlay({
           onPointerDown={handleImagePointerDown}
           onPointerMove={handleImagePointerMove}
           onPointerUp={handleImagePointerUp}
+          onPointerCancel={handleImagePointerUp}
           className="absolute inset-0 h-full w-full cursor-move touch-none object-cover"
           style={imageStyle}
         />
@@ -2106,6 +2933,7 @@ function AnnotationCropOverlay({
           onPointerDown={handleCornerPointerDown}
           onPointerMove={handleCornerPointerMove}
           onPointerUp={handleCornerPointerUp}
+          onPointerCancel={handleCornerPointerUp}
         />
       ))}
     </div>
@@ -2117,11 +2945,13 @@ function CropCornerHandle({
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  onPointerCancel,
 }: {
   corner: "tl" | "tr" | "bl" | "br";
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerUp: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerCancel: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
   const isTop = corner.startsWith("t");
   const isLeft = corner.endsWith("l");
@@ -2130,6 +2960,7 @@ function CropCornerHandle({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       className={`absolute z-10 flex h-9 w-9 touch-none items-center justify-center ${
         isTop && isLeft ? "cursor-nwse-resize" : ""
       } ${isTop && !isLeft ? "cursor-nesw-resize" : ""} ${!isTop && isLeft ? "cursor-nesw-resize" : ""} ${
@@ -2179,11 +3010,15 @@ function SidebarToolButton({
   );
 }
 
-// Label + native range slider + live value, with double-click-to-reset as a
-// lightweight bonus alongside the panel's own "Reset All" -- keeps to just
-// one control element per row, matching the "compact vertical list" the
-// Adjustments panel spec asked for. onCommit fires only on release (mouse/
-// touch up), not on every drag tick -- see commitAdjustments' own comment.
+// Single row -- label, slider, and value all inline -- rather than a label
+// row stacked above the slider. Mobile Adjust was still hiding too much of
+// the image behind the panel even after Round 1's height cap; the biggest
+// lever left, short of shrinking type past legibility, was cutting each
+// control's own footprint roughly in half by not giving the label/value
+// their own dedicated row. Double-click-to-reset is a lightweight bonus
+// alongside the panel's own "Reset All". onCommit fires only on release
+// (mouse/touch up), not on every drag tick -- see commitAdjustments' own
+// comment.
 function AdjustmentSlider({
   label,
   value,
@@ -2204,10 +3039,9 @@ function AdjustmentSlider({
   trackBackground?: string;
 }) {
   return (
-    <label className="flex flex-col gap-1 text-xs">
-      <span className="flex items-center justify-between">
-        <span className="tracking-wide text-muted uppercase">{label}</span>
-        <span className="tabular-nums text-muted">{value}</span>
+    <label className="flex items-center gap-2 text-xs">
+      <span className="w-20 shrink-0 truncate tracking-wide text-muted uppercase" title={label}>
+        {label}
       </span>
       <input
         type="range"
@@ -2219,13 +3053,14 @@ function AdjustmentSlider({
         onTouchEnd={onCommit}
         onDoubleClick={onReset}
         title={`${label} (double-click to reset)`}
-        className="w-full accent-foreground"
+        className="min-w-0 flex-1 accent-foreground"
         style={
           trackBackground
             ? { background: trackBackground, WebkitAppearance: "none", appearance: "none", height: 6, borderRadius: 9999 }
             : undefined
         }
       />
+      <span className="w-7 shrink-0 text-right tabular-nums text-muted">{value}</span>
     </label>
   );
 }
@@ -2233,10 +3068,12 @@ function AdjustmentSlider({
 function IconToolButton({
   onClick,
   label,
+  disabled,
   children,
 }: {
   onClick: () => void;
   label: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -2244,9 +3081,15 @@ function IconToolButton({
       type="button"
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
+      disabled={disabled}
       title={label}
       aria-label={label}
-      className="flex items-center justify-center rounded p-1.5 text-foreground transition-colors duration-150 hover:bg-black/[.05]"
+      // p-3.5 (was p-1.5) -- these 14px icons (Rotate/Flip/Align/Arrange)
+      // had only a ~26px tap target, well under a comfortable finger
+      // target; this brings it to ~42px without enlarging the icon itself,
+      // same "grow the invisible hit area, not the visual size" approach
+      // as FabricObject.ownDefaults.touchCornerSize above.
+      className="flex items-center justify-center rounded p-3.5 text-foreground transition-colors duration-150 hover:bg-black/[.05] disabled:pointer-events-none disabled:opacity-40"
     >
       {children}
     </button>

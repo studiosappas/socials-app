@@ -9,6 +9,15 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: "20mb",
     },
+    // src/proxy.ts runs on nearly every request (its matcher only excludes
+    // static assets). Next.js buffers each request body in memory for the
+    // proxy independently of serverActions.bodySizeLimit above, and its own
+    // default is a much lower 10MB -- silently truncating any larger body
+    // *before* the Server Action ever sees it, which surfaces downstream as
+    // a multipart parse failure ("Unexpected end of form") rather than a
+    // clean size-limit error. Must stay >= bodySizeLimit or that limit is
+    // dead code.
+    proxyClientMaxBodySize: "20mb",
     // Explicit, even though 0 is the documented default for `dynamic`: a
     // phantom render of /projects/[projectId]/layout.tsx (observed with the
     // literal, invalid "todo" as its own projectId -- likely Next's dev
