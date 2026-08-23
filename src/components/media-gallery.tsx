@@ -17,13 +17,13 @@ export type GalleryMedia = {
   mediaAssetId: string;
   url: string | null;
   posterUrl: string | null;
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "pdf";
 };
 
 export type FlatMedia = {
   key: string;
   url: string;
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "pdf";
   posterUrl: string | null;
   contentType: GalleryItemType;
   // Only ever set for a post's cover (first media item) -- see
@@ -81,6 +81,12 @@ export function MediaFrame({
       />
     );
   }
+  // PDF has no equivalent to video's native poster attribute -- a plain
+  // <img> can't decode the raw PDF file at all, so this tile always shows
+  // its generated page-1 cover instead (posterUrl), same source Story
+  // cards use for their own cover. Falls back to the raw url only for an
+  // asset uploaded before cover generation existed.
+  const imageSrc = media.mediaType === "pdf" ? (media.posterUrl ?? media.url) : media.url;
   return (
     <button
       type="button"
@@ -90,7 +96,7 @@ export function MediaFrame({
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={media.url}
+        src={imageSrc}
         alt=""
         draggable={false}
         className="h-full w-full object-cover select-none"
@@ -159,9 +165,15 @@ export function Lightbox({
               className="h-full w-full object-cover"
             />
           ) : (
+            // A PDF here shows its generated page-1 cover, not a live
+            // embedded viewer -- this lightbox's box is a fixed, cropped
+            // post/story aspect ratio (object-cover), which isn't a
+            // sensible frame for an interactive document anyway; the
+            // original PDF stays the real source of truth for anyone who
+            // needs to actually read it.
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={current.url}
+              src={current.mediaType === "pdf" ? (current.posterUrl ?? current.url) : current.url}
               alt=""
               className="h-full w-full object-cover"
               style={coverTransformStyle(current.coverTransform)}

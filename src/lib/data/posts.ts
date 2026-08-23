@@ -207,10 +207,16 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
   const supabase = await createClient();
 
   const [{ data: allMediaAssets }, { data: carouselPosts }] = await Promise.all([
+    // Excludes 'pdf' -- same reasoning as Grid's own Media Library query
+    // (grid/page.tsx): this is a "pick an asset for this post/carousel
+    // slot" picker, and a PDF was never a sensible post asset. Still exists
+    // in this same project-wide table via the Content page, just never
+    // offered here.
     supabase
       .from("media_assets")
       .select("id, storage_path, media_type")
       .eq("project_id", projectId)
+      .neq("media_type", "pdf")
       .order("created_at", { ascending: false }),
     // Same "already used in a carousel" lookup as Grid's own media library
     // (grid/page.tsx) -- kept as two plain queries rather than a joined

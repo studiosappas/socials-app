@@ -8,7 +8,7 @@ export type SharedGalleryMedia = {
   mediaAssetId: string;
   url: string | null;
   posterUrl: string | null;
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "pdf";
 };
 
 export type SharedGalleryItem = {

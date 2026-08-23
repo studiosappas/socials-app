@@ -442,7 +442,16 @@ export function GridBoard({
                 // thumbnail empty (falls back to the "Video" placeholder)
                 // until the real poster comes back from the next refresh.
                 thumbnailUrl: mediaItem?.mediaType === "video" ? null : (mediaItem?.url ?? slot.thumbnailUrl),
-                coverMediaType: mediaItem?.mediaType ?? slot.coverMediaType,
+                // Narrowed, not just `mediaItem?.mediaType ?? slot.coverMediaType`
+                // -- MediaLibraryItem.mediaType is the app-wide MediaType (now
+                // including "pdf"), but Grid's own Media Library query excludes
+                // PDFs entirely (see grid/page.tsx), so a Grid cover can never
+                // actually be one; this keeps that guarantee explicit in the
+                // type instead of casting past it.
+                coverMediaType:
+                  mediaItem?.mediaType === "video" || mediaItem?.mediaType === "image"
+                    ? mediaItem.mediaType
+                    : slot.coverMediaType,
                 coverMediaAssetId: mediaAssetId,
                 // Dropping media onto a slot always replaces its cover --
                 // never appends into a carousel -- so the count resets to 1

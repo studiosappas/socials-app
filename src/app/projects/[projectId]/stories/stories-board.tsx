@@ -22,9 +22,9 @@ import { Toast } from "@/components/ui/toast";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import type { ShareLinkItem } from "@/lib/data/share-links";
-import type { StoryStatus } from "@/types/database";
+import type { StoryStatus, MediaType } from "@/types/database";
 
-export type StoryFileItem = { url: string; mediaType: "image" | "video" };
+export type StoryFileItem = { url: string; mediaType: MediaType };
 
 export type StoryListItem = {
   id: string;
@@ -33,6 +33,11 @@ export type StoryListItem = {
   notes: string;
   status: StoryStatus;
   thumbnailUrl: string | null;
+  // Null only when there are no files at all -- otherwise the first/cover
+  // file's own media type, even when thumbnailUrl itself is null (a
+  // video/PDF whose poster generation failed or predates it -- see
+  // StoryCard's typed-placeholder fallback).
+  coverMediaType: MediaType | null;
   files: StoryFileItem[];
   folderId: string | null;
 };
@@ -386,6 +391,7 @@ export function StoriesBoard({
             storyId={story.id}
             name={story.name}
             thumbnailUrl={story.thumbnailUrl}
+            coverMediaType={story.coverMediaType}
             files={story.files}
             scheduledDate={story.scheduledDate}
             canManage={canManage}
@@ -575,7 +581,7 @@ function UploadAssetsZone({
 
   function handleFiles(fileList: FileList | File[]) {
     const files = Array.from(fileList).filter(
-      (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
+      (f) => f.type.startsWith("image/") || f.type.startsWith("video/") || f.type === "application/pdf",
     );
     setUploadError(null);
     if (files.length > 0) {
@@ -615,13 +621,21 @@ function UploadAssetsZone({
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*,video/*"
+        accept="image/*,video/*,application/pdf"
         multiple
         className="hidden"
         onChange={(e) => {
-          const files = e.target.files;
+          // Array.from(...) BEFORE clearing .value, not just `const files =
+          // e.target.files` -- a file input's .files is a live FileList tied
+          // to the element, and resetting .value clears that same object in
+          // place, so a bare reference captured first is already empty by
+          // the time handleFiles reads it below (confirmed via direct
+          // testing: length 1 immediately, length 0 right after the reset,
+          // same object). Same pattern story-editor.tsx's own upload input
+          // already used correctly.
+          const files = Array.from(e.target.files ?? []);
           e.target.value = "";
-          if (files) handleFiles(files);
+          if (files.length > 0) handleFiles(files);
         }}
       />
       <button

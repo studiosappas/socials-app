@@ -1329,6 +1329,14 @@ where id in ('project-media', 'brief-media', 'brand-documents', 'avatars', 'land
 -- thumbnail-over-original fallback logic).
 alter table public.media_assets add column if not exists thumbnail_storage_path text;
 
+-- ---------- Content: PDF as a media type ----------
+-- Moved to its own file, supabase/fix_content_media_type_constraint.sql --
+-- confirmed REQUIRED (not just pending): real Preview testing hit exactly
+-- the "violates check constraint media_assets_media_type_check" error this
+-- fixes, for both video and PDF uploads. Kept as its own file specifically
+-- so it can be reviewed and run on its own, with its own rollback SQL and
+-- read-only post-migration verification queries alongside it.
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

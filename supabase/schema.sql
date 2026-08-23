@@ -216,7 +216,7 @@ create table public.media_assets (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects (id) on delete cascade,
   storage_path text not null,
-  media_type text not null default 'image' check (media_type in ('image', 'video')),
+  media_type text not null default 'image' check (media_type in ('image', 'video', 'pdf')),
   uploaded_by uuid not null references public.profiles (id),
   -- Same original/preview/annotation_json pattern as brief_attachments:
   -- storage_path is the untouched original; preview_storage_path is the

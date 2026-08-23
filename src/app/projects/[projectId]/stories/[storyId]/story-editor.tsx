@@ -301,7 +301,10 @@ export function StoryEditor({
 function FramePreview({ frame }: { frame: StoryFrameItem }) {
   return (
     <>
-      {frame.url && frame.mediaType === "image" && (
+      {/* getStoryPageData already resolves a PDF frame's `url` to its
+          generated page-1 cover (not the raw PDF) -- same reasoning as
+          image, just a different source. */}
+      {frame.url && (frame.mediaType === "image" || frame.mediaType === "pdf") && (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={frame.url} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
       )}

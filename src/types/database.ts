@@ -26,7 +26,7 @@ export type StoryStatus =
 // column comment in schema.sql. Client Review Mode's approve/request-changes.
 export type ReviewStatus = "pending" | "approved" | "changes_requested";
 export type DesignTaskStatus = "open" | "in_progress" | "done";
-export type MediaType = "image" | "video";
+export type MediaType = "image" | "video" | "pdf";
 export type TaskSourceType = "manual" | "post" | "story";
 export type TaskStatus = "todo" | "in_progress" | "done";
 // Same 4 values as GeneratedDesignPostType (defined below) -- a Brief
