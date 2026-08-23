@@ -1536,6 +1536,64 @@ export function AnnotationEditor({
     logoInputRef.current?.click();
   }
 
+  // Many real-world logo exports (Figma/Illustrator "Export as SVG", brand
+  // press-kit downloads) only set viewBox on the root <svg>, no explicit
+  // width/height -- an <img> pointed at such a file then reports a
+  // completely arbitrary, viewBox-disconnected "natural size" (observed:
+  // 150x150 in Chromium, regardless of the SVG's real aspect ratio or
+  // content extent). FabricImage trusts that reported size for BOTH the
+  // object's displayed size AND its internal crop window, so it ends up
+  // sampling only a small, essentially arbitrary corner of the artwork's
+  // true coordinate space, stretched to fill the object's bounding box --
+  // this is the exact "bounding box correct, only a tiny fragment of the
+  // logo visible inside it" bug. Explicitly setting width/height from
+  // viewBox (only when both are absent) fixes the browser's reported
+  // natural size at the source, before Fabric ever reads it.
+  function ensureSvgHasExplicitDimensions(svgText: string): string {
+    const svgTagMatch = svgText.match(/<svg\b[^>]*>/i);
+    if (!svgTagMatch || svgTagMatch.index === undefined) return svgText;
+    const svgTag = svgTagMatch[0];
+    if (/\swidth\s*=/i.test(svgTag) && /\sheight\s*=/i.test(svgTag)) return svgText;
+
+    const viewBoxMatch = svgTag.match(/\sviewBox\s*=\s*["']([^"']+)["']/i);
+    if (!viewBoxMatch) return svgText;
+    const parts = viewBoxMatch[1].trim().split(/[\s,]+/).map(Number);
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return svgText;
+    const [, , vbWidth, vbHeight] = parts;
+    if (!(vbWidth > 0) || !(vbHeight > 0)) return svgText;
+
+    const patchedTag = svgTag.replace(/^<svg\b/i, `<svg width="${vbWidth}" height="${vbHeight}"`);
+    return svgText.slice(0, svgTagMatch.index) + patchedTag + svgText.slice(svgTagMatch.index + svgTag.length);
+  }
+
+  // Shared by both branches of handleLogoFileChange below -- everything
+  // after "we have a usable image data URL" is identical for a raster logo
+  // and a dimension-patched SVG one.
+  function insertLogoFromDataUrl(dataUrl: string) {
+    withCanvas((canvas) => {
+      fabric.FabricImage.fromURL(dataUrl).then((img) => {
+        // Sized to a reasonable starting footprint (40% of the shorter
+        // canvas dimension) rather than the logo's own often-huge native
+        // pixel size -- it's still fully resizable afterward like any
+        // other object.
+        const maxDim = Math.min(canvas.getWidth(), canvas.getHeight()) * 0.4;
+        const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+        img.set({
+          left: canvas.getWidth() / 2,
+          top: canvas.getHeight() / 2,
+          originX: "center",
+          originY: "center",
+          scaleX: scale,
+          scaleY: scale,
+        });
+        canvas.add(img);
+        canvas.setActiveObject(img);
+        canvas.requestRenderAll();
+        setTool("select");
+      });
+    });
+  }
+
   // Reads the file as a data URL rather than uploading it anywhere first --
   // the whole canvas (this image included) already gets baked into one flat
   // JPEG at save time, and fabric's own toJSON()/loadFromJSON() already
@@ -1547,32 +1605,27 @@ export function AnnotationEditor({
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+
+    // SVG needs its own path: it has to be read as text (not base64) so its
+    // markup can be inspected/patched -- see ensureSvgHasExplicitDimensions
+    // above -- before it's turned into the data URL Fabric actually loads.
+    if (file.type === "image/svg+xml" || file.name.toLowerCase().endsWith(".svg")) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const svgText = reader.result;
+        if (typeof svgText !== "string") return;
+        const patched = ensureSvgHasExplicitDimensions(svgText);
+        insertLogoFromDataUrl(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(patched)}`);
+      };
+      reader.readAsText(file);
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result;
       if (typeof dataUrl !== "string") return;
-      withCanvas((canvas) => {
-        fabric.FabricImage.fromURL(dataUrl).then((img) => {
-          // Sized to a reasonable starting footprint (40% of the shorter
-          // canvas dimension) rather than the logo's own often-huge native
-          // pixel size -- it's still fully resizable afterward like any
-          // other object.
-          const maxDim = Math.min(canvas.getWidth(), canvas.getHeight()) * 0.4;
-          const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
-          img.set({
-            left: canvas.getWidth() / 2,
-            top: canvas.getHeight() / 2,
-            originX: "center",
-            originY: "center",
-            scaleX: scale,
-            scaleY: scale,
-          });
-          canvas.add(img);
-          canvas.setActiveObject(img);
-          canvas.requestRenderAll();
-          setTool("select");
-        });
-      });
+      insertLogoFromDataUrl(dataUrl);
     };
     reader.readAsDataURL(file);
   }
