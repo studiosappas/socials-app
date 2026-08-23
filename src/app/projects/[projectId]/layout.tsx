@@ -2,6 +2,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { Button } from "@/components/ui/button";
 import { CurrentPageLabel } from "./nav-tabs";
+import { TrackProjectVisit } from "./track-visit";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -63,6 +64,7 @@ export default async function ProjectLayout({
 
   return (
     <div className="flex flex-1 flex-col">
+      <TrackProjectVisit projectId={projectId} />
       <header className="px-4 py-4 sm:px-6">
         <div className="mx-auto flex max-w-6xl items-center gap-2 overflow-x-auto whitespace-nowrap text-xs tracking-wide text-muted uppercase [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <Link href="/projects" className="shrink-0 transition-colors duration-150 hover:text-foreground">
