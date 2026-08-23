@@ -1,6 +1,11 @@
 -- Internal Admin Dashboard: schema additions.
 -- Run this in the Supabase SQL editor. Idempotent (safe to re-run), matches
 -- the style of the other fix_*_schema.sql files in this directory.
+--
+-- Wrapped in a transaction so the whole migration applies atomically (all
+-- statements succeed, or none do) and so there's no window, however brief,
+-- where the profiles UPDATE policy has been dropped but not yet replaced.
+begin;
 
 -- ---------------------------------------------------------------------------
 -- 1. CRITICAL: close a pre-existing privilege-escalation gap.
@@ -87,3 +92,5 @@ create policy "Authenticated users can log their own system events"
   to authenticated
   with check (user_id is null or user_id = auth.uid());
 -- No select policy -- admin-only, via service-role.
+
+commit;
