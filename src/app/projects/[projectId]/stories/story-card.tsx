@@ -401,7 +401,13 @@ export const StoryCard = memo(function StoryCard({
       )}
 
       {previewOpen && (
-        <AssetPreviewModal files={files} initialIndex={0} name={name} onClose={() => setPreviewOpen(false)} />
+        <AssetPreviewModal
+          files={files}
+          initialIndex={0}
+          name={name}
+          editHref={canManage && isCluster ? href : null}
+          onClose={() => setPreviewOpen(false)}
+        />
       )}
     </div>
   );
@@ -417,11 +423,20 @@ function AssetPreviewModal({
   files,
   initialIndex,
   name,
+  editHref,
   onClose,
 }: {
   files: StoryFileItem[];
   initialIndex: number;
   name: string;
+  // The same /projects/{id}/stories/{storyId} route the card's own kebab
+  // menu "Edit Content" link already uses -- the real, persisted story id,
+  // never a title lookup. Null when the viewer can't manage this project
+  // (same canManage gate the kebab menu's own Edit Content link is already
+  // behind) -- the button is a UX courtesy, not the security boundary; the
+  // Story Editor route itself still enforces permissions server-side
+  // regardless of whether this link is shown.
+  editHref: string | null;
   onClose: () => void;
 }) {
   const [index, setIndex] = useState(initialIndex);
@@ -457,6 +472,23 @@ function AssetPreviewModal({
         onClick={onClose}
         className="fixed inset-0 -z-10 cursor-default"
       />
+      {/* Top-left, opposite the Download/Close cluster -- the existing
+          intercepted route (/projects/{id}/stories/{storyId}), same one
+          the card's own kebab menu "Edit Content" link already navigates
+          to, so it opens as the same modal-over-the-current-page Story
+          Editor rather than a new navigation pattern invented just for
+          this button. Closes this preview first (onClose) so returning
+          from the editor lands back on a normal Content page, not with a
+          stale preview still technically "open" underneath. */}
+      {editHref && (
+        <Link
+          href={editHref}
+          onClick={onClose}
+          className="absolute left-4 top-4 z-10 rounded-full px-3 py-2 text-xs tracking-wide text-foreground/70 uppercase transition-colors duration-150 hover:text-foreground"
+        >
+          Edit Content
+        </Link>
+      )}
       {/* Same top-right corner as Grid's own icon-button row (e.g. the
           Media Library toolbar) -- a bare icon, no label, sitting just left
           of Close so the two read as one cluster. */}

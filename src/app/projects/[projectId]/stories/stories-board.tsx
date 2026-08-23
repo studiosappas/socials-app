@@ -369,17 +369,6 @@ export function StoriesBoard({
             full-width text button, so the two content boards read the same. */}
         <div className="flex shrink-0 items-center gap-1">
           {stories.length > 0 && (
-            <SortFilterMenu
-              sortOrder={sortOrder}
-              onSortOrderChange={setSortOrder}
-              monthFilter={monthFilter}
-              onMonthFilterChange={setMonthFilter}
-              availableMonths={availableMonths}
-              open={sortMenuOpen}
-              onOpenChange={setSortMenuOpen}
-            />
-          )}
-          {stories.length > 0 && (
             <ShareMenuButton
               projectId={projectId}
               links={shareLinks}
@@ -389,6 +378,26 @@ export function StoriesBoard({
                 handleCancelBulkSelection();
                 setSelectionMode(true);
               }}
+            />
+          )}
+          {/* Last in this cluster, not first -- its panel anchors via
+              right-0 (same as ShareMenuButton's own), and on the narrowest
+              phones (this row wraps onto its own short line there) an
+              icon sitting at the LEFT end of that line pulls a right-
+              anchored panel's left edge past the viewport edge. Putting it
+              last keeps it close to the row's own right edge, where
+              right-0 anchoring already behaves safely -- confirmed at
+              320px, where the earlier left-positioned version visibly
+              clipped. */}
+          {stories.length > 0 && (
+            <SortFilterMenu
+              sortOrder={sortOrder}
+              onSortOrderChange={setSortOrder}
+              monthFilter={monthFilter}
+              onMonthFilterChange={setMonthFilter}
+              availableMonths={availableMonths}
+              open={sortMenuOpen}
+              onOpenChange={setSortMenuOpen}
             />
           )}
           {canManage && (
@@ -758,14 +767,29 @@ function SortFilterMenu({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const menuRef = useOutsideClick<HTMLDivElement>(open, () => onOpenChange(false));
+  // Local, not lifted -- nothing outside this menu ever needs to know
+  // which of its two views is showing, only the actual sort/month
+  // SELECTIONS (already lifted to StoriesBoard, since those drive the
+  // list). Reset to "main" every time the popover closes, so reopening it
+  // later always starts back on the compact Sort/Month row rather than
+  // wherever the user last left it mid-drill-down.
+  const [view, setView] = useState<"main" | "month">("main");
+  const menuRef = useOutsideClick<HTMLDivElement>(open, () => {
+    onOpenChange(false);
+    setView("main");
+  });
   const isActive = sortOrder !== "newest" || monthFilter !== "all";
+
+  function toggleOpen() {
+    if (open) setView("main");
+    onOpenChange(!open);
+  }
 
   return (
     <div ref={menuRef} className="relative">
       <button
         type="button"
-        onClick={() => onOpenChange(!open)}
+        onClick={toggleOpen}
         title="Sort & filter"
         className={`rounded p-1.5 transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground ${
           isActive ? "text-foreground" : "text-muted"
@@ -774,52 +798,103 @@ function SortFilterMenu({
         <SortFilterIcon />
       </button>
       {open && (
-        <div className="absolute right-0 top-8 z-20 w-48 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
-          <p className="px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">Sort</p>
-          {(
-            [
-              ["newest", "Newest to oldest"],
-              ["oldest", "Oldest to newest"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => onSortOrderChange(value)}
-              className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
-                sortOrder === value ? "font-medium text-foreground" : "text-muted"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        // Anchored left on mobile, right from sm: up -- this toolbar's own
+        // row (the div this button sits in) is flex-col below sm: (each
+        // row left-aligned, full width) and only becomes a single
+        // right-trailing flex-row at sm: and above (see the parent
+        // toolbar's own className). A right-0-anchored panel on a trigger
+        // sitting near the LEFT edge of a narrow, wrapped row pulls the
+        // panel's own left edge past the viewport -- confirmed at 320px,
+        // where the panel visibly clipped regardless of which icon in the
+        // cluster it was. left-0 there instead keeps it fully on-screen;
+        // sm:right-0 restores the original anchor once the toolbar is a
+        // real right-trailing row with room to its left.
+        <div className="absolute left-0 top-8 z-20 w-48 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg sm:left-auto sm:right-0">
+          {view === "main" ? (
+            <>
+              <p className="px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">Sort</p>
+              {(
+                [
+                  ["newest", "Newest to oldest"],
+                  ["oldest", "Oldest to newest"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => onSortOrderChange(value)}
+                  className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                    sortOrder === value ? "font-medium text-foreground" : "text-muted"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
 
-          <div className="my-1 border-t border-border" />
+              <div className="my-1 border-t border-border" />
 
-          <p className="px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">Month</p>
-          <div className="max-h-48 overflow-y-auto">
-            <button
-              type="button"
-              onClick={() => onMonthFilterChange("all")}
-              className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
-                monthFilter === "all" ? "font-medium text-foreground" : "text-muted"
-              }`}
-            >
-              All
-            </button>
-            {availableMonths.map((key) => (
+              {/* One compact row, not the full month list -- with real
+                  usage this could be 24+ months, and this popover should
+                  never grow into a long scrolling list itself. Opens the
+                  dedicated month sub-view below instead. */}
               <button
-                key={key}
                 type="button"
-                onClick={() => onMonthFilterChange(key)}
-                className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
-                  monthFilter === key ? "font-medium text-foreground" : "text-muted"
-                }`}
+                onClick={() => setView("month")}
+                className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs text-muted transition-colors duration-150 hover:bg-black/[.05]"
               >
-                {monthLabel(key)}
+                <span className="text-[10px] tracking-wide uppercase">Month</span>
+                <span className="flex items-center gap-1 text-foreground">
+                  <span className={monthFilter === "all" ? "text-muted" : "font-medium"}>
+                    {monthFilter === "all" ? "All" : monthLabel(monthFilter)}
+                  </span>
+                  <ChevronRightIcon className="h-3 w-3 text-muted" />
+                </span>
               </button>
-            ))}
-          </div>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => setView("main")}
+                className="mb-0.5 flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-xs text-muted transition-colors duration-150 hover:bg-black/[.05]"
+              >
+                <ChevronLeftIcon className="h-3 w-3" />
+                Month
+              </button>
+              {/* overscroll-contain -- scrolling a long month list to its
+                  end shouldn't hand off the scroll gesture to the Content
+                  page underneath the popover. */}
+              <div className="max-h-56 overflow-y-auto overscroll-contain">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onMonthFilterChange("all");
+                    setView("main");
+                  }}
+                  className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                    monthFilter === "all" ? "font-medium text-foreground" : "text-muted"
+                  }`}
+                >
+                  All
+                </button>
+                {availableMonths.map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => {
+                      onMonthFilterChange(key);
+                      setView("main");
+                    }}
+                    className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                      monthFilter === key ? "font-medium text-foreground" : "text-muted"
+                    }`}
+                  >
+                    {monthLabel(key)}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -830,6 +905,22 @@ function SortFilterIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
       <path d="M4 7h16M7 12h10M10 17h4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronLeftIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <path d="M15 5l-7 7 7 7" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
