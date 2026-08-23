@@ -255,36 +255,54 @@ export async function uploadContentAsset(
   // about to rename immediately the way a freshly created empty item is.
   const name = (typeof fileName === "string" ? fileName : "").replace(/\.[^./]+$/, "").trim() || "Untitled";
 
-  // The media_assets row and the stories row are independent inserts into
-  // different tables -- neither needs the other's id, only the frame insert
-  // below does.
-  const [
-    { data: mediaAsset, error: mediaError },
-    { data: story, error: storyError },
-  ] = await Promise.all([
-    supabase
-      .from("media_assets")
-      .insert({
-        project_id: projectId,
-        storage_path: storagePath,
-        media_type: mediaType,
-        uploaded_by: user.id,
-        thumbnail_storage_path: thumbnailStoragePath,
-      })
-      .select("id")
-      .single(),
-    supabase
-      .from("stories")
-      .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
-      .select("id")
-      .single(),
-  ]);
+  // Every Storage object THIS attempt has created so far -- the original
+  // file (already uploaded direct-to-Storage client-side before this action
+  // ever ran, see uploadFilesWithPosters) plus whatever cover/thumbnail was
+  // just generated above. If anything below fails, this is exactly what
+  // gets deleted -- never a pre-existing file, only what this one attempt
+  // put there. Without this, a DB-side failure (a rejected media_type, a
+  // constraint violation, anything) left the real file sitting in Storage
+  // forever with no media_assets row ever pointing at it.
+  const uploadedPaths = [storagePath, posterStoragePath, thumbnailStoragePath].filter((p): p is string => Boolean(p));
+  async function cleanupOrphanedStorage() {
+    await supabase.storage.from("project-media").remove(uploadedPaths);
+  }
+
+  // Sequential, not the parallel Promise.all this used to be -- media_assets
+  // has to actually exist before stories/story_frames reference it, and
+  // each step below can only clean up correctly if it knows exactly which
+  // earlier steps already committed.
+  const { data: mediaAsset, error: mediaError } = await supabase
+    .from("media_assets")
+    .insert({
+      project_id: projectId,
+      storage_path: storagePath,
+      media_type: mediaType,
+      uploaded_by: user.id,
+      thumbnail_storage_path: thumbnailStoragePath,
+    })
+    .select("id")
+    .single();
 
   if (mediaError || !mediaAsset) {
-    return { message: mediaError?.message ?? "Failed to save media." };
+    // Never surfaced to the user -- a raw Postgres constraint/relation name
+    // is meaningless to them and leaks schema detail; console.error keeps
+    // the real reason visible in server logs for whoever's debugging this.
+    console.error("uploadContentAsset: media_assets insert failed:", mediaError?.message);
+    await cleanupOrphanedStorage();
+    return { message: "Couldn't upload this file. Please try again." };
   }
+
+  const { data: story, error: storyError } = await supabase
+    .from("stories")
+    .insert({ project_id: projectId, name, position: count ?? 0, folder_id: folderId })
+    .select("id")
+    .single();
+
   if (storyError || !story) {
-    return { message: storyError?.message ?? "Failed to create content item." };
+    console.error("uploadContentAsset: stories insert failed:", storyError?.message);
+    await Promise.all([supabase.from("media_assets").delete().eq("id", mediaAsset.id), cleanupOrphanedStorage()]);
+    return { message: "Couldn't upload this file. Please try again." };
   }
 
   // Both only need mediaAsset.id/story.id from above -- setMediaAssetPoster
@@ -296,7 +314,13 @@ export async function uploadContentAsset(
   ]);
 
   if (frameError) {
-    return { message: frameError.message };
+    console.error("uploadContentAsset: story_frames insert failed:", frameError.message);
+    await Promise.all([
+      supabase.from("stories").delete().eq("id", story.id),
+      supabase.from("media_assets").delete().eq("id", mediaAsset.id),
+      cleanupOrphanedStorage(),
+    ]);
+    return { message: "Couldn't upload this file. Please try again." };
   }
 
   // Not revalidating /stories (its own route) -- its one caller
@@ -450,6 +474,15 @@ export async function uploadStoryFrame(
     thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
 
+  // Same "clean up exactly what THIS attempt created" reasoning as
+  // uploadContentAsset above -- the original file already reached Storage
+  // client-side before this action ran, so a DB-side failure here would
+  // otherwise leave it orphaned with nothing ever pointing at it.
+  const uploadedPaths = [storagePath, posterStoragePath, thumbnailStoragePath].filter((p): p is string => Boolean(p));
+  async function cleanupOrphanedStorage() {
+    await supabase.storage.from("project-media").remove(uploadedPaths);
+  }
+
   const { data: mediaAsset, error: insertError } = await supabase
     .from("media_assets")
     .insert({
@@ -463,7 +496,9 @@ export async function uploadStoryFrame(
     .single();
 
   if (insertError || !mediaAsset) {
-    return { message: insertError?.message ?? "Failed to save media." };
+    console.error("uploadStoryFrame: media_assets insert failed:", insertError?.message);
+    await cleanupOrphanedStorage();
+    return { message: "Couldn't upload this file. Please try again." };
   }
 
   // Both only need mediaAsset.id -- same reasoning as uploadContentAsset
@@ -474,7 +509,9 @@ export async function uploadStoryFrame(
   ]);
 
   if (frameError) {
-    return { message: frameError.message };
+    console.error("uploadStoryFrame: story_frames insert failed:", frameError.message);
+    await Promise.all([supabase.from("media_assets").delete().eq("id", mediaAsset.id), cleanupOrphanedStorage()]);
+    return { message: "Couldn't upload this file. Please try again." };
   }
 
   // Not revalidating this action's own route (/stories/[storyId]) -- its
