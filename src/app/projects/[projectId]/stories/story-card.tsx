@@ -162,64 +162,89 @@ export const StoryCard = memo(function StoryCard({
   // yet", which still falls through to the plain dashed "Empty" state below.
   const isPlaceholder = !thumbnailUrl && (coverMediaType === "video" || coverMediaType === "pdf");
 
+  // Shared between both branches below -- exactly one of them actually
+  // renders per card, so this is just avoiding a duplicated copy, not two
+  // live instances. Cover fills its container via h-full/w-full regardless
+  // of which branch wraps it (the plain center-everything button for a
+  // loose asset, or the flex-col cover+footer split for a cluster).
+  const coverContent = (
+    <>
+      {thumbnailUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+      ) : isPlaceholder ? (
+        <span className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-muted">
+          {coverMediaType === "video" ? <VideoIcon className="h-6 w-6" /> : <PdfIcon className="h-6 w-6" />}
+          <span className="text-[10px] tracking-wide uppercase">
+            {coverMediaType === "video" ? "Video" : "PDF"}
+          </span>
+        </span>
+      ) : (
+        <span className="flex h-full w-full items-center justify-center text-xs tracking-wide text-muted uppercase">
+          Empty
+        </span>
+      )}
+
+      {/* Small type badge -- video/PDF covers are still a generated
+          static image at a glance, so this is what actually tells them
+          apart from a real photo (same bg-black/70 white-text convention
+          as the folder tile's own "N items" badge). */}
+      {(coverMediaType === "video" || coverMediaType === "pdf") && (
+        <span className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 rounded bg-black/70 px-1.5 py-0.5 text-[9px] tracking-wide text-white uppercase">
+          {coverMediaType === "video" ? <VideoIcon className="h-2.5 w-2.5" /> : <PdfIcon className="h-2.5 w-2.5" />}
+          {coverMediaType}
+        </span>
+      )}
+
+      {/* Hover-only affordance -- makes it visually obvious the tile opens
+          a full-size preview on click, not just a cursor change (same
+          "View larger" intent as MediaFrame's zoom cursor in
+          components/media-gallery.tsx). */}
+      {!selectionMode && thumbnailUrl && (
+        <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all duration-150 group-hover:bg-black/20 group-hover:opacity-100">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm">
+            <ZoomIcon className="h-4 w-4" />
+          </span>
+        </span>
+      )}
+    </>
+  );
+
   return (
     <div className="group relative aspect-[3/4] w-full shrink-0">
-      <button
-        type="button"
-        title={name}
-        onClick={handleOpen}
-        className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
-          selectionMode ? "cursor-pointer" : "cursor-zoom-in"
-        } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
-      >
-        {thumbnailUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
-        ) : isPlaceholder ? (
-          <span className="flex flex-col items-center gap-1.5 text-muted">
-            {coverMediaType === "video" ? <VideoIcon className="h-6 w-6" /> : <PdfIcon className="h-6 w-6" />}
-            <span className="text-[10px] tracking-wide uppercase">
-              {coverMediaType === "video" ? "Video" : "PDF"}
-            </span>
-          </span>
-        ) : (
-          <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
-        )}
-
-        {/* Small type badge -- video/PDF covers are still a generated
-            static image at a glance, so this is what actually tells them
-            apart from a real photo (same bg-black/70 white-text convention
-            as the folder tile's own "N items" badge). */}
-        {(coverMediaType === "video" || coverMediaType === "pdf") && (
-          <span className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 rounded bg-black/70 px-1.5 py-0.5 text-[9px] tracking-wide text-white uppercase">
-            {coverMediaType === "video" ? <VideoIcon className="h-2.5 w-2.5" /> : <PdfIcon className="h-2.5 w-2.5" />}
-            {coverMediaType}
-          </span>
-        )}
-
-        {/* Content-name overlay -- ONLY for a real multi-asset cluster (see
-            isCluster above), same typography/truncation the folder tile
-            uses for its own name, adapted to sit over an image/video/PDF
-            cover instead of a plain background: a bottom gradient scrim
-            keeps it readable regardless of what's underneath. */}
-        {isCluster && (
-          <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end bg-gradient-to-t from-black/75 via-black/20 to-transparent px-2 pb-1.5 pt-6">
-            <span className="max-w-[75%] truncate text-xs font-medium text-white">{name}</span>
-          </span>
-        )}
-
-        {/* Hover-only affordance -- makes it visually obvious the tile opens
-            a full-size preview on click, not just a cursor change (same
-            "View larger" intent as MediaFrame's zoom cursor in
-            components/media-gallery.tsx). */}
-        {!selectionMode && thumbnailUrl && (
-          <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all duration-150 group-hover:bg-black/20 group-hover:opacity-100">
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm">
-              <ZoomIcon className="h-4 w-4" />
-            </span>
-          </span>
-        )}
-      </button>
+      {isCluster ? (
+        // A real multi-asset cluster gets the exact same cover+footer
+        // structure as the folder tile (stories-board.tsx's FolderTile) --
+        // audited and reused directly, not approximated: flex-col with the
+        // cover as the flex-1 area and a separate shrink-0 footer strip
+        // below it, same px-3 py-2 padding and text-xs font-medium
+        // text-foreground truncate name styling. Not a text-over-image
+        // overlay -- the name never sits on top of the media.
+        <button
+          type="button"
+          title={name}
+          onClick={handleOpen}
+          className={`relative flex h-full w-full flex-col overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
+            selectionMode ? "cursor-pointer" : "cursor-zoom-in"
+          } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
+        >
+          <div className="relative min-h-0 flex-1 overflow-hidden">{coverContent}</div>
+          <div className="flex shrink-0 items-center px-3 py-2">
+            <span className="truncate text-xs font-medium text-foreground">{name}</span>
+          </div>
+        </button>
+      ) : (
+        <button
+          type="button"
+          title={name}
+          onClick={handleOpen}
+          className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
+            selectionMode ? "cursor-pointer" : "cursor-zoom-in"
+          } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
+        >
+          {coverContent}
+        </button>
+      )}
 
       {/* Same corner badge/icon as Grid's own scheduled indicator -- kept
           top-left, matching the ⋮ menu's top-right so the two never collide.
@@ -376,7 +401,13 @@ export const StoryCard = memo(function StoryCard({
       )}
 
       {previewOpen && (
-        <AssetPreviewModal files={files} initialIndex={0} name={name} onClose={() => setPreviewOpen(false)} />
+        <AssetPreviewModal
+          files={files}
+          initialIndex={0}
+          name={name}
+          editHref={canManage && isCluster ? href : null}
+          onClose={() => setPreviewOpen(false)}
+        />
       )}
     </div>
   );
@@ -392,11 +423,20 @@ function AssetPreviewModal({
   files,
   initialIndex,
   name,
+  editHref,
   onClose,
 }: {
   files: StoryFileItem[];
   initialIndex: number;
   name: string;
+  // The same /projects/{id}/stories/{storyId} route the card's own kebab
+  // menu "Edit Content" link already uses -- the real, persisted story id,
+  // never a title lookup. Null when the viewer can't manage this project
+  // (same canManage gate the kebab menu's own Edit Content link is already
+  // behind) -- the button is a UX courtesy, not the security boundary; the
+  // Story Editor route itself still enforces permissions server-side
+  // regardless of whether this link is shown.
+  editHref: string | null;
   onClose: () => void;
 }) {
   const [index, setIndex] = useState(initialIndex);
@@ -432,6 +472,23 @@ function AssetPreviewModal({
         onClick={onClose}
         className="fixed inset-0 -z-10 cursor-default"
       />
+      {/* Top-left, opposite the Download/Close cluster -- the existing
+          intercepted route (/projects/{id}/stories/{storyId}), same one
+          the card's own kebab menu "Edit Content" link already navigates
+          to, so it opens as the same modal-over-the-current-page Story
+          Editor rather than a new navigation pattern invented just for
+          this button. Closes this preview first (onClose) so returning
+          from the editor lands back on a normal Content page, not with a
+          stale preview still technically "open" underneath. */}
+      {editHref && (
+        <Link
+          href={editHref}
+          onClick={onClose}
+          className="absolute left-4 top-4 z-10 rounded-full px-3 py-2 text-xs tracking-wide text-foreground/70 uppercase transition-colors duration-150 hover:text-foreground"
+        >
+          Edit Content
+        </Link>
+      )}
       {/* Same top-right corner as Grid's own icon-button row (e.g. the
           Media Library toolbar) -- a bare icon, no label, sitting just left
           of Close so the two read as one cluster. */}

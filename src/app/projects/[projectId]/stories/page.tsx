@@ -27,7 +27,7 @@ export default async function StoriesPage({
 
   const { data: stories } = await supabase
     .from("stories")
-    .select("id, name, scheduled_date, notes, position, status")
+    .select("id, name, scheduled_date, notes, position, status, created_at")
     .eq("project_id", projectId)
     .order("position");
 
@@ -113,6 +113,14 @@ export default async function StoriesPage({
       id: story.id,
       name: story.name,
       scheduledDate: story.scheduled_date,
+      // The authoritative "when was this content created" value for both
+      // sort and the month filter -- stories.created_at, set once at
+      // insert and never touched again (unlike scheduled_date, which is
+      // often null for a draft and doesn't reflect authoring time at all).
+      // Loose assets and clusters are both plain `stories` rows -- there's
+      // no separate "asset" entity with its own timestamp, so this is the
+      // one date source for either case.
+      createdDate: story.created_at,
       notes: story.notes,
       status: story.status,
       thumbnailUrl: files[0]?.coverUrl ?? null,
