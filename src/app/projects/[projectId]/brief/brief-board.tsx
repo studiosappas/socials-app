@@ -17,6 +17,7 @@ import {
   removeBriefTaskItem,
   renameBriefTask,
   renameBriefTaskFrame,
+  renameBriefTaskItem,
   restoreBriefTaskFrame,
   restoreBriefTaskItem,
   saveBriefAnnotation,
@@ -876,22 +877,31 @@ function ItemSection({
     });
   }
 
-  function handleAddImage() {
-    if (!pendingFile) {
+  // fileOverride lets a paste event (handlePasteImage below) reuse this
+  // exact same upload+insert+undo flow without going through the file
+  // picker/pendingFile state at all -- paste is a "the image is already
+  // right here, just add it" gesture, so it skips the extra manual Add
+  // click the file-picker path still requires. Must stay a NO-ARG call at
+  // its own "Add" button's onClick site below (not `onClick={handleAddImage}`
+  // directly) or React would pass the click SyntheticEvent through as
+  // fileOverride.
+  function handleAddImage(fileOverride?: File) {
+    const file = fileOverride ?? pendingFile;
+    if (!file) {
       fileInputRef.current?.click();
       return;
     }
     const notes = imageNotesRef.current?.value ?? "";
     const position = items.length;
-    const fileName = pendingFile.name;
+    const fileName = file.name;
     setImageError(undefined);
     setImagePending(true);
     startTransition(async () => {
       // The file itself goes direct browser-to-Storage (brief-media bucket,
       // same as this app's other uploads) before the action ever runs --
       // bypasses Vercel's Function request-body limit entirely.
-      const path = newStoragePath(projectId, pendingFile.name);
-      const uploaded = await uploadFileDirect("brief-media", path, pendingFile);
+      const path = newStoragePath(projectId, file.name);
+      const uploaded = await uploadFileDirect("brief-media", path, file);
       if ("error" in uploaded) {
         setImagePending(false);
         setImageError(uploaded.error);
@@ -912,6 +922,10 @@ function ItemSection({
       if (result.itemId && result.attachmentId) {
         const current = { id: result.itemId };
         const attachmentId = result.attachmentId;
+        // The item's real (prettified) label, not the raw fileName --
+        // otherwise redoing this command after an undo would restore the
+        // item with a different label than what was actually shown/saved.
+        const label = result.label ?? fileName;
         pushCommand({
           label: "Add image",
           undo: async () => {
@@ -927,7 +941,7 @@ function ItemSection({
               taskId,
               section,
               "image",
-              fileName,
+              label,
               notes,
               attachmentId,
               null,
@@ -939,6 +953,34 @@ function ItemSection({
         });
       }
     });
+  }
+
+  // No paste-image handler existed anywhere in the app before this -- see
+  // the naming-hierarchy comment in brief.ts for exactly what clipboard
+  // data is/isn't reliable. Wired onto the Link/Notes text inputs below
+  // (real, always-focusable elements a user naturally clicks into before
+  // pasting) rather than a dedicated invisible paste target. If the
+  // clipboard has an image, it's used; if not (the normal case -- pasting
+  // actual text into these fields), this is a no-op and the browser's
+  // default text-paste behavior proceeds untouched.
+  function handlePasteImage(e: React.ClipboardEvent<HTMLInputElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        e.preventDefault();
+        const sizeCheck = validateUploadSize(file);
+        if (!sizeCheck.ok) {
+          setImageError(sizeCheck.message);
+          return;
+        }
+        setImageError(undefined);
+        handleAddImage(file);
+        return;
+      }
+    }
   }
 
   function handleRemove(itemId: string) {
@@ -990,6 +1032,13 @@ function ItemSection({
     });
   }
 
+  // Only ever touches this one brief_task_items row's label -- see
+  // renameBriefTaskItem's own comment for why that can never affect
+  // anything shown outside this Brief item.
+  function handleRename(itemId: string, label: string) {
+    return renameBriefTaskItem(projectId, itemId, label);
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <span className={labelClass}>{title}</span>
@@ -1014,6 +1063,7 @@ function ItemSection({
                     })
                   }
                   onDelete={() => handleRemove(item.id)}
+                  onRename={(label) => handleRename(item.id, label)}
                 />
               ) : (
                 <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
@@ -1043,9 +1093,10 @@ function ItemSection({
                 ref={urlRef}
                 placeholder="Converts to an image with image url"
                 onKeyDown={(e) => e.key === "Enter" && handleAddLink()}
+                onPaste={handlePasteImage}
                 className={pillInputClass}
               />
-              <input ref={linkNotesRef} placeholder="Notes" className={notesInputClass} />
+              <input ref={linkNotesRef} placeholder="Notes" onPaste={handlePasteImage} className={notesInputClass} />
               <Button
                 type="button"
                 variant="primary"
@@ -1088,12 +1139,17 @@ function ItemSection({
                   setPendingFile(file);
                 }}
               />
-              <input ref={imageNotesRef} placeholder="Notes" className={notesInputClass} />
+              <input
+                ref={imageNotesRef}
+                placeholder="Notes"
+                onPaste={handlePasteImage}
+                className={notesInputClass}
+              />
               <Button
                 type="button"
                 variant="primary"
                 radius="full"
-                onClick={handleAddImage}
+                onClick={() => handleAddImage()}
                 disabled={imagePending}
                 className="w-full sm:w-auto"
               >
@@ -1140,15 +1196,24 @@ function ImageItemChip({
   canManage,
   onEdit,
   onDelete,
+  onRename,
 }: {
   item: BriefTaskItem;
   canManage: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onRename: (label: string) => Promise<{ success: boolean; message?: string }>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(item.label);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+  // No router.refresh() on rename (see renameBriefTaskItem's own comment),
+  // so the chip has to show its own optimistic value rather than the
+  // (now-stale) item.label prop -- same pattern as stories-board.tsx's
+  // folder rename.
+  const { value: label, set: setOptimisticLabel, reset: resetOptimisticLabel } = useOptimisticOverride(item.label);
 
   // Edited preview wins over the untouched original wherever this asset is
   // displayed/opened/downloaded, same convention as everywhere else this
@@ -1162,37 +1227,70 @@ function ImageItemChip({
     setMenuOpen(false);
     if (!currentUrl) return;
     setDownloading(true);
-    downloadAsset(currentUrl, filenameFromUrl(currentUrl, item.label || "image")).finally(() =>
-      setDownloading(false),
-    );
+    downloadAsset(currentUrl, filenameFromUrl(currentUrl, label || "image")).finally(() => setDownloading(false));
+  }
+
+  function startRename() {
+    setMenuOpen(false);
+    setRenameValue(label);
+    setRenaming(true);
+  }
+
+  function commitRename() {
+    setRenaming(false);
+    const next = renameValue.trim();
+    if (!next || next === label) return;
+    setOptimisticLabel(next);
+    onRename(next).then((result) => {
+      if (!result.success) resetOptimisticLabel();
+    });
   }
 
   return (
     <div ref={menuRef} className="relative">
       <div className="flex w-fit max-w-full items-center gap-1 rounded-full border border-foreground bg-background py-1 pr-1 pl-2.5 text-[11px]">
-        <a
-          href={currentUrl ?? undefined}
-          target="_blank"
-          rel="noreferrer"
-          title={item.label}
-          onContextMenu={(e) => {
-            if (!canManage) return;
-            e.preventDefault();
-            setMenuOpen(true);
-          }}
-          className="flex min-w-0 items-center gap-1"
-        >
-          <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
-            {item.thumbnailUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
-            ) : (
-              <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
-            )}
-          </span>
-          <span className="max-w-[100px] truncate">{item.label}</span>
-        </a>
-        {canManage && (
+        {renaming ? (
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                setRenaming(false);
+                setRenameValue(label);
+              }
+            }}
+            className="max-w-[120px] min-w-0 bg-transparent px-0.5 py-0.5 text-[11px] focus:outline-none"
+          />
+        ) : (
+          <a
+            href={currentUrl ?? undefined}
+            target="_blank"
+            rel="noreferrer"
+            title={label}
+            onContextMenu={(e) => {
+              if (!canManage) return;
+              e.preventDefault();
+              setMenuOpen(true);
+            }}
+            className="flex min-w-0 items-center gap-1"
+          >
+            <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
+              {item.thumbnailUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+              ) : (
+                <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
+              )}
+            </span>
+            <span className="max-w-[100px] truncate">{label}</span>
+          </a>
+        )}
+        {canManage && !renaming && (
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
@@ -1214,6 +1312,13 @@ function ImageItemChip({
             className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07]"
           >
             Edit Image
+          </button>
+          <button
+            type="button"
+            onClick={startRename}
+            className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07]"
+          >
+            Rename
           </button>
           <button
             type="button"
@@ -1391,12 +1496,26 @@ function FrameRow({
 
   return (
     <div className="flex items-center gap-2">
-      <input
-        defaultValue={frame.label}
-        disabled={!canManage}
-        onBlur={(e) => onLabelBlur(frame.id, e.target.value, frame.label)}
-        className="w-24 shrink-0 truncate border border-border bg-transparent px-1.5 py-2 text-center text-[9px] tracking-normal uppercase text-muted focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:w-28 sm:px-2 sm:text-[10px]"
-      />
+      {/* group + relative wrapper: the pencil is a passive visual cue, not an
+          interactive element -- it sits over the input's own right padding
+          (pr-4, reserved for exactly this) so it can never overlap the
+          centered label text, even truncated at the input's max width. Kept
+          faintly visible at rest (not hidden-until-hover) specifically so
+          touch users -- who have no hover state at all -- get the same "this
+          is a text field" cue as desktop, rather than only mouse users. This
+          is the one thing beta feedback said was missing: the input itself,
+          its focus state, and blur-to-save already worked correctly. */}
+      <div className="group relative w-24 shrink-0 sm:w-28">
+        <input
+          defaultValue={frame.label}
+          disabled={!canManage}
+          onBlur={(e) => onLabelBlur(frame.id, e.target.value, frame.label)}
+          className="w-full truncate border border-border bg-transparent py-2 pr-4 pl-1.5 text-center text-[9px] tracking-normal uppercase text-muted transition-colors duration-150 group-hover:border-foreground/40 focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:pr-4 sm:pl-2 sm:text-[10px]"
+        />
+        {canManage && (
+          <PencilIcon className="pointer-events-none absolute top-1/2 right-1.5 h-2.5 w-2.5 -translate-y-1/2 text-muted opacity-40 transition-opacity duration-150 group-hover:opacity-70 group-focus-within:opacity-90" />
+        )}
+      </div>
       <input
         ref={setBodyEl}
         defaultValue={frame.body}
@@ -1416,6 +1535,18 @@ function FrameRow({
         </button>
       )}
     </div>
+  );
+}
+
+function PencilIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path
+        d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19 3 20l1-4Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

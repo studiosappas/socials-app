@@ -20,6 +20,137 @@ import type {
 
 const DEFAULT_FRAME_LABELS = ["Cover", "Body 1", "Body 2", "Closure"];
 
+// ---------------------------------------------------------------------------
+// Image/product naming.
+//
+// There is no reliable way to know a "product name" for an arbitrary pasted
+// or uploaded image -- see insertBriefImageItem's own comment. What IS
+// available and worth using well:
+//   1. A page's own declared title (og:title/twitter:title/<title>) when an
+//      image was added via the "Link" field and we had to scrape a webpage
+//      for its primary image -- this is real metadata the SOURCE SITE chose
+//      to publish, not a guess, and product pages commonly set it to the
+//      actual product name.
+//   2. A meaningful original filename (from a real upload, or the last path
+//      segment of a direct image URL) -- turned into a human label instead
+//      of shown as a raw slug.
+//   3. A clean fallback ("Image") when neither exists -- never a generic
+//      browser-assigned name like "image.png", "blob", or a UUID.
+// ---------------------------------------------------------------------------
+
+const KNOWN_IMAGE_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+  "heic",
+  "heif",
+  "bmp",
+  "tiff",
+  "tif",
+  "svg",
+  "avif",
+]);
+
+// Generic/camera/clipboard-style names carry no real information -- IMG_1234,
+// image.png, blob, a bare UUID/hash. Prettifying one of these into "Img
+// 1234" would LOOK like a real name without being one, which is exactly the
+// "pretend an unreliable value is a product name" trap this feature has to
+// avoid. Anything matching one of these is treated as NOT meaningful.
+const GENERIC_NAME_PATTERNS = [
+  /^img[-_]?\d*$/i,
+  /^dsc[-_]?\d*$/i,
+  /^image\d*$/i,
+  /^photo\d*$/i,
+  /^picture\d*$/i,
+  /^screen[-_ ]?shot.*$/i,
+  /^clipboard.*$/i,
+  /^blob$/i,
+  /^untitled.*$/i,
+  /^file\d*$/i,
+  /^download.*$/i,
+  /^asset\d*$/i,
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, // uuid
+  /^[0-9a-f]{16,}$/i, // long hex hash
+];
+
+function stripKnownImageExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return name;
+  // Only strips a KNOWN image extension, never just "whatever's after the
+  // last dot" -- a scraped page title like "Necklace by J.Crew" has a dot
+  // too, and naively slicing at lastIndexOf(".") would mangle it.
+  const ext = name.slice(dot + 1).toLowerCase();
+  return KNOWN_IMAGE_EXTENSIONS.has(ext) ? name.slice(0, dot) : name;
+}
+
+function isMeaningfulName(baseName: string): boolean {
+  const trimmed = baseName.trim();
+  if (!trimmed) return false;
+  return !GENERIC_NAME_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+// Turns "gold-pearl-necklace.jpg" into "Gold Pearl Necklace"; leaves a
+// generic/camera/clipboard-style name alone and returns fallbackLabel
+// instead. Safe to run on an already-clean scraped page title too (no
+// extension to strip, already real words, so this is close to a no-op for
+// that case) -- it's the one place every image-insertion path funnels its
+// raw source name through, so the naming hierarchy only has to be right
+// here, not duplicated per caller.
+function prettifyLabel(rawName: string, fallbackLabel = "Image"): string {
+  const withoutExt = stripKnownImageExtension(rawName);
+  if (!isMeaningfulName(withoutExt)) return fallbackLabel;
+  const spaced = withoutExt
+    .replace(/[-_+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!spaced) return fallbackLabel;
+  return spaced
+    .split(" ")
+    .map((word) => (word.length > 0 ? word[0].toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
+
+const HTML_ENTITIES: Record<string, string> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
+  "&apos;": "'",
+  "&nbsp;": " ",
+};
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&amp;|&lt;|&gt;|&quot;|&#39;|&apos;|&nbsp;/g, (entity) => HTML_ENTITIES[entity] ?? entity);
+}
+
+// og:title/twitter:title first (a page's own declared social-share title --
+// e-commerce product pages commonly set this to the actual product name),
+// falling back to the plain <title> tag. Capped at a sane length since a
+// page's <title> can be a long "Product Name | Category | Store Name |
+// Free Shipping" string -- still better than nothing, but not allowed to
+// balloon into something absurd as an item label.
+function extractPageTitle(html: string): string | null {
+  const patterns = [
+    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i,
+    /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:title["']/i,
+    /<title[^>]*>([^<]+)<\/title>/i,
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (!match?.[1]) continue;
+    const decoded = decodeHtmlEntities(match[1]).trim();
+    if (decoded && decoded.length <= 120) return decoded;
+  }
+  return null;
+}
+
 const BRIEF_STATUS_LABEL: Record<BriefTaskStatus, string> = {
   draft: "Draft",
   internal_review: "Internal Review",
@@ -181,13 +312,20 @@ async function insertBriefImageItem(
     return { success: false, message: attachmentError?.message ?? "Failed to save attachment." };
   }
 
+  // See the naming-hierarchy comment near DEFAULT_FRAME_LABELS -- fileName
+  // here is whatever the caller had best available (a real upload's
+  // File.name, a scraped page title, or a URL's last path segment), and
+  // this is the one place that turns it into a clean, human item label
+  // rather than showing a raw filename/slug/generic browser-assigned name.
+  const label = prettifyLabel(fileName);
+
   const { data: item, error: itemError } = await supabase
     .from("brief_task_items")
     .insert({
       task_id: taskId,
       section,
       kind: "image",
-      label: fileName,
+      label,
       notes: notes.trim(),
       attachment_id: attachment.id,
       position,
@@ -200,7 +338,7 @@ async function insertBriefImageItem(
   // addBriefTaskLink's image path) ends at a client handler that already
   // calls router.refresh() itself, since no optimistic item insertion
   // exists yet.
-  return { success: true, itemId: item?.id, attachmentId: attachment.id, label: fileName };
+  return { success: true, itemId: item?.id, attachmentId: attachment.id, label };
 }
 
 // Only reached from addBriefTaskLink now -- fetching an arbitrary external
@@ -218,6 +356,13 @@ async function createBriefImageItem(
   fileBytes: Buffer,
   contentType: string,
   fileName: string,
+  // A scraped page title (og:title/twitter:title/<title>), when addBriefTaskLink
+  // had one -- kept as a SEPARATE parameter from fileName rather than reused
+  // in its place, since fileName still has to stay filename-shaped here
+  // (it's what derives the storage path's extension below); a title can
+  // contain a "." of its own (e.g. "Necklace by J.Crew") that would corrupt
+  // extension detection if it were passed as fileName instead.
+  labelOverride?: string | null,
 ): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
   const supabase = await createClient();
   const extFromName = fileName.includes(".") ? fileName.split(".").pop() : undefined;
@@ -231,7 +376,7 @@ async function createBriefImageItem(
     return { success: false, message: uploadError.message };
   }
 
-  return insertBriefImageItem(projectId, taskId, section, notes, position, storagePath, fileName);
+  return insertBriefImageItem(projectId, taskId, section, notes, position, storagePath, labelOverride || fileName);
 }
 
 // og:image (checked both attribute orders) first, then twitter:image, then
@@ -317,6 +462,11 @@ export async function addBriefTaskLink(
 
   let contentType = response.headers.get("content-type") ?? "";
   let imageBuffer: Buffer | null = null;
+  // Only ever set when we had to scrape a webpage (never for a URL that was
+  // already a direct image, which has no HTML/title to read) -- see
+  // extractPageTitle's own comment on why this is a genuinely reliable
+  // signal, unlike a clipboard-paste's filename/alt text.
+  let scrapedTitle: string | null = null;
 
   if (contentType.startsWith("image/")) {
     imageBuffer = Buffer.from(await response.arrayBuffer());
@@ -326,6 +476,7 @@ export async function addBriefTaskLink(
     // fetch failed, wasn't actually an image) just falls through to the
     // plain-link fallback below rather than erroring the whole add.
     const html = await response.text();
+    scrapedTitle = extractPageTitle(html);
     const imageUrl = extractPrimaryImageUrl(html, targetUrl);
     if (imageUrl) {
       try {
@@ -344,7 +495,17 @@ export async function addBriefTaskLink(
 
   if (imageBuffer) {
     const fileName = decodeURIComponent(targetUrl.split("/").pop()?.split("?")[0] || "image");
-    const result = await createBriefImageItem(projectId, taskId, section, notes, position, imageBuffer, contentType, fileName);
+    const result = await createBriefImageItem(
+      projectId,
+      taskId,
+      section,
+      notes,
+      position,
+      imageBuffer,
+      contentType,
+      fileName,
+      scrapedTitle,
+    );
     return { ...result, kind: "image" };
   }
 
@@ -416,6 +577,27 @@ export async function updateBriefTaskItemNotes(projectId: string, itemId: string
   if (error) return { success: false, message: error.message };
   // Not revalidating -- an uncontrolled textarea (defaultValue) already
   // shows the typed notes, same reasoning as renameBriefTask above.
+  return { success: true };
+}
+
+// Renames a Brief item's own display label -- deliberately scoped to just
+// this one brief_task_items row. It can't touch brief_attachments (which
+// has no name/label column at all -- the "name" of an image has only ever
+// lived on the item row, see insertBriefImageItem's own comment) or
+// media_assets (Brief images are never inserted there; Grid/Calendar/
+// Stories all read media_assets, a completely separate table/bucket from
+// brief_attachments/brief-media, so this rename can never be visible
+// anywhere outside this one Brief item).
+export async function renameBriefTaskItem(projectId: string, itemId: string, label: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("brief_task_items")
+    .update({ label: label.trim() || "Image" })
+    .eq("id", itemId);
+  if (error) return { success: false, message: error.message };
+  // Not revalidating -- the chip shows its own optimistic override (set by
+  // the caller before this resolves), same convention as renameBriefTask/
+  // renameBriefTaskFrame above.
   return { success: true };
 }
 
