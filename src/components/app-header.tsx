@@ -14,6 +14,7 @@ export function AppHeader({
   notificationItems = [],
   unreadCount = 0,
   homeHref = "/projects",
+  userFirstName = null,
 }: {
   projects?: NavProject[];
   notificationItems?: NotificationItem[];
@@ -23,6 +24,10 @@ export function AppHeader({
   // account-settings.ts's resolveLandingPath, shared with the post-login
   // redirect). Defaults to /projects for logged-out renders.
   homeHref?: string;
+  // From profiles.name (see nav-data.ts's getUserDisplayFirstName) -- null
+  // for a logged-out render or a user with no name saved yet, in which case
+  // the nav item falls back to the plain "Account" label below.
+  userFirstName?: string | null;
 }) {
   const pathname = usePathname();
   const onAccount = pathname.startsWith("/account");
@@ -63,13 +68,37 @@ export function AppHeader({
           >
             To Do
           </Link>
+          {/* Icon + first name, not a second circular avatar -- the project
+              avatar already occupies that visual role in this same nav, and
+              a second one right next to it would read as two projects, not
+              a project + a user. This is WHO is signed in, not another
+              project. Falls back to the plain "Account" label (no icon)
+              whenever there's no usable name, so it never renders broken or
+              empty text. */}
           <Link
             href="/account"
-            className={`whitespace-nowrap transition-colors duration-150 hover:text-foreground ${
+            className={`flex min-w-0 items-center gap-1 whitespace-nowrap transition-colors duration-150 hover:text-foreground ${
               onAccount ? "font-semibold text-foreground" : "text-muted"
             }`}
           >
-            Account
+            {userFirstName ? (
+              <>
+                {/* The header was already at essentially zero horizontal
+                    margin at 320px with the plain "Account" label -- full
+                    icon + a generous name width only kicks in from 375px
+                    (same min-[375px] convention already used for this
+                    app's other 320/375/390/414 responsive tuning, see
+                    post-editor.tsx's asset grid). Below that, the icon
+                    (purely decorative; the name alone still fully
+                    identifies the signed-in user) drops and the name
+                    truncates tighter, so "log out" never clips off the
+                    edge on the smallest phones. */}
+                <PersonIcon className="hidden h-4 w-4 shrink-0 min-[375px]:inline-block" />
+                <span className="max-w-[52px] truncate min-[375px]:max-w-[90px]">{userFirstName}</span>
+              </>
+            ) : (
+              "Account"
+            )}
           </Link>
           <form action={logout}>
             <button
@@ -96,6 +125,19 @@ export function AppFooter() {
         <span className="text-foreground">Studio Sappas</span>
       </p>
     </footer>
+  );
+}
+
+// Minimal outline person glyph, matching nav-notification-bell.tsx's own
+// BellIcon (24x24 viewBox, stroke-only, currentColor, strokeWidth 1.5) so
+// the two nav icons read as the same icon language rather than a mismatched
+// new style.
+function PersonIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 20c0-4.4 3.6-8 8-8s8 3.6 8 8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 

@@ -39,6 +39,26 @@ export function NavProjectMenu({ projectId }: { projectId: string | null }) {
 
   const base = projectId ? `/projects/${projectId}` : null;
 
+  // Same match used to highlight the active row in the dropdown below,
+  // reused (not duplicated) to drive the trigger's own label -- "Projects"
+  // was always the wrong word here once you're actually inside a project:
+  // this dropdown is the app's main page navigation, not a project picker,
+  // so the label should say where you ARE (Grid, Calendar, Brief, ...) and
+  // the arrow says where else you can go.
+  const activePage = base
+    ? PROJECT_PAGES.find((page) => (page.href ? pathname.startsWith(`${base}/${page.href}`) : pathname === base))
+    : null;
+  // Post detail pages -- both the @modal-intercepted overlay opened from a
+  // Grid tile and the standalone page reached by a direct URL/hard refresh
+  // -- aren't one of PROJECT_PAGES' own destinations (there's no "Posts"
+  // entry), but posts are fundamentally Grid content, so the label should
+  // still read "Grid" rather than falling back to the generic "Projects"
+  // while the user is clearly still deep in that surface. Story detail
+  // pages don't need the same treatment -- /stories/[storyId] already
+  // starts with the "stories" entry's own href, so it matches directly.
+  const isPostDetail = !activePage && base && pathname.startsWith(`${base}/posts/`);
+  const label = activePage?.label ?? (isPostDetail ? "Grid" : null) ?? "Projects";
+
   return (
     // Trigger + panel share one hover zone (mouseenter/leave on this wrapper,
     // not on the trigger and panel separately) -- moving the cursor from
@@ -74,7 +94,7 @@ export function NavProjectMenu({ projectId }: { projectId: string | null }) {
           }}
           className="inline-flex items-center gap-1 whitespace-nowrap text-foreground transition-colors duration-150 hover:text-foreground"
         >
-          Projects
+          {label}
           <svg
             width="8"
             height="5"
