@@ -621,6 +621,7 @@ export interface Database {
           position?: number;
         };
         Update: {
+          section?: BriefItemSection;
           label?: string;
           notes?: string;
           position?: number;

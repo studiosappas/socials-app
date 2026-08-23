@@ -2,9 +2,27 @@
 
 import { memo, useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  pointerWithin,
+  rectIntersection,
+  useSensor,
+  useSensors,
+  useDroppable,
+  useDndContext,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import {
   addBriefTaskFrame,
@@ -17,6 +35,8 @@ import {
   removeBriefTaskItem,
   renameBriefTask,
   renameBriefTaskFrame,
+  renameBriefTaskItem,
+  reorderBriefTaskItems,
   restoreBriefTaskFrame,
   restoreBriefTaskItem,
   saveBriefAnnotation,
@@ -351,9 +371,11 @@ export function BriefBoard({
 }
 
 // One merged set of pills -- both the task's own "type" (persisted,
-// content_types) and Generate Design's "Post Type" (canvas size, see
-// POST_TYPE_CANVAS in lib/actions/brief.ts) used to be two separate rows
-// showing overlapping options; now a single select drives both.
+// content_types, now multi-select -- see handleToggleType) and Generate
+// Design's "Post Type" (canvas size, see POST_TYPE_CANVAS in
+// lib/actions/brief.ts, resolved from the selection via `primaryType`
+// below) used to be two separate rows showing overlapping options; now one
+// set of toggles drives both.
 const POST_TYPE_OPTIONS: { value: BriefTaskType; label: string }[] = [
   { value: "post", label: "Post" },
   { value: "story", label: "Story" },
@@ -419,30 +441,196 @@ const TaskCard = memo(function TaskCard({
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | undefined>();
   const [typeError, setTypeError] = useState<string | undefined>();
+  const [dndError, setDndError] = useState<string | undefined>();
+
+  // Asset drag & drop -- reorder within References/Images/Products and move
+  // between them. Frames/Text are a completely different data model (one
+  // label+body field each, not a list) and are rendered OUTSIDE the
+  // DndContext below entirely, so they can never become a drop target at
+  // all, not just "the UI discourages it."
+  //
+  // Same optimistic-override shape as every other field on this card:
+  // task.items is the server truth, this shadows it locally during a
+  // drag/persist and resets the instant a fresh task.items prop arrives (a
+  // revalidation, or -- on failure -- this component's own reset call).
+  const {
+    value: items,
+    set: setItemsOverride,
+    reset: resetItemsOverride,
+  } = useOptimisticOverride<BriefTaskItem[]>(task.items);
+  const isTouchDevice = useIsTouchDevice();
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, {
+      // Same reasoning as Grid's own sensor (see useIsTouchDevice): a
+      // deliberate long-press on touch so a normal scroll attempt doesn't
+      // misfire as a drag; a small movement threshold on desktop so a
+      // plain click still reaches the thumbnail link, the rename input, or
+      // the options menu without registering as a drag.
+      activationConstraint: isTouchDevice ? { delay: 200, tolerance: 8 } : { distance: 4 },
+    }),
+  );
+  const dragStartSectionRef = useRef<BriefItemSection | null>(null);
+  // The full items list as it was the INSTANT the drag started -- handleDragEnd
+  // reads "before" state from this, not from `items` directly, because by
+  // the time it runs, handleDragOver has typically already applied its own
+  // live section change to `items`. Snapshotting at drag-end would then
+  // capture that already-mutated state as "before," which is wrong: it's
+  // literally the mid-drag state, not the pre-drag one -- and undo would
+  // restore to the wrong place (confirmed via a real test: without this,
+  // undoing a cross-section move left the item behind in the NEW section
+  // instead of putting it back in the original one).
+  const dragStartItemsRef = useRef<BriefTaskItem[] | null>(null);
+
+  function handleDragStart(event: DragStartEvent) {
+    dragStartItemsRef.current = items;
+    const item = items.find((i) => i.id === event.active.id);
+    dragStartSectionRef.current = item?.section ?? null;
+  }
+
+  // Fires continuously while dragging over a target -- moves the dragged
+  // item's SECTION optimistically the moment it crosses into a different
+  // one, so it visually appears in the new section immediately instead of
+  // only snapping over on drop. Within-section reordering during the drag
+  // itself is handled by SortableContext/useSortable automatically; this
+  // only ever changes which section an item currently belongs to.
+  function handleDragOver(event: DragOverEvent) {
+    const { active, over } = event;
+    if (!over) return;
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    if (activeId === overId) return;
+
+    const activeItem = items.find((i) => i.id === activeId);
+    if (!activeItem) return;
+
+    const overSection = sectionOfDroppable(overId, items);
+    if (!overSection || overSection === activeItem.section) return;
+
+    setItemsOverride((current) => current.map((i) => (i.id === activeId ? { ...i, section: overSection } : i)));
+  }
+
+  function handleDragCancel() {
+    dragStartSectionRef.current = null;
+    // Undoes any live section change onDragOver already applied -- a
+    // cancelled drag (Escape, dropped somewhere invalid) must leave the
+    // item exactly where it started.
+    resetItemsOverride();
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    const fromSection = dragStartSectionRef.current;
+    const preDragItems = dragStartItemsRef.current ?? items;
+    dragStartSectionRef.current = null;
+    dragStartItemsRef.current = null;
+    if (!over || !fromSection) {
+      resetItemsOverride();
+      return;
+    }
+
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    const activeItem = items.find((i) => i.id === activeId);
+    if (!activeItem) {
+      resetItemsOverride();
+      return;
+    }
+
+    const toSection = sectionOfDroppable(overId, items) ?? activeItem.section;
+
+    // Snapshot the BEFORE order of every section this move touches, from
+    // preDragItems (the state at drag START) -- NOT from `items`, which by
+    // now may already reflect handleDragOver's own live section change.
+    // Undo just replays these ids verbatim, no separate "insert back at
+    // index N" logic needed.
+    const beforeTargetIds = preDragItems.filter((i) => i.section === toSection).map((i) => i.id);
+    const beforeSourceIds =
+      fromSection !== toSection ? preDragItems.filter((i) => i.section === fromSection).map((i) => i.id) : null;
+
+    const itemsInTarget = items.filter((i) => i.section === toSection);
+    const oldIndex = itemsInTarget.findIndex((i) => i.id === activeId);
+    const overItem = items.find((i) => i.id === overId);
+    const newIndex =
+      overItem && overItem.section === toSection ? itemsInTarget.findIndex((i) => i.id === overId) : itemsInTarget.length - 1;
+
+    if (oldIndex === -1) {
+      resetItemsOverride();
+      return;
+    }
+    if (oldIndex === newIndex && fromSection === toSection) return; // dropped back where it started -- nothing to do
+
+    const afterTargetIds = arrayMove(itemsInTarget, oldIndex, newIndex).map((i) => i.id);
+    const afterSourceIds =
+      fromSection !== toSection ? items.filter((i) => i.section === fromSection && i.id !== activeId).map((i) => i.id) : null;
+
+    setDndError(undefined);
+    setItemsOverride((current) => applyItemOrder(current, toSection, afterTargetIds, fromSection, afterSourceIds));
+
+    startTransition(async () => {
+      const calls = [reorderBriefTaskItems(projectId, toSection, afterTargetIds)];
+      if (afterSourceIds) calls.push(reorderBriefTaskItems(projectId, fromSection, afterSourceIds));
+      const results = await Promise.all(calls);
+      const failed = results.find((r) => !r.success);
+      if (failed) {
+        resetItemsOverride();
+        setDndError(failed.message ?? "Couldn't save that move. Please try again.");
+        return;
+      }
+      pushCommand({
+        label: fromSection === toSection ? "Reorder items" : "Move item",
+        undo: async () => {
+          const undoCalls = [reorderBriefTaskItems(projectId, toSection, beforeTargetIds)];
+          if (beforeSourceIds) undoCalls.push(reorderBriefTaskItems(projectId, fromSection, beforeSourceIds));
+          await Promise.all(undoCalls);
+          router.refresh();
+        },
+        redo: async () => {
+          const redoCalls = [reorderBriefTaskItems(projectId, toSection, afterTargetIds)];
+          if (afterSourceIds) redoCalls.push(reorderBriefTaskItems(projectId, fromSection, afterSourceIds));
+          await Promise.all(redoCalls);
+          router.refresh();
+        },
+      });
+    });
+  }
+
   // Optimistic, with "adjust state during render" sync back to the server
   // value (same convention Grid's own Post Type pills use) -- previously
   // this read straight off task.contentTypes with no local state at all, so
   // a click didn't visibly do anything until the round-trip + router.refresh
   // landed. On a slow connection (or if the save silently failed, which
   // went unsurfaced before this) that read as "the button doesn't work."
+  //
+  // content_types has ALWAYS been a Postgres text[] / BriefTaskType[] end to
+  // end (schema, setBriefTaskTypes, generateBriefDesign's prompt text) --
+  // this component was the only place that narrowed it down to a single
+  // value (task.contentTypes[0]). Toggling now operates on the full array;
+  // no migration, no server-side change needed.
   const {
-    value: selectedType,
-    set: setOptimisticType,
-    reset: resetOptimisticType,
-  } = useOptimisticOverride<BriefTaskType>(task.contentTypes[0] ?? "post");
+    value: selectedTypes,
+    set: setOptimisticTypes,
+    reset: resetOptimisticTypes,
+  } = useOptimisticOverride<BriefTaskType[]>(task.contentTypes);
 
-  // No router.refresh() on success -- optimisticType already shows the
+  // No router.refresh() on success -- optimisticTypes already shows the
   // correct final value, and setBriefTaskTypes no longer revalidates its
   // own route either, since there was nothing left for a refresh to
   // usefully bring back.
-  function handleSelectType(type: BriefTaskType) {
-    if (type === selectedType) return;
+  //
+  // The product has never allowed zero types (DB default is array['story'],
+  // every write path -- old single-select included -- always produced
+  // exactly one value): deselecting the last remaining pill is a no-op,
+  // same as the old single-select's `if (type === selectedType) return`.
+  function handleToggleType(type: BriefTaskType) {
+    const isSelected = selectedTypes.includes(type);
+    if (isSelected && selectedTypes.length === 1) return;
+    const nextTypes = isSelected ? selectedTypes.filter((t) => t !== type) : [...selectedTypes, type];
     setTypeError(undefined);
-    setOptimisticType(type);
+    setOptimisticTypes(nextTypes);
     startTransition(async () => {
-      const result = await setBriefTaskTypes(projectId, task.id, [type]);
+      const result = await setBriefTaskTypes(projectId, task.id, nextTypes);
       if (!result.success) {
-        resetOptimisticType();
+        resetOptimisticTypes();
         setTypeError(result.message ?? "Couldn't change the type.");
       }
     });
@@ -456,7 +644,7 @@ const TaskCard = memo(function TaskCard({
     reset: resetOptimisticStatus,
   } = useOptimisticOverride<BriefTaskStatus>(task.status);
 
-  // No router.refresh() on success -- same reasoning as handleSelectType
+  // No router.refresh() on success -- same reasoning as handleToggleType
   // above.
   function handleSetStatus(next: BriefTaskStatus) {
     if (next === currentStatus) return;
@@ -476,11 +664,22 @@ const TaskCard = memo(function TaskCard({
   // already opens the annotation editor with the real result data
   // (mediaAssetId/imageUrl/annotationJson) passed directly, not read back
   // from a page prop.
+  // Generate Design renders ONE canvas, so multi-type selection still needs
+  // exactly one GeneratedDesignPostType to pick a size (POST_TYPE_CANVAS in
+  // lib/actions/brief.ts) -- there's no "generate N designs, one per type"
+  // feature here, and per the no-modal/no-extra-UI brief for this pass, the
+  // resolution is: whichever selected type comes first in POST_TYPE_OPTIONS'
+  // fixed display order (Post > Story > Reel Cover > Newsletter) drives the
+  // canvas. Deliberate and documented, not an incidental array[0] read --
+  // the type isn't discarded, `generateBriefDesign` still receives and
+  // reports the FULL content_types list in its prompt text.
+  const primaryType = POST_TYPE_OPTIONS.find((opt) => selectedTypes.includes(opt.value))?.value ?? "post";
+
   function handleGenerateDesign() {
     setGenerateError(undefined);
     setGenerating(true);
     startTransition(async () => {
-      const result = await generateBriefDesign(projectId, task.id, selectedType);
+      const result = await generateBriefDesign(projectId, task.id, primaryType);
       setGenerating(false);
       if (!result.success || !result.mediaAssetId || !result.imageUrl) {
         setGenerateError(result.message ?? "Couldn't generate a design.");
@@ -609,9 +808,10 @@ const TaskCard = memo(function TaskCard({
                   key={opt.value}
                   type="button"
                   disabled={!canManage}
-                  onClick={() => handleSelectType(opt.value)}
+                  aria-pressed={selectedTypes.includes(opt.value)}
+                  onClick={() => handleToggleType(opt.value)}
                   className={`rounded-full border px-4 py-1.5 text-xs tracking-wide uppercase transition-all duration-150 active:scale-95 ${
-                    selectedType === opt.value
+                    selectedTypes.includes(opt.value)
                       ? "border-foreground bg-foreground text-background"
                       : "border-border text-foreground hover:border-foreground/50 hover:bg-black/[.03]"
                   }`}
@@ -623,42 +823,94 @@ const TaskCard = memo(function TaskCard({
             {typeError && <p className="text-xs text-error">{typeError}</p>}
           </div>
 
-          <ItemSection
-            title="References"
-            projectId={projectId}
-            taskId={task.id}
-            section="references"
-            items={task.items.filter((i) => i.section === "references")}
-            canManage={canManage}
-            onEditImage={onEditImage}
-            pushCommand={pushCommand}
-            onHideItem={onHideItem}
-            onUnhideItem={onUnhideItem}
-          />
-          <ItemSection
-            title="Images"
-            projectId={projectId}
-            taskId={task.id}
-            section="images"
-            items={task.items.filter((i) => i.section === "images")}
-            canManage={canManage}
-            onEditImage={onEditImage}
-            pushCommand={pushCommand}
-            onHideItem={onHideItem}
-            onUnhideItem={onUnhideItem}
-          />
-          <ItemSection
-            title="Products"
-            projectId={projectId}
-            taskId={task.id}
-            section="products"
-            items={task.items.filter((i) => i.section === "products")}
-            canManage={canManage}
-            onEditImage={onEditImage}
-            pushCommand={pushCommand}
-            onHideItem={onHideItem}
-            onUnhideItem={onUnhideItem}
-          />
+          {dndError && <p className="-mt-2 text-xs text-error">{dndError}</p>}
+
+          {canManage ? (
+            <DndContext
+              sensors={dndSensors}
+              collisionDetection={briefCollisionDetection}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragEnd={handleDragEnd}
+              onDragCancel={handleDragCancel}
+            >
+              <ItemSection
+                title="References"
+                projectId={projectId}
+                taskId={task.id}
+                section="references"
+                items={items.filter((i) => i.section === "references")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Images"
+                projectId={projectId}
+                taskId={task.id}
+                section="images"
+                items={items.filter((i) => i.section === "images")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Products"
+                projectId={projectId}
+                taskId={task.id}
+                section="products"
+                items={items.filter((i) => i.section === "products")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+            </DndContext>
+          ) : (
+            <>
+              <ItemSection
+                title="References"
+                projectId={projectId}
+                taskId={task.id}
+                section="references"
+                items={items.filter((i) => i.section === "references")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Images"
+                projectId={projectId}
+                taskId={task.id}
+                section="images"
+                items={items.filter((i) => i.section === "images")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Products"
+                projectId={projectId}
+                taskId={task.id}
+                section="products"
+                items={items.filter((i) => i.section === "products")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+            </>
+          )}
 
           <FrameSection
             title="Frames"
@@ -772,6 +1024,146 @@ function StatusBadge({
   );
 }
 
+// Resolves a dnd-kit `over.id` to the BriefItemSection it belongs to --
+// `over` is either another item (dropped near/on it -- use ITS section) or
+// a section's own droppable container id (dropped into its empty space,
+// see ItemSection's `section-${section}` droppable below).
+// closestCenter alone (dnd-kit's default) compares the dragged item's
+// center to every OTHER droppable's center and picks whichever is
+// nearest -- a good fit for same-sized sortable items, but a poor one for
+// a large, mostly-empty container: a section that has no items yet is
+// still registered as a droppable (see ItemSection's useDroppable below),
+// but its center can end up geometrically closer to an ADJACENT section's
+// items than to itself unless the pointer is moved very precisely, which
+// is exactly why dragging into an empty section felt unreliable/impossible
+// in practice even though it was technically wired up correctly. This is
+// dnd-kit's own documented fix for multi-container sortable UIs: try
+// pointerWithin first (did the pointer literally land inside a droppable's
+// rect -- the intuitive, predictable behavior for "hovering a section"),
+// fall back to rectIntersection (the dragged item's rect overlaps a
+// droppable's rect at all), and only fall back to closestCenter if neither
+// finds anything, so item-to-item reordering within a section keeps
+// working exactly as it did before.
+const briefCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+  if (pointerCollisions.length > 0) return pointerCollisions;
+  const intersections = rectIntersection(args);
+  if (intersections.length > 0) return intersections;
+  return closestCenter(args);
+};
+
+function sectionOfDroppable(overId: string, items: BriefTaskItem[]): BriefItemSection | null {
+  const overItem = items.find((i) => i.id === overId);
+  if (overItem) return overItem.section;
+  const prefix = "section-";
+  if (overId.startsWith(prefix)) {
+    const candidate = overId.slice(prefix.length);
+    if (candidate === "references" || candidate === "images" || candidate === "products") return candidate;
+  }
+  return null;
+}
+
+// Rebuilds the full items array reflecting a completed move: toSection's
+// items in their new order (targetIds, which includes the moved item),
+// and -- only for a cross-section move -- fromSection's remaining items in
+// their new order too. Every OTHER section's items are left exactly where
+// they were; the exact position of one section's items relative to
+// another's within the combined array never matters, since each
+// ItemSection derives its own list via `items.filter(i => i.section ===
+// X)`, which only cares about relative order among same-section items.
+function applyItemOrder(
+  current: BriefTaskItem[],
+  toSection: BriefItemSection,
+  targetIds: string[],
+  fromSection: BriefItemSection,
+  sourceIds: string[] | null,
+): BriefTaskItem[] {
+  const byId = new Map(current.map((i) => [i.id, i]));
+  const untouched = current.filter((i) => i.section !== toSection && (!sourceIds || i.section !== fromSection));
+  const targetItems = targetIds.map((id) => {
+    const base = byId.get(id);
+    if (!base) return null;
+    return base.section === toSection ? base : { ...base, section: toSection };
+  });
+  const sourceItems = sourceIds ? sourceIds.map((id) => byId.get(id) ?? null) : [];
+  return [...untouched, ...sourceItems, ...targetItems].filter((i): i is BriefTaskItem => i !== null);
+}
+
+// Wraps one item's row (chip + notes field) as a single sortable/draggable
+// unit -- notes travel with the item they belong to, which also keeps drag
+// concerns entirely out of ImageItemChip/LinkItemChip themselves.
+//
+// Desktop: listeners stay on the whole outer wrapper (not a separate handle
+// icon, per the original "no large drag handles unless necessary" brief) --
+// a plain click on the thumbnail, the name, or the options menu still works
+// normally, since PointerSensor only activates a drag after real pointer
+// movement past its activationConstraint, not on a stationary click.
+//
+// Touch: listeners move to a small dedicated grip handle instead. Real
+// mobile testing found the whole-wrapper approach doesn't actually work on
+// touch -- the filename span's onPointerDown stopPropagation (see
+// ImageItemChip, added so a text-selection drag never also starts a
+// reorder) silently swallows the gesture for any touch starting on the
+// label, which is the single widest tap target in the chip; the thumbnail
+// and link chip's <a> have the same problem from the OTHER direction (a
+// long-press on a real link natively triggers the OS's own link
+// callout/context menu before dnd-kit's synthetic long-press timer can
+// win). A dedicated handle has neither conflict, so it's the reliable
+// choice on touch even though the whole chip stays the (already proven)
+// drag surface on desktop. The wrapper itself drops touch-none when the
+// handle is in play, so a normal swipe/scroll starting anywhere else on
+// the row (thumbnail, name, whitespace) is untouched.
+function SortableItemRow({ item, children }: { item: BriefTaskItem; children: React.ReactNode }) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: item.id });
+  const isTouchDevice = useIsTouchDevice();
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+  };
+  if (isTouchDevice) {
+    return (
+      <div ref={setNodeRef} style={style} className="flex items-center gap-1.5">
+        <span
+          {...attributes}
+          {...listeners}
+          role="button"
+          aria-label="Drag to reorder or move"
+          className="touch-none p-1.5 text-muted select-none active:scale-90 active:text-foreground"
+          style={{ WebkitTouchCallout: "none" }}
+        >
+          <GripIcon className="h-4 w-3" />
+        </span>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="flex touch-none items-center gap-1.5 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
+    >
+      {children}
+    </div>
+  );
+}
+
+function GripIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 10 16" fill="currentColor" className={className}>
+      <circle cx="2.5" cy="2" r="1.3" />
+      <circle cx="7.5" cy="2" r="1.3" />
+      <circle cx="2.5" cy="8" r="1.3" />
+      <circle cx="7.5" cy="8" r="1.3" />
+      <circle cx="2.5" cy="14" r="1.3" />
+      <circle cx="7.5" cy="14" r="1.3" />
+    </svg>
+  );
+}
+
 function ItemSection({
   title,
   projectId,
@@ -876,22 +1268,31 @@ function ItemSection({
     });
   }
 
-  function handleAddImage() {
-    if (!pendingFile) {
+  // fileOverride lets a paste event (handlePasteImage below) reuse this
+  // exact same upload+insert+undo flow without going through the file
+  // picker/pendingFile state at all -- paste is a "the image is already
+  // right here, just add it" gesture, so it skips the extra manual Add
+  // click the file-picker path still requires. Must stay a NO-ARG call at
+  // its own "Add" button's onClick site below (not `onClick={handleAddImage}`
+  // directly) or React would pass the click SyntheticEvent through as
+  // fileOverride.
+  function handleAddImage(fileOverride?: File) {
+    const file = fileOverride ?? pendingFile;
+    if (!file) {
       fileInputRef.current?.click();
       return;
     }
     const notes = imageNotesRef.current?.value ?? "";
     const position = items.length;
-    const fileName = pendingFile.name;
+    const fileName = file.name;
     setImageError(undefined);
     setImagePending(true);
     startTransition(async () => {
       // The file itself goes direct browser-to-Storage (brief-media bucket,
       // same as this app's other uploads) before the action ever runs --
       // bypasses Vercel's Function request-body limit entirely.
-      const path = newStoragePath(projectId, pendingFile.name);
-      const uploaded = await uploadFileDirect("brief-media", path, pendingFile);
+      const path = newStoragePath(projectId, file.name);
+      const uploaded = await uploadFileDirect("brief-media", path, file);
       if ("error" in uploaded) {
         setImagePending(false);
         setImageError(uploaded.error);
@@ -912,6 +1313,10 @@ function ItemSection({
       if (result.itemId && result.attachmentId) {
         const current = { id: result.itemId };
         const attachmentId = result.attachmentId;
+        // The item's real (prettified) label, not the raw fileName --
+        // otherwise redoing this command after an undo would restore the
+        // item with a different label than what was actually shown/saved.
+        const label = result.label ?? fileName;
         pushCommand({
           label: "Add image",
           undo: async () => {
@@ -927,7 +1332,7 @@ function ItemSection({
               taskId,
               section,
               "image",
-              fileName,
+              label,
               notes,
               attachmentId,
               null,
@@ -939,6 +1344,34 @@ function ItemSection({
         });
       }
     });
+  }
+
+  // No paste-image handler existed anywhere in the app before this -- see
+  // the naming-hierarchy comment in brief.ts for exactly what clipboard
+  // data is/isn't reliable. Wired onto the Link/Notes text inputs below
+  // (real, always-focusable elements a user naturally clicks into before
+  // pasting) rather than a dedicated invisible paste target. If the
+  // clipboard has an image, it's used; if not (the normal case -- pasting
+  // actual text into these fields), this is a no-op and the browser's
+  // default text-paste behavior proceeds untouched.
+  function handlePasteImage(e: React.ClipboardEvent<HTMLInputElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        e.preventDefault();
+        const sizeCheck = validateUploadSize(file);
+        if (!sizeCheck.ok) {
+          setImageError(sizeCheck.message);
+          return;
+        }
+        setImageError(undefined);
+        handleAddImage(file);
+        return;
+      }
+    }
   }
 
   function handleRemove(itemId: string) {
@@ -990,49 +1423,101 @@ function ItemSection({
     });
   }
 
+  // Only ever touches this one brief_task_items row's label -- see
+  // renameBriefTaskItem's own comment for why that can never affect
+  // anything shown outside this Brief item.
+  function handleRename(itemId: string, label: string) {
+    return renameBriefTaskItem(projectId, itemId, label);
+  }
+
+  const { setNodeRef: setDroppableRef, isOver } = useDroppable({ id: `section-${section}` });
+  const itemIds = useMemo(() => items.map((item) => item.id), [items]);
+  // Only meaningful while canManage renders this inside TaskCard's
+  // DndContext -- outside one (the view-only path), this reads the safe
+  // no-op default context (active always null), so isDragActive is always
+  // false there.
+  const { active: activeDrag } = useDndContext();
+  const isDragActive = activeDrag !== null;
+  const isEmpty = items.length === 0;
+
+  function renderItemRow(item: BriefTaskItem) {
+    return (
+      <>
+        {item.kind === "image" ? (
+          <ImageItemChip
+            item={item}
+            canManage={canManage}
+            onEdit={() =>
+              item.attachmentId &&
+              item.originalUrl &&
+              onEditImage({
+                source: "attachment",
+                itemId: item.id,
+                attachmentId: item.attachmentId,
+                imageUrl: item.originalUrl,
+                annotationJson: item.annotationJson,
+              })
+            }
+            onDelete={() => handleRemove(item.id)}
+            onRename={(label) => handleRename(item.id, label)}
+          />
+        ) : (
+          <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
+        )}
+        {canManage ? (
+          <input
+            key={`${item.id}-notes`}
+            defaultValue={item.notes}
+            placeholder="Add a note"
+            onBlur={(e) => handleNotesBlur(item.id, e.target.value, item.notes)}
+            className="w-28 min-w-0 shrink-0 border-b border-transparent bg-transparent text-[10px] italic text-muted focus:border-foreground focus:text-foreground focus:outline-none"
+          />
+        ) : (
+          item.notes && <span className="text-[10px] italic text-muted">{item.notes}</span>
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <span className={labelClass}>{title}</span>
 
-      {items.length > 0 && (
-        <div className="flex flex-wrap items-center gap-3">
-          {items.map((item) => (
-            <div key={item.id} className="flex items-center gap-1.5">
-              {item.kind === "image" ? (
-                <ImageItemChip
-                  item={item}
-                  canManage={canManage}
-                  onEdit={() =>
-                    item.attachmentId &&
-                    item.originalUrl &&
-                    onEditImage({
-                      source: "attachment",
-                      itemId: item.id,
-                      attachmentId: item.attachmentId,
-                      imageUrl: item.originalUrl,
-                      annotationJson: item.annotationJson,
-                    })
-                  }
-                  onDelete={() => handleRemove(item.id)}
-                />
-              ) : (
-                <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
-              )}
-              {canManage ? (
-                <input
-                  key={`${item.id}-notes`}
-                  defaultValue={item.notes}
-                  placeholder="Add a note"
-                  onBlur={(e) => handleNotesBlur(item.id, e.target.value, item.notes)}
-                  className="w-28 min-w-0 shrink-0 border-b border-transparent bg-transparent text-[10px] italic text-muted focus:border-foreground focus:text-foreground focus:outline-none"
-                />
-              ) : (
-                item.notes && <span className="text-[10px] italic text-muted">{item.notes}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Always rendered (even with zero items) and always registered as a
+          droppable -- an empty section still has to be a valid, reachable
+          drop target, not just a visual gap that appears once something
+          lands in it.
+
+          Resting height stays a minimal min-h-8 (barely-there, matches the
+          existing clean look) whether empty or not. The moment ANY drag
+          starts (isDragActive) an EMPTY section specifically grows to
+          min-h-20 with a thin dashed border -- the same border-dashed
+          border-border treatment this codebase already uses for empty-state
+          placeholders elsewhere (e.g. BrandPanel's missing-avatar circle),
+          not a foreign "enterprise dropzone" pattern -- purely so there's
+          an actually-generous, easy-to-hit target the instant a drag
+          begins, not just a thin 32px band. isOver layers a stronger,
+          solid highlight on top once the pointer is actually within it. */}
+      <div
+        ref={setDroppableRef}
+        className={`flex flex-wrap items-center gap-3 rounded-lg transition-all duration-150 ${
+          isEmpty && isDragActive ? "min-h-20 border border-dashed border-border" : "min-h-8"
+        } ${isOver ? "border-solid border-foreground/40 bg-black/[.04] ring-1 ring-foreground/25" : ""}`}
+      >
+        <SortableContext items={itemIds} strategy={rectSortingStrategy}>
+          {items.map((item) =>
+            canManage ? (
+              <SortableItemRow key={item.id} item={item}>
+                {renderItemRow(item)}
+              </SortableItemRow>
+            ) : (
+              <div key={item.id} className="flex items-center gap-1.5">
+                {renderItemRow(item)}
+              </div>
+            ),
+          )}
+        </SortableContext>
+      </div>
 
       {canManage && (
         <div className="flex flex-col gap-3">
@@ -1043,9 +1528,10 @@ function ItemSection({
                 ref={urlRef}
                 placeholder="Converts to an image with image url"
                 onKeyDown={(e) => e.key === "Enter" && handleAddLink()}
+                onPaste={handlePasteImage}
                 className={pillInputClass}
               />
-              <input ref={linkNotesRef} placeholder="Notes" className={notesInputClass} />
+              <input ref={linkNotesRef} placeholder="Notes" onPaste={handlePasteImage} className={notesInputClass} />
               <Button
                 type="button"
                 variant="primary"
@@ -1088,12 +1574,17 @@ function ItemSection({
                   setPendingFile(file);
                 }}
               />
-              <input ref={imageNotesRef} placeholder="Notes" className={notesInputClass} />
+              <input
+                ref={imageNotesRef}
+                placeholder="Notes"
+                onPaste={handlePasteImage}
+                className={notesInputClass}
+              />
               <Button
                 type="button"
                 variant="primary"
                 radius="full"
-                onClick={handleAddImage}
+                onClick={() => handleAddImage()}
                 disabled={imagePending}
                 className="w-full sm:w-auto"
               >
@@ -1140,15 +1631,24 @@ function ImageItemChip({
   canManage,
   onEdit,
   onDelete,
+  onRename,
 }: {
   item: BriefTaskItem;
   canManage: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onRename: (label: string) => Promise<{ success: boolean; message?: string }>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(item.label);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+  // No router.refresh() on rename (see renameBriefTaskItem's own comment),
+  // so the chip has to show its own optimistic value rather than the
+  // (now-stale) item.label prop -- same pattern as stories-board.tsx's
+  // folder rename.
+  const { value: label, set: setOptimisticLabel, reset: resetOptimisticLabel } = useOptimisticOverride(item.label);
 
   // Edited preview wins over the untouched original wherever this asset is
   // displayed/opened/downloaded, same convention as everywhere else this
@@ -1162,37 +1662,102 @@ function ImageItemChip({
     setMenuOpen(false);
     if (!currentUrl) return;
     setDownloading(true);
-    downloadAsset(currentUrl, filenameFromUrl(currentUrl, item.label || "image")).finally(() =>
-      setDownloading(false),
-    );
+    downloadAsset(currentUrl, filenameFromUrl(currentUrl, label || "image")).finally(() => setDownloading(false));
+  }
+
+  function startRename() {
+    setMenuOpen(false);
+    setRenameValue(label);
+    setRenaming(true);
+  }
+
+  function commitRename() {
+    setRenaming(false);
+    const next = renameValue.trim();
+    if (!next || next === label) return;
+    setOptimisticLabel(next);
+    onRename(next).then((result) => {
+      if (!result.success) resetOptimisticLabel();
+    });
   }
 
   return (
-    <div ref={menuRef} className="relative">
+    <div
+      ref={menuRef}
+      className="relative"
+      onContextMenu={(e) => {
+        if (!canManage || renaming) return;
+        e.preventDefault();
+        setMenuOpen(true);
+      }}
+    >
       <div className="flex w-fit max-w-full items-center gap-1 rounded-full border border-foreground bg-background py-1 pr-1 pl-2.5 text-[11px]">
-        <a
-          href={currentUrl ?? undefined}
-          target="_blank"
-          rel="noreferrer"
-          title={item.label}
-          onContextMenu={(e) => {
-            if (!canManage) return;
-            e.preventDefault();
-            setMenuOpen(true);
-          }}
-          className="flex min-w-0 items-center gap-1"
-        >
-          <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
-            {item.thumbnailUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
-            ) : (
-              <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
-            )}
-          </span>
-          <span className="max-w-[100px] truncate">{item.label}</span>
-        </a>
-        {canManage && (
+        {renaming ? (
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                setRenaming(false);
+                setRenameValue(label);
+              }
+            }}
+            className="max-w-[120px] min-w-0 bg-transparent px-0.5 py-0.5 text-[11px] focus:outline-none"
+          />
+        ) : (
+          <>
+            {/* Separate hit area from the name below on purpose -- clicking
+                the thumbnail opens the image, nothing else. Previously the
+                whole chip (thumbnail + name) was one <a>, which meant
+                click-dragging across the name to select it could also
+                register as a click on the link. */}
+            <a
+              href={currentUrl ?? undefined}
+              target="_blank"
+              rel="noreferrer"
+              title="Open image"
+              aria-label="Open image"
+              className="flex shrink-0 items-center"
+            >
+              <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
+                {item.thumbnailUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
+                )}
+              </span>
+            </a>
+            {/* Real, normally-selectable text -- drag across it with the
+                mouse and Cmd/Ctrl+C copies it exactly like any other
+                webpage text (CSS truncation only clips the RENDERED glyphs;
+                the full string is still the actual DOM text node, so
+                triple-click/Select All still selects/copies the complete
+                untruncated name even when it's visually cut off). The
+                onPointerDown stopPropagation is load-bearing twice over on
+                desktop: it stops this row's own drag-to-reorder listener
+                (see SortableItemRow) from hijacking a click-drag text
+                selection, and it means a selection drag can never land on
+                and "click" the <a> above, so selecting the name can never
+                accidentally open the image. On touch, SortableItemRow's
+                listeners live on its own dedicated grip handle instead, so
+                this stopPropagation has nothing to steal from there --
+                text selection on the name just works, untouched. */}
+            <span
+              title={label}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="max-w-[100px] cursor-text truncate select-text"
+            >
+              {label}
+            </span>
+          </>
+        )}
+        {canManage && !renaming && (
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
@@ -1214,6 +1779,13 @@ function ImageItemChip({
             className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07]"
           >
             Edit Image
+          </button>
+          <button
+            type="button"
+            onClick={startRename}
+            className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07]"
+          >
+            Rename
           </button>
           <button
             type="button"
@@ -1391,12 +1963,26 @@ function FrameRow({
 
   return (
     <div className="flex items-center gap-2">
-      <input
-        defaultValue={frame.label}
-        disabled={!canManage}
-        onBlur={(e) => onLabelBlur(frame.id, e.target.value, frame.label)}
-        className="w-24 shrink-0 truncate border border-border bg-transparent px-1.5 py-2 text-center text-[9px] tracking-normal uppercase text-muted focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:w-28 sm:px-2 sm:text-[10px]"
-      />
+      {/* group + relative wrapper: the pencil is a passive visual cue, not an
+          interactive element -- it sits over the input's own right padding
+          (pr-4, reserved for exactly this) so it can never overlap the
+          centered label text, even truncated at the input's max width. Kept
+          faintly visible at rest (not hidden-until-hover) specifically so
+          touch users -- who have no hover state at all -- get the same "this
+          is a text field" cue as desktop, rather than only mouse users. This
+          is the one thing beta feedback said was missing: the input itself,
+          its focus state, and blur-to-save already worked correctly. */}
+      <div className="group relative w-24 shrink-0 sm:w-28">
+        <input
+          defaultValue={frame.label}
+          disabled={!canManage}
+          onBlur={(e) => onLabelBlur(frame.id, e.target.value, frame.label)}
+          className="w-full truncate border border-border bg-transparent py-2 pr-4 pl-1.5 text-center text-[9px] tracking-normal uppercase text-muted transition-colors duration-150 group-hover:border-foreground/40 focus:border-foreground focus:text-foreground focus:outline-none disabled:opacity-100 sm:pr-4 sm:pl-2 sm:text-[10px]"
+        />
+        {canManage && (
+          <PencilIcon className="pointer-events-none absolute top-1/2 right-1.5 h-2.5 w-2.5 -translate-y-1/2 text-muted opacity-40 transition-opacity duration-150 group-hover:opacity-70 group-focus-within:opacity-90" />
+        )}
+      </div>
       <input
         ref={setBodyEl}
         defaultValue={frame.body}
@@ -1416,6 +2002,18 @@ function FrameRow({
         </button>
       )}
     </div>
+  );
+}
+
+function PencilIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path
+        d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19 3 20l1-4Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
