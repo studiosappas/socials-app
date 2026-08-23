@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { logActivity } from "@/lib/activity-log";
+import { logSystemEvent } from "@/lib/system-event-log";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { syncPostType } from "@/lib/post-type";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
@@ -136,6 +137,13 @@ export async function uploadMedia(
     .single();
 
   if (insertError || !mediaAsset) {
+    await logSystemEvent(supabase, {
+      category: "upload_failed",
+      area: "grid",
+      message: insertError?.message ?? "Failed to save media.",
+      projectId,
+      userId: user.id,
+    });
     return { message: insertError?.message ?? "Failed to save media." };
   }
 

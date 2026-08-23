@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrl } from "@/lib/signed-url-cache";
+import { logSystemEvent } from "@/lib/system-event-log";
 import type { MediaType } from "@/types/database";
 
 // If this asset is the cover (position 0) of any post, that post's saved
@@ -97,6 +98,9 @@ export async function saveMediaAssetAnnotation(
   }
 
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
   const storagePath = `${projectId}/${crypto.randomUUID()}-preview.jpg`;
 
   const { error: uploadError } = await supabase.storage
@@ -104,6 +108,13 @@ export async function saveMediaAssetAnnotation(
     .upload(storagePath, file, { contentType: file.type });
 
   if (uploadError) {
+    await logSystemEvent(supabase, {
+      category: "annotation_save_failed",
+      area: "image-editor",
+      message: uploadError.message,
+      projectId,
+      userId: user?.id ?? null,
+    });
     return { message: uploadError.message };
   }
 
@@ -113,6 +124,13 @@ export async function saveMediaAssetAnnotation(
     .eq("id", mediaAssetId);
 
   if (updateError) {
+    await logSystemEvent(supabase, {
+      category: "annotation_save_failed",
+      area: "image-editor",
+      message: updateError.message,
+      projectId,
+      userId: user?.id ?? null,
+    });
     return { message: updateError.message };
   }
 
@@ -163,6 +181,9 @@ export async function saveMediaAssetPosterAnnotation(
   }
 
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
   const posterPath = `${projectId}/${crypto.randomUUID()}-poster.jpg`;
 
   const { error: uploadError } = await supabase.storage
@@ -170,6 +191,13 @@ export async function saveMediaAssetPosterAnnotation(
     .upload(posterPath, file, { contentType: file.type });
 
   if (uploadError) {
+    await logSystemEvent(supabase, {
+      category: "annotation_save_failed",
+      area: "image-editor",
+      message: uploadError.message,
+      projectId,
+      userId: user?.id ?? null,
+    });
     return { message: uploadError.message };
   }
 
@@ -179,6 +207,13 @@ export async function saveMediaAssetPosterAnnotation(
     .eq("id", mediaAssetId);
 
   if (updateError) {
+    await logSystemEvent(supabase, {
+      category: "annotation_save_failed",
+      area: "image-editor",
+      message: updateError.message,
+      projectId,
+      userId: user?.id ?? null,
+    });
     return { message: updateError.message };
   }
 

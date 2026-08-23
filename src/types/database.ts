@@ -918,6 +918,40 @@ export interface Database {
         Update: { read?: boolean };
         Relationships: [];
       };
+      user_presence: {
+        Row: {
+          user_id: string;
+          last_seen_at: string;
+        };
+        Insert: {
+          user_id: string;
+          last_seen_at?: string;
+        };
+        Update: { last_seen_at?: string };
+        Relationships: [];
+      };
+      system_events: {
+        Row: {
+          id: string;
+          created_at: string;
+          severity: "error" | "warning";
+          category: string;
+          area: string;
+          message: string;
+          project_id: string | null;
+          user_id: string | null;
+        };
+        Insert: {
+          severity?: "error" | "warning";
+          category: string;
+          area: string;
+          message: string;
+          project_id?: string | null;
+          user_id?: string | null;
+        };
+        Update: never;
+        Relationships: [];
+      };
       asset_collections: {
         Row: {
           id: string;
