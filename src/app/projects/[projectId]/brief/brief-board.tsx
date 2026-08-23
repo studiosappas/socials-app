@@ -1091,19 +1091,53 @@ function applyItemOrder(
 
 // Wraps one item's row (chip + notes field) as a single sortable/draggable
 // unit -- notes travel with the item they belong to, which also keeps drag
-// concerns entirely out of ImageItemChip/LinkItemChip themselves. Listeners
-// go on this OUTER wrapper (not a separate handle icon, per the "no large
-// drag handles unless necessary" brief) -- a plain click/tap on the
-// thumbnail, the name, or the options menu still works normally, since
-// dnd-kit's PointerSensor only activates a drag after real pointer movement
-// past its activationConstraint, not on a stationary click.
+// concerns entirely out of ImageItemChip/LinkItemChip themselves.
+//
+// Desktop: listeners stay on the whole outer wrapper (not a separate handle
+// icon, per the original "no large drag handles unless necessary" brief) --
+// a plain click on the thumbnail, the name, or the options menu still works
+// normally, since PointerSensor only activates a drag after real pointer
+// movement past its activationConstraint, not on a stationary click.
+//
+// Touch: listeners move to a small dedicated grip handle instead. Real
+// mobile testing found the whole-wrapper approach doesn't actually work on
+// touch -- the filename span's onPointerDown stopPropagation (see
+// ImageItemChip, added so a text-selection drag never also starts a
+// reorder) silently swallows the gesture for any touch starting on the
+// label, which is the single widest tap target in the chip; the thumbnail
+// and link chip's <a> have the same problem from the OTHER direction (a
+// long-press on a real link natively triggers the OS's own link
+// callout/context menu before dnd-kit's synthetic long-press timer can
+// win). A dedicated handle has neither conflict, so it's the reliable
+// choice on touch even though the whole chip stays the (already proven)
+// drag surface on desktop. The wrapper itself drops touch-none when the
+// handle is in play, so a normal swipe/scroll starting anywhere else on
+// the row (thumbnail, name, whitespace) is untouched.
 function SortableItemRow({ item, children }: { item: BriefTaskItem; children: React.ReactNode }) {
   const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: item.id });
+  const isTouchDevice = useIsTouchDevice();
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.4 : 1,
   };
+  if (isTouchDevice) {
+    return (
+      <div ref={setNodeRef} style={style} className="flex items-center gap-1.5">
+        <span
+          {...attributes}
+          {...listeners}
+          role="button"
+          aria-label="Drag to reorder or move"
+          className="touch-none p-1.5 text-muted select-none active:scale-90 active:text-foreground"
+          style={{ WebkitTouchCallout: "none" }}
+        >
+          <GripIcon className="h-4 w-3" />
+        </span>
+        {children}
+      </div>
+    );
+  }
   return (
     <div
       ref={setNodeRef}
@@ -1114,6 +1148,19 @@ function SortableItemRow({ item, children }: { item: BriefTaskItem; children: Re
     >
       {children}
     </div>
+  );
+}
+
+function GripIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 10 16" fill="currentColor" className={className}>
+      <circle cx="2.5" cy="2" r="1.3" />
+      <circle cx="7.5" cy="2" r="1.3" />
+      <circle cx="2.5" cy="8" r="1.3" />
+      <circle cx="7.5" cy="8" r="1.3" />
+      <circle cx="2.5" cy="14" r="1.3" />
+      <circle cx="7.5" cy="14" r="1.3" />
+    </svg>
   );
 }
 
@@ -1692,12 +1739,15 @@ function ImageItemChip({
                 the full string is still the actual DOM text node, so
                 triple-click/Select All still selects/copies the complete
                 untruncated name even when it's visually cut off). The
-                onPointerDown stopPropagation is load-bearing twice over:
-                it stops this row's own drag-to-reorder listener (see
-                SortableItemRow) from hijacking a click-drag text selection,
-                and it means a selection drag can never land on and
-                "click" the <a> above, so selecting the name can never
-                accidentally open the image. */}
+                onPointerDown stopPropagation is load-bearing twice over on
+                desktop: it stops this row's own drag-to-reorder listener
+                (see SortableItemRow) from hijacking a click-drag text
+                selection, and it means a selection drag can never land on
+                and "click" the <a> above, so selecting the name can never
+                accidentally open the image. On touch, SortableItemRow's
+                listeners live on its own dedicated grip handle instead, so
+                this stopPropagation has nothing to steal from there --
+                text selection on the name just works, untouched. */}
             <span
               title={label}
               onPointerDown={(e) => e.stopPropagation()}
