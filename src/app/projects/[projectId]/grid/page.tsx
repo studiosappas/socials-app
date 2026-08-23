@@ -46,10 +46,16 @@ export default async function GridPage({
 
   const gridRowsWithPaths = await getGridRowsWithCoverPaths(supabase, projectId);
 
+  // Excludes 'pdf' -- Grid's Media Library is a "pick a cover for this
+  // post/carousel slot" picker, and a PDF was never a sensible Grid cover.
+  // PDFs still exist in this same project-wide media_assets table (via the
+  // Content page's own upload), just never surfaced here -- Grid's own
+  // rendering/types stay exactly "image" | "video" throughout, unchanged.
   const { data: allMediaAssets } = await supabase
     .from("media_assets")
     .select("id, storage_path, media_type, poster_storage_path, created_at")
     .eq("project_id", projectId)
+    .neq("media_type", "pdf")
     .order("created_at", { ascending: false });
 
   // Isolated from the select above, same reasoning as socialLinks below --

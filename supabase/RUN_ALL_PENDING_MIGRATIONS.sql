@@ -1329,6 +1329,22 @@ where id in ('project-media', 'brief-media', 'brand-documents', 'avatars', 'land
 -- thumbnail-over-original fallback logic).
 alter table public.media_assets add column if not exists thumbnail_storage_path text;
 
+-- ---------- Content: PDF as a media type ----------
+-- media_type's check constraint only allowed 'image'/'video' -- widening it
+-- is the only schema change PDF support needs. No new columns: PDF reuses
+-- the exact same poster_storage_path (its rendered page-1 cover, generated
+-- client-side the same way a video's poster already is) and
+-- thumbnail_storage_path/preview_storage_path machinery every other media
+-- type already has. `media_assets_media_type_check` is the constraint's
+-- default auto-generated name (this column's check has been inline on the
+-- CREATE TABLE since the table was first created, never given an explicit
+-- name of its own) -- verify that name in the Supabase dashboard
+-- (Database > Tables > media_assets > constraints) before running if this
+-- project's history has ever renamed it.
+alter table public.media_assets drop constraint if exists media_assets_media_type_check;
+alter table public.media_assets add constraint media_assets_media_type_check
+  check (media_type in ('image', 'video', 'pdf'));
+
 -- Force PostgREST to reload its schema cache so every change above (new
 -- columns, tables, and the new RPC function) is picked up immediately.
 notify pgrst, 'reload schema';

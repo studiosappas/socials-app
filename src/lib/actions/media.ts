@@ -30,18 +30,22 @@ async function resetCoverTransformForAsset(
 }
 
 // Shared by every upload action that accepts video (grid.ts's uploadMedia,
-// posts.ts's uploadPostAsset, stories.ts's uploadStoryFrame): the client
-// generates a poster frame for video files client-side (video-poster.ts)
-// and submits it as a "poster" field alongside the single "file" it's
-// paired with. Grid never mounts a <video> for its cover, so this is what
-// lets a video-first post/carousel-item still show a static thumbnail.
+// posts.ts's uploadPostAsset, stories.ts's uploadStoryFrame) and, now, PDF
+// (stories.ts's uploadContentAsset -- the Content page's own upload zone;
+// Grid/Post Editor never send mediaType "pdf" at all, since their own file
+// pickers still only accept image/video, so this stays dormant for them):
+// the client generates a cover image client-side (video-poster.ts's own
+// poster capture, or pdf-cover.ts's page-1 render) and submits it as a
+// "poster" field alongside the single "file" it's paired with -- one field
+// name/code path for both, since they're the same concept (a small
+// generated image standing in for a source a plain <img> can't decode).
 export async function uploadPosterIfPresent(
   supabase: Awaited<ReturnType<typeof createClient>>,
   projectId: string,
   formData: FormData,
   mediaType: MediaType,
 ): Promise<string | null> {
-  if (mediaType !== "video") return null;
+  if (mediaType !== "video" && mediaType !== "pdf") return null;
   const posterFile = formData.get("poster");
   if (!(posterFile instanceof File) || posterFile.size === 0) return null;
 

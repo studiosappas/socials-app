@@ -7,6 +7,7 @@ import { deleteStory, moveStoryToFolder } from "@/lib/actions/stories";
 import { downloadAsset, downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import type { ContentFolderItem, StoryFileItem } from "./stories-board";
+import type { MediaType } from "@/types/database";
 
 type MenuView = "root" | "move";
 
@@ -20,6 +21,7 @@ export const StoryCard = memo(function StoryCard({
   storyId,
   name,
   thumbnailUrl,
+  coverMediaType = null,
   files = [],
   scheduledDate,
   canManage,
@@ -35,6 +37,7 @@ export const StoryCard = memo(function StoryCard({
   storyId: string;
   name: string;
   thumbnailUrl: string | null;
+  coverMediaType?: MediaType | null;
   files?: StoryFileItem[];
   scheduledDate: string | null;
   canManage: boolean;
@@ -145,6 +148,20 @@ export const StoryCard = memo(function StoryCard({
     }
   }
 
+  // A multi-frame item is the "authored content group" case the cluster
+  // title is for -- a Story series built up in the editor's own "+" frame
+  // picker (see story-editor.tsx) always ends up with 2+ frames, where a
+  // single bulk-dropped file (this page's own UploadAssetsZone) always
+  // creates exactly one. Not a fuzzy heuristic: it's the literal structural
+  // boundary between those two creation paths, so a single loose asset
+  // (still the overwhelming majority of cards) never grows a title overlay
+  // it didn't have before.
+  const isCluster = files.length > 1;
+  // A real, known media type with no cover image at all means poster/cover
+  // generation genuinely failed (or predates it) -- distinct from "no files
+  // yet", which still falls through to the plain dashed "Empty" state below.
+  const isPlaceholder = !thumbnailUrl && (coverMediaType === "video" || coverMediaType === "pdf");
+
   return (
     <div className="group relative aspect-[3/4] w-full shrink-0">
       <button
@@ -158,8 +175,37 @@ export const StoryCard = memo(function StoryCard({
         {thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+        ) : isPlaceholder ? (
+          <span className="flex flex-col items-center gap-1.5 text-muted">
+            {coverMediaType === "video" ? <VideoIcon className="h-6 w-6" /> : <PdfIcon className="h-6 w-6" />}
+            <span className="text-[10px] tracking-wide uppercase">
+              {coverMediaType === "video" ? "Video" : "PDF"}
+            </span>
+          </span>
         ) : (
           <span className="text-xs tracking-wide text-muted uppercase">Empty</span>
+        )}
+
+        {/* Small type badge -- video/PDF covers are still a generated
+            static image at a glance, so this is what actually tells them
+            apart from a real photo (same bg-black/70 white-text convention
+            as the folder tile's own "N items" badge). */}
+        {(coverMediaType === "video" || coverMediaType === "pdf") && (
+          <span className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 rounded bg-black/70 px-1.5 py-0.5 text-[9px] tracking-wide text-white uppercase">
+            {coverMediaType === "video" ? <VideoIcon className="h-2.5 w-2.5" /> : <PdfIcon className="h-2.5 w-2.5" />}
+            {coverMediaType}
+          </span>
+        )}
+
+        {/* Content-name overlay -- ONLY for a real multi-asset cluster (see
+            isCluster above), same typography/truncation the folder tile
+            uses for its own name, adapted to sit over an image/video/PDF
+            cover instead of a plain background: a bottom gradient scrim
+            keeps it readable regardless of what's underneath. */}
+        {isCluster && (
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end bg-gradient-to-t from-black/75 via-black/20 to-transparent px-2 pb-1.5 pt-6">
+            <span className="max-w-[75%] truncate text-xs font-medium text-white">{name}</span>
+          </span>
         )}
 
         {/* Hover-only affordance -- makes it visually obvious the tile opens
@@ -452,6 +498,18 @@ function AssetPreviewModal({
             autoPlay
             className="max-h-[86dvh] max-w-[92vw] object-contain"
           />
+        ) : file.mediaType === "pdf" ? (
+          // The browser's own native PDF viewer (same one a direct link to
+          // a .pdf opens in a new tab) -- no client-side decoding/rendering
+          // of our own, and the original file is what's embedded, never a
+          // rasterized substitute, so page 2+ and text selection/search
+          // still work exactly like opening the PDF directly would.
+          <embed
+            key={index}
+            src={file.url}
+            type="application/pdf"
+            className="h-[86dvh] w-[92vw] max-w-4xl rounded bg-white"
+          />
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
           <img key={index} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
@@ -493,6 +551,25 @@ function ScheduledIcon({ className }: { className?: string }) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
       <rect x="3" y="5" width="18" height="16" rx="2" />
       <path d="M3 10h18M8 3v4M16 3v4" />
+    </svg>
+  );
+}
+
+function VideoIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+      <rect x="2.5" y="5.5" width="13" height="13" rx="2" />
+      <path d="M15.5 10.2 21 7v10l-5.5-3.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PdfIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+      <path d="M6 2.5h8l4 4v15h-12z" strokeLinejoin="round" />
+      <path d="M14 2.5v4h4" strokeLinejoin="round" />
+      <path d="M8.5 13v5M8.5 13h1.3a1.5 1.5 0 0 1 0 3H8.5M12.5 13v5h1a2.5 2.5 0 0 0 0-5h-1z" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

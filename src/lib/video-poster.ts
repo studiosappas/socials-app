@@ -4,6 +4,7 @@ import { startTransition } from "react";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
 import { generateImageThumbnailBlob } from "@/lib/image-thumbnail";
+import { generatePdfCoverBlob } from "@/lib/pdf-cover";
 
 // Grabs a still frame from a video file for use as a Grid-safe poster image,
 // entirely client-side (an offscreen <video> + <canvas>, never uploaded or
@@ -151,7 +152,7 @@ export async function uploadFilesWithPosters(
       continue;
     }
 
-    const mediaType = file.type.startsWith("video/") ? "video" : "image";
+    const mediaType = file.type.startsWith("video/") ? "video" : file.type === "application/pdf" ? "pdf" : "image";
     const storagePath = newStoragePath(projectId, file.name);
     const uploaded = await uploadFileDirect("project-media", storagePath, file);
     if ("error" in uploaded) {
@@ -167,6 +168,19 @@ export async function uploadFilesWithPosters(
       const poster = await generateVideoPosterBlob(file);
       if (poster) {
         formData.set("poster", new File([poster], "poster.jpg", { type: "image/jpeg" }));
+      }
+      // A failed poster capture is never fatal to the upload -- the original
+      // video is already safely uploaded above; the card just falls back to
+      // a typed placeholder instead of a real poster (see StoryCard).
+    } else if (mediaType === "pdf") {
+      // Same "poster" field name video already uses -- both are the exact
+      // same concept (a small generated cover image for a source a plain
+      // <img> can't decode directly), so the server side needs no separate
+      // PDF-specific field or code path, only a widened mediaType check
+      // (see uploadPosterIfPresent in lib/actions/media.ts).
+      const cover = await generatePdfCoverBlob(file);
+      if (cover) {
+        formData.set("poster", new File([cover], "poster.jpg", { type: "image/jpeg" }));
       }
     } else {
       // A small generated JPEG for on-screen tiles -- see

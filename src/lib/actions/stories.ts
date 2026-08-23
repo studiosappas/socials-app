@@ -206,11 +206,15 @@ export async function uploadContentAsset(
   if (typeof storagePath !== "string" || !storagePath) {
     return { message: "Choose a file to upload." };
   }
-  const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : "image";
+  const mediaType: MediaType = mediaTypeRaw === "video" ? "video" : mediaTypeRaw === "pdf" ? "pdf" : "image";
   // Same "already uploaded direct, this is just the resulting path" shape
   // as storagePath/poster above -- see uploadFilesWithPosters' own
   // generateImageThumbnailBlob call, and grid.ts's uploadMedia (the
-  // original, now-shared version of this fallback pattern).
+  // original, now-shared version of this fallback pattern). PDF never gets
+  // a thumbnail_storage_path here -- that field is the small-JPEG-of-an-
+  // image path specifically; a PDF's cover always lives in
+  // poster_storage_path instead (set below via uploadPosterIfPresent), same
+  // column video already uses for the identical reason.
   const thumbnailStoragePathRaw = formData.get("thumbnailStoragePath");
   let thumbnailStoragePath =
     typeof thumbnailStoragePathRaw === "string" && thumbnailStoragePathRaw ? thumbnailStoragePathRaw : null;

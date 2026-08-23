@@ -2,6 +2,7 @@
 import { getShareLinksData } from "@/lib/data/share-links";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { StoriesBoard } from "./stories-board";
+import type { MediaType } from "@/types/database";
 
 export default async function StoriesPage({
   params,
@@ -53,16 +54,25 @@ export default async function StoriesPage({
   const { data: frames } = storyIds.length
     ? await supabase
         .from("story_frames")
-        .select("id, story_id, position, media_assets(storage_path, media_type)")
+        .select("id, story_id, position, media_assets(storage_path, media_type, poster_storage_path, thumbnail_storage_path)")
         .in("story_id", storyIds)
         .order("position")
     : { data: [] };
 
+  type FrameMedia = {
+    storage_path: string;
+    media_type: MediaType;
+    poster_storage_path: string | null;
+    thumbnail_storage_path: string | null;
+  };
+
   const pathList = Array.from(
     new Set(
-      (frames ?? [])
-        .map((f) => (f.media_assets as { storage_path: string } | null)?.storage_path)
-        .filter((p): p is string => Boolean(p)),
+      (frames ?? []).flatMap((f) => {
+        const m = f.media_assets as FrameMedia | null;
+        if (!m) return [];
+        return [m.storage_path, m.poster_storage_path, m.thumbnail_storage_path].filter((p): p is string => Boolean(p));
+      }),
     ),
   );
 
@@ -70,30 +80,51 @@ export default async function StoriesPage({
 
   // Frames arrive already ordered by `position` (the query above), so each
   // story's `files` array here is in the same order the editor shows them --
-  // files[0] doubles as the card thumbnail, and the full array lets the card
+  // files[0] doubles as the card cover, and the full array lets the card
   // menu's "Download" zip up every file in the item and the full-view preview
-  // step through them, not just show the cover.
-  const framesByStory = new Map<string, { url: string; mediaType: "image" | "video" }[]>();
+  // step through them, not just show the cover. `url` here is always the raw
+  // original (correct for the zoomed preview modal, video playback, and
+  // Download -- all three already worked fine straight off storage_path).
+  // `coverUrl` is separate and ONLY for the small card tile: a plain <img>
+  // can never decode a video or PDF file directly, so those prefer their
+  // generated poster (same poster_storage_path column both use); an image
+  // prefers its small generated thumbnail, falling back to the full
+  // original for anything uploaded before either existed. Exact same
+  // resolved/resolvedDisplay split grid-data.ts already uses for Grid tiles.
+  const framesByStory = new Map<string, { url: string; mediaType: MediaType; coverUrl: string | null }[]>();
   for (const frame of frames ?? []) {
-    const media = frame.media_assets as { storage_path: string; media_type: "image" | "video" } | null;
+    const media = frame.media_assets as FrameMedia | null;
     const url = media ? urlByPath.get(media.storage_path) ?? null : null;
     if (!url || !media) continue;
-    const entry = { url, mediaType: media.media_type };
+    const coverPath =
+      media.media_type === "video" || media.media_type === "pdf"
+        ? media.poster_storage_path
+        : media.thumbnail_storage_path || media.storage_path;
+    const coverUrl = coverPath ? urlByPath.get(coverPath) ?? null : null;
+    const entry = { url, mediaType: media.media_type, coverUrl };
     const existing = framesByStory.get(frame.story_id);
     if (existing) existing.push(entry);
     else framesByStory.set(frame.story_id, [entry]);
   }
 
-  const storyItems = (stories ?? []).map((story) => ({
-    id: story.id,
-    name: story.name,
-    scheduledDate: story.scheduled_date,
-    notes: story.notes,
-    status: story.status,
-    thumbnailUrl: framesByStory.get(story.id)?.[0]?.url ?? null,
-    files: framesByStory.get(story.id) ?? [],
-    folderId: folderIdByStory.get(story.id) ?? null,
-  }));
+  const storyItems = (stories ?? []).map((story) => {
+    const files = framesByStory.get(story.id) ?? [];
+    return {
+      id: story.id,
+      name: story.name,
+      scheduledDate: story.scheduled_date,
+      notes: story.notes,
+      status: story.status,
+      thumbnailUrl: files[0]?.coverUrl ?? null,
+      // A video/PDF whose poster generation failed (or was uploaded before
+      // this existed) has no coverUrl but IS still a real, known media type
+      // -- the card shows a typed placeholder instead of silently looking
+      // "Empty" (see StoryCard's coverMediaType prop).
+      coverMediaType: files[0]?.mediaType ?? null,
+      files: files.map((f) => ({ url: f.url, mediaType: f.mediaType })),
+      folderId: folderIdByStory.get(story.id) ?? null,
+    };
+  });
 
   // A folder's cover is never set manually -- it's always the thumbnail of
   // whichever content item landed in it first. `storyItems` is already in
