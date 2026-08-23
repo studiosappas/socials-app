@@ -6,9 +6,13 @@ import {
   DndContext,
   PointerSensor,
   closestCenter,
+  pointerWithin,
+  rectIntersection,
   useSensor,
   useSensors,
   useDroppable,
+  useDndContext,
+  type CollisionDetection,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -797,7 +801,7 @@ const TaskCard = memo(function TaskCard({
           {canManage ? (
             <DndContext
               sensors={dndSensors}
-              collisionDetection={closestCenter}
+              collisionDetection={briefCollisionDetection}
               onDragStart={handleDragStart}
               onDragOver={handleDragOver}
               onDragEnd={handleDragEnd}
@@ -997,6 +1001,30 @@ function StatusBadge({
 // `over` is either another item (dropped near/on it -- use ITS section) or
 // a section's own droppable container id (dropped into its empty space,
 // see ItemSection's `section-${section}` droppable below).
+// closestCenter alone (dnd-kit's default) compares the dragged item's
+// center to every OTHER droppable's center and picks whichever is
+// nearest -- a good fit for same-sized sortable items, but a poor one for
+// a large, mostly-empty container: a section that has no items yet is
+// still registered as a droppable (see ItemSection's useDroppable below),
+// but its center can end up geometrically closer to an ADJACENT section's
+// items than to itself unless the pointer is moved very precisely, which
+// is exactly why dragging into an empty section felt unreliable/impossible
+// in practice even though it was technically wired up correctly. This is
+// dnd-kit's own documented fix for multi-container sortable UIs: try
+// pointerWithin first (did the pointer literally land inside a droppable's
+// rect -- the intuitive, predictable behavior for "hovering a section"),
+// fall back to rectIntersection (the dragged item's rect overlaps a
+// droppable's rect at all), and only fall back to closestCenter if neither
+// finds anything, so item-to-item reordering within a section keeps
+// working exactly as it did before.
+const briefCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+  if (pointerCollisions.length > 0) return pointerCollisions;
+  const intersections = rectIntersection(args);
+  if (intersections.length > 0) return intersections;
+  return closestCenter(args);
+};
+
 function sectionOfDroppable(overId: string, items: BriefTaskItem[]): BriefItemSection | null {
   const overItem = items.find((i) => i.id === overId);
   if (overItem) return overItem.section;
@@ -1330,6 +1358,13 @@ function ItemSection({
 
   const { setNodeRef: setDroppableRef, isOver } = useDroppable({ id: `section-${section}` });
   const itemIds = useMemo(() => items.map((item) => item.id), [items]);
+  // Only meaningful while canManage renders this inside TaskCard's
+  // DndContext -- outside one (the view-only path), this reads the safe
+  // no-op default context (active always null), so isDragActive is always
+  // false there.
+  const { active: activeDrag } = useDndContext();
+  const isDragActive = activeDrag !== null;
+  const isEmpty = items.length === 0;
 
   function renderItemRow(item: BriefTaskItem) {
     return (
@@ -1377,15 +1412,23 @@ function ItemSection({
       {/* Always rendered (even with zero items) and always registered as a
           droppable -- an empty section still has to be a valid, reachable
           drop target, not just a visual gap that appears once something
-          lands in it. min-h-8 keeps it from collapsing to nothing when
-          empty; isOver's highlight is the "this is a valid drop target"
-          cue from the brief (section highlight, not a border everywhere
-          all the time). */}
+          lands in it.
+
+          Resting height stays a minimal min-h-8 (barely-there, matches the
+          existing clean look) whether empty or not. The moment ANY drag
+          starts (isDragActive) an EMPTY section specifically grows to
+          min-h-20 with a thin dashed border -- the same border-dashed
+          border-border treatment this codebase already uses for empty-state
+          placeholders elsewhere (e.g. BrandPanel's missing-avatar circle),
+          not a foreign "enterprise dropzone" pattern -- purely so there's
+          an actually-generous, easy-to-hit target the instant a drag
+          begins, not just a thin 32px band. isOver layers a stronger,
+          solid highlight on top once the pointer is actually within it. */}
       <div
         ref={setDroppableRef}
-        className={`flex min-h-8 flex-wrap items-center gap-3 rounded-lg transition-colors duration-150 ${
-          isOver ? "bg-black/[.03] ring-1 ring-foreground/25" : ""
-        }`}
+        className={`flex flex-wrap items-center gap-3 rounded-lg transition-all duration-150 ${
+          isEmpty && isDragActive ? "min-h-20 border border-dashed border-border" : "min-h-8"
+        } ${isOver ? "border-solid border-foreground/40 bg-black/[.04] ring-1 ring-foreground/25" : ""}`}
       >
         <SortableContext items={itemIds} strategy={rectSortingStrategy}>
           {items.map((item) =>
