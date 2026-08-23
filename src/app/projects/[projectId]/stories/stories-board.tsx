@@ -30,6 +30,10 @@ export type StoryListItem = {
   id: string;
   name: string;
   scheduledDate: string | null;
+  // stories.created_at -- authoritative for both sort and the month
+  // filter (see StoriesBoard below). A loose asset and a cluster are both
+  // plain `stories` rows, so this is the one date source for either.
+  createdDate: string;
   notes: string;
   status: StoryStatus;
   thumbnailUrl: string | null;
@@ -45,6 +49,21 @@ export type StoryListItem = {
 export type ContentFolderItem = { id: string; name: string; coverUrl: string | null };
 
 const COLLAPSED_COUNT = 6;
+
+type SortOrder = "newest" | "oldest";
+
+// "YYYY-MM" derived straight from createdDate's own ISO string -- no Date
+// parsing/timezone conversion needed just to bucket by month, and it sorts
+// correctly as a plain string (lexicographic order matches chronological
+// order for this format).
+function monthKey(isoDate: string): string {
+  return isoDate.slice(0, 7);
+}
+
+function monthLabel(key: string): string {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
 
 export function StoriesBoard({
   projectId,
@@ -65,6 +84,12 @@ export function StoriesBoard({
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  // Client-side only, reset on reload -- same "no persistence" convention
+  // as `query`/`showAll` above, no server round-trip or saved-preference
+  // column needed for either control.
+  const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
+  const [monthFilter, setMonthFilter] = useState<string>("all");
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
 
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -280,9 +305,44 @@ export function StoriesBoard({
     );
   }, [scoped, query]);
 
+  // Derived from `scoped` (folder-scoped, pre-search) rather than `filtered`
+  // -- the month picker's own OPTIONS shouldn't shrink/reorder as someone
+  // types a search query, only which stories currently match should change.
+  const availableMonths = useMemo(() => {
+    const keys = new Set(scoped.map((s) => monthKey(s.createdDate)));
+    return Array.from(keys).sort((a, b) => b.localeCompare(a));
+  }, [scoped]);
+
+  // Resets to "All" if the currently-selected month no longer has any
+  // content in it (its last item moved/got deleted) -- adjusted during
+  // render (React's own documented pattern), not an effect, since nothing
+  // external needs synchronizing.
+  const [prevAvailableMonths, setPrevAvailableMonths] = useState(availableMonths);
+  if (availableMonths !== prevAvailableMonths) {
+    setPrevAvailableMonths(availableMonths);
+    if (monthFilter !== "all" && !availableMonths.includes(monthFilter)) setMonthFilter("all");
+  }
+
+  const monthFilteredResults = useMemo(() => {
+    if (monthFilter === "all") return filtered;
+    return filtered.filter((s) => monthKey(s.createdDate) === monthFilter);
+  }, [filtered, monthFilter]);
+
+  const sorted = useMemo(() => {
+    const copy = [...monthFilteredResults];
+    copy.sort((a, b) =>
+      sortOrder === "newest" ? b.createdDate.localeCompare(a.createdDate) : a.createdDate.localeCompare(b.createdDate),
+    );
+    return copy;
+  }, [monthFilteredResults, sortOrder]);
+
   const isSearching = query.trim().length > 0;
-  const visible = isSearching || showAll ? filtered : filtered.slice(0, COLLAPSED_COUNT);
-  const hasMore = !isSearching && !showAll && filtered.length > COLLAPSED_COUNT;
+  // A deliberately narrowed-down view (a search, or a specific month picked)
+  // shows everything that matches rather than truncating to the usual
+  // collapsed preview -- same reasoning search already used alone.
+  const isFiltering = isSearching || monthFilter !== "all";
+  const visible = isFiltering || showAll ? sorted : sorted.slice(0, COLLAPSED_COUNT);
+  const hasMore = !isFiltering && !showAll && sorted.length > COLLAPSED_COUNT;
 
   const sectionLabel = activeFolder ? "Content" : visibleFolders.length > 0 ? "Unfiled" : "Recent Content";
 
@@ -308,6 +368,17 @@ export function StoriesBoard({
             (grid-board.tsx) -- share + "+" as compact icon buttons, not a
             full-width text button, so the two content boards read the same. */}
         <div className="flex shrink-0 items-center gap-1">
+          {stories.length > 0 && (
+            <SortFilterMenu
+              sortOrder={sortOrder}
+              onSortOrderChange={setSortOrder}
+              monthFilter={monthFilter}
+              onMonthFilterChange={setMonthFilter}
+              availableMonths={availableMonths}
+              open={sortMenuOpen}
+              onOpenChange={setSortMenuOpen}
+            />
+          )}
           {stories.length > 0 && (
             <ShareMenuButton
               projectId={projectId}
@@ -416,9 +487,13 @@ export function StoriesBoard({
         )}
       </UploadAssetsZone>
 
-      {filtered.length === 0 && (
+      {sorted.length === 0 && (
         <p className="text-sm text-muted">
-          {isSearching ? "No content matches your search." : "No content yet — create one below."}
+          {isSearching
+            ? "No content matches your search."
+            : monthFilter !== "all"
+              ? "No content in that month."
+              : "No content yet — create one below."}
         </p>
       )}
 
@@ -655,6 +730,107 @@ function UploadAssetsZone({
         <p className="col-span-full text-xs text-error">{uploadError || state?.message}</p>
       )}
     </div>
+  );
+}
+
+// One compact entry point for both Sort and Month -- same trigger+panel
+// shape as ShareMenuButton (share-menu.tsx) and FolderTile's own ⋮ menu:
+// a small icon button that toggles a small absolutely-positioned panel,
+// not a permanent filter bar taking up its own row. Both controls live in
+// the SAME panel (not two separate buttons) since they're really one
+// "how is Content currently arranged" concept, and a project accumulates
+// months slowly enough that a second always-visible control for it isn't
+// warranted.
+function SortFilterMenu({
+  sortOrder,
+  onSortOrderChange,
+  monthFilter,
+  onMonthFilterChange,
+  availableMonths,
+  open,
+  onOpenChange,
+}: {
+  sortOrder: SortOrder;
+  onSortOrderChange: (order: SortOrder) => void;
+  monthFilter: string;
+  onMonthFilterChange: (month: string) => void;
+  availableMonths: string[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const menuRef = useOutsideClick<HTMLDivElement>(open, () => onOpenChange(false));
+  const isActive = sortOrder !== "newest" || monthFilter !== "all";
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        title="Sort & filter"
+        className={`rounded p-1.5 transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground ${
+          isActive ? "text-foreground" : "text-muted"
+        }`}
+      >
+        <SortFilterIcon />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-8 z-20 w-48 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
+          <p className="px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">Sort</p>
+          {(
+            [
+              ["newest", "Newest to oldest"],
+              ["oldest", "Oldest to newest"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => onSortOrderChange(value)}
+              className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                sortOrder === value ? "font-medium text-foreground" : "text-muted"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+
+          <div className="my-1 border-t border-border" />
+
+          <p className="px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">Month</p>
+          <div className="max-h-48 overflow-y-auto">
+            <button
+              type="button"
+              onClick={() => onMonthFilterChange("all")}
+              className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                monthFilter === "all" ? "font-medium text-foreground" : "text-muted"
+              }`}
+            >
+              All
+            </button>
+            {availableMonths.map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onMonthFilterChange(key)}
+                className={`block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] ${
+                  monthFilter === key ? "font-medium text-foreground" : "text-muted"
+                }`}
+              >
+                {monthLabel(key)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SortFilterIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+      <path d="M4 7h16M7 12h10M10 17h4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
