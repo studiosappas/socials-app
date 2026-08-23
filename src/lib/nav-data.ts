@@ -38,3 +38,19 @@ export async function getUserProjectsForNav(
     avatarUrl: p.profile_photo_path ? urlByPath.get(p.profile_photo_path) ?? null : null,
   }));
 }
+
+// Shared by AppHeader's user-identity item (the icon + first-name link that
+// replaced the plain "Account" label) -- same profiles.name field the
+// Account page's own Profile card reads/edits (see account/page.tsx,
+// account-panel.tsx), so a name saved there is the exact same value this
+// resolves, no second source of truth. profiles.name is a free-text full
+// name field (there's no separate first/last split anywhere in the schema),
+// so "first name" here just means its first whitespace-separated token --
+// good enough for a compact nav label without inventing real name-parsing.
+// Returns null (not "") on anything unusable so the caller can fall back to
+// the plain "Account" label instead of rendering broken/empty text.
+export async function getUserDisplayFirstName(supabase: SupabaseServerClient, userId: string): Promise<string | null> {
+  const { data } = await supabase.from("profiles").select("name").eq("id", userId).single();
+  const firstName = data?.name?.trim().split(/\s+/)[0];
+  return firstName || null;
+}
