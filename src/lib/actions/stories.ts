@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
-import type { MediaType, StoryStatus } from "@/types/database";
+import type { MediaType, ReviewStatus, StoryStatus } from "@/types/database";
 
 // Same reasoning as fetchPostForModal in lib/actions/posts.ts -- lets the
 // Tasks page open a story in a client-side popup without needing a real
@@ -365,12 +365,21 @@ export async function updateStory(
   const supabase = await createClient();
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
 
+  // review_status is the same column a client's review-link submission also
+  // writes to (set_story_review_status_by_token) -- a manual edit here uses
+  // the exact same column, never a second field, mirroring updatePost's own
+  // review_status handling. Unlike Post's scheduled_time split, this column
+  // already exists on `stories`, so it's safe to include directly in the
+  // main update rather than isolating it into a separate query.
+  const reviewStatus = formData.get("review_status");
+
   const { error } = await supabase
     .from("stories")
     .update({
       name: String(formData.get("name") ?? "Untitled story"),
       scheduled_date: scheduledDate ? scheduledDate : null,
       status: String(formData.get("status") ?? "draft") as StoryStatus,
+      ...(reviewStatus ? { review_status: String(reviewStatus) as ReviewStatus } : {}),
       notes: String(formData.get("notes") ?? ""),
     })
     .eq("id", storyId);

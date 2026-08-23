@@ -2,7 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import type { StoryStatus, MediaType } from "@/types/database";
+import type { StoryStatus, MediaType, ReviewStatus } from "@/types/database";
 
 export type StoryFrameItem = {
   frameId: string;
@@ -20,6 +20,7 @@ export type StoryPageData = {
     name: string;
     scheduled_date: string | null;
     status: StoryStatus;
+    review_status: ReviewStatus;
     notes: string;
   };
   frames: StoryFrameItem[];
@@ -51,7 +52,7 @@ export async function getStoryPageData(
     members,
   ] = await Promise.all([
     supabase.auth.getUser(),
-    supabase.from("stories").select("id, name, scheduled_date, status, notes").eq("id", storyId).single(),
+    supabase.from("stories").select("id, name, scheduled_date, status, review_status, notes").eq("id", storyId).single(),
     supabase
       .from("story_frames")
       .select("id, position, link_url, media_assets(id, storage_path, media_type, poster_storage_path, thumbnail_storage_path)")

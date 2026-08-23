@@ -37,13 +37,14 @@ import { useToast } from "@/lib/hooks/use-toast";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem, StoryLinkItem } from "@/lib/data/stories";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
-import type { StoryStatus } from "@/types/database";
+import type { ReviewStatus, StoryStatus } from "@/types/database";
 
 type StoryRecord = {
   id: string;
   name: string;
   scheduled_date: string | null;
   status: StoryStatus;
+  review_status: ReviewStatus;
   notes: string;
 };
 
@@ -450,12 +451,14 @@ function StoryMainForm({
   const [name, setName] = useState(story.name);
   const [notes, setNotes] = useState(story.notes);
   const [status, setStatus] = useState<StoryStatus>(story.status);
+  const [reviewStatus, setReviewStatus] = useState<ReviewStatus>(story.review_status);
   const [scheduledDate, setScheduledDate] = useState(story.scheduled_date ?? "");
   if (story !== prevStory) {
     setPrevStory(story);
     setName(story.name);
     setNotes(story.notes);
     setStatus(story.status);
+    setReviewStatus(story.review_status);
     setScheduledDate(story.scheduled_date ?? "");
   }
 
@@ -487,6 +490,7 @@ function StoryMainForm({
     formData.set("name", name);
     formData.set("notes", notes);
     formData.set("status", status);
+    formData.set("review_status", reviewStatus);
     formData.set("scheduled_date", scheduledDate);
     startTransition(async () => {
       const result = await updateStory(projectId, story.id, undefined, formData);
@@ -496,6 +500,7 @@ function StoryMainForm({
         setName(story.name);
         setNotes(story.notes);
         setStatus(story.status);
+        setReviewStatus(story.review_status);
         setScheduledDate(story.scheduled_date ?? "");
       } else {
         setSaved(true);
@@ -535,7 +540,7 @@ function StoryMainForm({
 
       <div className="flex flex-col gap-3">
         <span className={labelClass}>Schedule content</span>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Status</span>
             <select
@@ -554,6 +559,23 @@ function StoryMainForm({
                   so existing "published" rows still render correctly instead
                   of silently falling back to the first option. */}
               <option value="published">Published (legacy)</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Approval Status</span>
+            {/* Same column a client's review-link submission writes to
+                (set_story_review_status_by_token) -- mirrors Post Editor's
+                own Approval Status field exactly (same options/labels). */}
+            <select
+              name="review_status"
+              value={reviewStatus}
+              onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
+              disabled={!canManage}
+              className={fieldClass}
+            >
+              <option value="pending">Pending Review</option>
+              <option value="approved">Approved</option>
+              <option value="changes_requested">Needs Changes</option>
             </select>
           </label>
           <label className="flex flex-col gap-1.5">
