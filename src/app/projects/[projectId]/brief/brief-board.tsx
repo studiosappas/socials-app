@@ -371,9 +371,11 @@ export function BriefBoard({
 }
 
 // One merged set of pills -- both the task's own "type" (persisted,
-// content_types) and Generate Design's "Post Type" (canvas size, see
-// POST_TYPE_CANVAS in lib/actions/brief.ts) used to be two separate rows
-// showing overlapping options; now a single select drives both.
+// content_types, now multi-select -- see handleToggleType) and Generate
+// Design's "Post Type" (canvas size, see POST_TYPE_CANVAS in
+// lib/actions/brief.ts, resolved from the selection via `primaryType`
+// below) used to be two separate rows showing overlapping options; now one
+// set of toggles drives both.
 const POST_TYPE_OPTIONS: { value: BriefTaskType; label: string }[] = [
   { value: "post", label: "Post" },
   { value: "story", label: "Story" },
@@ -598,24 +600,37 @@ const TaskCard = memo(function TaskCard({
   // a click didn't visibly do anything until the round-trip + router.refresh
   // landed. On a slow connection (or if the save silently failed, which
   // went unsurfaced before this) that read as "the button doesn't work."
+  //
+  // content_types has ALWAYS been a Postgres text[] / BriefTaskType[] end to
+  // end (schema, setBriefTaskTypes, generateBriefDesign's prompt text) --
+  // this component was the only place that narrowed it down to a single
+  // value (task.contentTypes[0]). Toggling now operates on the full array;
+  // no migration, no server-side change needed.
   const {
-    value: selectedType,
-    set: setOptimisticType,
-    reset: resetOptimisticType,
-  } = useOptimisticOverride<BriefTaskType>(task.contentTypes[0] ?? "post");
+    value: selectedTypes,
+    set: setOptimisticTypes,
+    reset: resetOptimisticTypes,
+  } = useOptimisticOverride<BriefTaskType[]>(task.contentTypes);
 
-  // No router.refresh() on success -- optimisticType already shows the
+  // No router.refresh() on success -- optimisticTypes already shows the
   // correct final value, and setBriefTaskTypes no longer revalidates its
   // own route either, since there was nothing left for a refresh to
   // usefully bring back.
-  function handleSelectType(type: BriefTaskType) {
-    if (type === selectedType) return;
+  //
+  // The product has never allowed zero types (DB default is array['story'],
+  // every write path -- old single-select included -- always produced
+  // exactly one value): deselecting the last remaining pill is a no-op,
+  // same as the old single-select's `if (type === selectedType) return`.
+  function handleToggleType(type: BriefTaskType) {
+    const isSelected = selectedTypes.includes(type);
+    if (isSelected && selectedTypes.length === 1) return;
+    const nextTypes = isSelected ? selectedTypes.filter((t) => t !== type) : [...selectedTypes, type];
     setTypeError(undefined);
-    setOptimisticType(type);
+    setOptimisticTypes(nextTypes);
     startTransition(async () => {
-      const result = await setBriefTaskTypes(projectId, task.id, [type]);
+      const result = await setBriefTaskTypes(projectId, task.id, nextTypes);
       if (!result.success) {
-        resetOptimisticType();
+        resetOptimisticTypes();
         setTypeError(result.message ?? "Couldn't change the type.");
       }
     });
@@ -629,7 +644,7 @@ const TaskCard = memo(function TaskCard({
     reset: resetOptimisticStatus,
   } = useOptimisticOverride<BriefTaskStatus>(task.status);
 
-  // No router.refresh() on success -- same reasoning as handleSelectType
+  // No router.refresh() on success -- same reasoning as handleToggleType
   // above.
   function handleSetStatus(next: BriefTaskStatus) {
     if (next === currentStatus) return;
@@ -649,11 +664,22 @@ const TaskCard = memo(function TaskCard({
   // already opens the annotation editor with the real result data
   // (mediaAssetId/imageUrl/annotationJson) passed directly, not read back
   // from a page prop.
+  // Generate Design renders ONE canvas, so multi-type selection still needs
+  // exactly one GeneratedDesignPostType to pick a size (POST_TYPE_CANVAS in
+  // lib/actions/brief.ts) -- there's no "generate N designs, one per type"
+  // feature here, and per the no-modal/no-extra-UI brief for this pass, the
+  // resolution is: whichever selected type comes first in POST_TYPE_OPTIONS'
+  // fixed display order (Post > Story > Reel Cover > Newsletter) drives the
+  // canvas. Deliberate and documented, not an incidental array[0] read --
+  // the type isn't discarded, `generateBriefDesign` still receives and
+  // reports the FULL content_types list in its prompt text.
+  const primaryType = POST_TYPE_OPTIONS.find((opt) => selectedTypes.includes(opt.value))?.value ?? "post";
+
   function handleGenerateDesign() {
     setGenerateError(undefined);
     setGenerating(true);
     startTransition(async () => {
-      const result = await generateBriefDesign(projectId, task.id, selectedType);
+      const result = await generateBriefDesign(projectId, task.id, primaryType);
       setGenerating(false);
       if (!result.success || !result.mediaAssetId || !result.imageUrl) {
         setGenerateError(result.message ?? "Couldn't generate a design.");
@@ -782,9 +808,10 @@ const TaskCard = memo(function TaskCard({
                   key={opt.value}
                   type="button"
                   disabled={!canManage}
-                  onClick={() => handleSelectType(opt.value)}
+                  aria-pressed={selectedTypes.includes(opt.value)}
+                  onClick={() => handleToggleType(opt.value)}
                   className={`rounded-full border px-4 py-1.5 text-xs tracking-wide uppercase transition-all duration-150 active:scale-95 ${
-                    selectedType === opt.value
+                    selectedTypes.includes(opt.value)
                       ? "border-foreground bg-foreground text-background"
                       : "border-border text-foreground hover:border-foreground/50 hover:bg-black/[.03]"
                   }`}
