@@ -39,7 +39,20 @@ export function AppHeader({
 
   return (
     <header className="px-4 py-4 sm:px-6">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      {/* Explicit column->row switch at a fixed viewport width, not organic
+          flex-wrap -- flex-wrap's wrap point depends on the SUM of the
+          logo's width and the nav pill's width, and the nav pill's width
+          now varies with the current-page label (see NavProjectMenu):
+          short labels like "Grid"/"Brief" fit beside the logo at a width
+          where longer ones like "Overview"/"Calendar" still correctly wrap
+          below it, so the header's row/stacked layout silently differed
+          per PAGE instead of per viewport -- exactly the real-device bug
+          (Grid sitting beside the logo on mobile) this fixes. 430px is
+          where the original, always-8-characters "Projects" label itself
+          organically wrapped, so this keeps the existing wrap point for
+          desktop-ish widths intact while making it deterministic (same for
+          every label) rather than incidental. */}
+      <div className="mx-auto flex max-w-6xl flex-col items-start justify-between gap-x-4 gap-y-2 min-[430px]:flex-row min-[430px]:items-center">
         <Link
           href={homeHref}
           className="shrink-0 whitespace-nowrap text-xl font-semibold font-[family-name:var(--font-fraunces)] tracking-wide"
