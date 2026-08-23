@@ -61,14 +61,21 @@ export function BrandPanel({
         onClick={() => setMobileExpanded((v) => !v)}
         className="flex items-center justify-between gap-3 text-left lg:cursor-default"
       >
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           {profilePhotoUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={profilePhotoUrl} alt="" className="h-12 w-12 shrink-0 rounded-full object-cover" />
           ) : (
             <div className="h-12 w-12 shrink-0 rounded-full border border-dashed border-border" />
           )}
-          <h1 className="truncate text-3xl">{displayName || "User Name"}</h1>
+          {/* min-w-0 is load-bearing here: a flex item's default min-width
+              is "auto" (its content's intrinsic size), not 0 -- without it,
+              a long project name doesn't wrap at all, it just forces this
+              whole row (and the fixed-width column containing it) wider
+              than its allotted space, overflowing horizontally into
+              whatever sits next to it. break-words is the safety net for a
+              single very long word/name with no spaces to wrap at. */}
+          <h1 className="min-w-0 text-3xl break-words">{displayName || "User Name"}</h1>
         </div>
         <ChevronIcon
           className={`h-4 w-4 shrink-0 text-muted transition-transform duration-150 lg:hidden ${
