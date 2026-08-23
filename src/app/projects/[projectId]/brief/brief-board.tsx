@@ -2,9 +2,23 @@
 
 import { memo, useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  useDroppable,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
 import {
   addBriefTaskFrame,
@@ -18,6 +32,7 @@ import {
   renameBriefTask,
   renameBriefTaskFrame,
   renameBriefTaskItem,
+  reorderBriefTaskItems,
   restoreBriefTaskFrame,
   restoreBriefTaskItem,
   saveBriefAnnotation,
@@ -420,6 +435,159 @@ const TaskCard = memo(function TaskCard({
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | undefined>();
   const [typeError, setTypeError] = useState<string | undefined>();
+  const [dndError, setDndError] = useState<string | undefined>();
+
+  // Asset drag & drop -- reorder within References/Images/Products and move
+  // between them. Frames/Text are a completely different data model (one
+  // label+body field each, not a list) and are rendered OUTSIDE the
+  // DndContext below entirely, so they can never become a drop target at
+  // all, not just "the UI discourages it."
+  //
+  // Same optimistic-override shape as every other field on this card:
+  // task.items is the server truth, this shadows it locally during a
+  // drag/persist and resets the instant a fresh task.items prop arrives (a
+  // revalidation, or -- on failure -- this component's own reset call).
+  const {
+    value: items,
+    set: setItemsOverride,
+    reset: resetItemsOverride,
+  } = useOptimisticOverride<BriefTaskItem[]>(task.items);
+  const isTouchDevice = useIsTouchDevice();
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, {
+      // Same reasoning as Grid's own sensor (see useIsTouchDevice): a
+      // deliberate long-press on touch so a normal scroll attempt doesn't
+      // misfire as a drag; a small movement threshold on desktop so a
+      // plain click still reaches the thumbnail link, the rename input, or
+      // the options menu without registering as a drag.
+      activationConstraint: isTouchDevice ? { delay: 200, tolerance: 8 } : { distance: 4 },
+    }),
+  );
+  const dragStartSectionRef = useRef<BriefItemSection | null>(null);
+  // The full items list as it was the INSTANT the drag started -- handleDragEnd
+  // reads "before" state from this, not from `items` directly, because by
+  // the time it runs, handleDragOver has typically already applied its own
+  // live section change to `items`. Snapshotting at drag-end would then
+  // capture that already-mutated state as "before," which is wrong: it's
+  // literally the mid-drag state, not the pre-drag one -- and undo would
+  // restore to the wrong place (confirmed via a real test: without this,
+  // undoing a cross-section move left the item behind in the NEW section
+  // instead of putting it back in the original one).
+  const dragStartItemsRef = useRef<BriefTaskItem[] | null>(null);
+
+  function handleDragStart(event: DragStartEvent) {
+    dragStartItemsRef.current = items;
+    const item = items.find((i) => i.id === event.active.id);
+    dragStartSectionRef.current = item?.section ?? null;
+  }
+
+  // Fires continuously while dragging over a target -- moves the dragged
+  // item's SECTION optimistically the moment it crosses into a different
+  // one, so it visually appears in the new section immediately instead of
+  // only snapping over on drop. Within-section reordering during the drag
+  // itself is handled by SortableContext/useSortable automatically; this
+  // only ever changes which section an item currently belongs to.
+  function handleDragOver(event: DragOverEvent) {
+    const { active, over } = event;
+    if (!over) return;
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    if (activeId === overId) return;
+
+    const activeItem = items.find((i) => i.id === activeId);
+    if (!activeItem) return;
+
+    const overSection = sectionOfDroppable(overId, items);
+    if (!overSection || overSection === activeItem.section) return;
+
+    setItemsOverride((current) => current.map((i) => (i.id === activeId ? { ...i, section: overSection } : i)));
+  }
+
+  function handleDragCancel() {
+    dragStartSectionRef.current = null;
+    // Undoes any live section change onDragOver already applied -- a
+    // cancelled drag (Escape, dropped somewhere invalid) must leave the
+    // item exactly where it started.
+    resetItemsOverride();
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    const fromSection = dragStartSectionRef.current;
+    const preDragItems = dragStartItemsRef.current ?? items;
+    dragStartSectionRef.current = null;
+    dragStartItemsRef.current = null;
+    if (!over || !fromSection) {
+      resetItemsOverride();
+      return;
+    }
+
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    const activeItem = items.find((i) => i.id === activeId);
+    if (!activeItem) {
+      resetItemsOverride();
+      return;
+    }
+
+    const toSection = sectionOfDroppable(overId, items) ?? activeItem.section;
+
+    // Snapshot the BEFORE order of every section this move touches, from
+    // preDragItems (the state at drag START) -- NOT from `items`, which by
+    // now may already reflect handleDragOver's own live section change.
+    // Undo just replays these ids verbatim, no separate "insert back at
+    // index N" logic needed.
+    const beforeTargetIds = preDragItems.filter((i) => i.section === toSection).map((i) => i.id);
+    const beforeSourceIds =
+      fromSection !== toSection ? preDragItems.filter((i) => i.section === fromSection).map((i) => i.id) : null;
+
+    const itemsInTarget = items.filter((i) => i.section === toSection);
+    const oldIndex = itemsInTarget.findIndex((i) => i.id === activeId);
+    const overItem = items.find((i) => i.id === overId);
+    const newIndex =
+      overItem && overItem.section === toSection ? itemsInTarget.findIndex((i) => i.id === overId) : itemsInTarget.length - 1;
+
+    if (oldIndex === -1) {
+      resetItemsOverride();
+      return;
+    }
+    if (oldIndex === newIndex && fromSection === toSection) return; // dropped back where it started -- nothing to do
+
+    const afterTargetIds = arrayMove(itemsInTarget, oldIndex, newIndex).map((i) => i.id);
+    const afterSourceIds =
+      fromSection !== toSection ? items.filter((i) => i.section === fromSection && i.id !== activeId).map((i) => i.id) : null;
+
+    setDndError(undefined);
+    setItemsOverride((current) => applyItemOrder(current, toSection, afterTargetIds, fromSection, afterSourceIds));
+
+    startTransition(async () => {
+      const calls = [reorderBriefTaskItems(projectId, toSection, afterTargetIds)];
+      if (afterSourceIds) calls.push(reorderBriefTaskItems(projectId, fromSection, afterSourceIds));
+      const results = await Promise.all(calls);
+      const failed = results.find((r) => !r.success);
+      if (failed) {
+        resetItemsOverride();
+        setDndError(failed.message ?? "Couldn't save that move. Please try again.");
+        return;
+      }
+      pushCommand({
+        label: fromSection === toSection ? "Reorder items" : "Move item",
+        undo: async () => {
+          const undoCalls = [reorderBriefTaskItems(projectId, toSection, beforeTargetIds)];
+          if (beforeSourceIds) undoCalls.push(reorderBriefTaskItems(projectId, fromSection, beforeSourceIds));
+          await Promise.all(undoCalls);
+          router.refresh();
+        },
+        redo: async () => {
+          const redoCalls = [reorderBriefTaskItems(projectId, toSection, afterTargetIds)];
+          if (afterSourceIds) redoCalls.push(reorderBriefTaskItems(projectId, fromSection, afterSourceIds));
+          await Promise.all(redoCalls);
+          router.refresh();
+        },
+      });
+    });
+  }
+
   // Optimistic, with "adjust state during render" sync back to the server
   // value (same convention Grid's own Post Type pills use) -- previously
   // this read straight off task.contentTypes with no local state at all, so
@@ -624,42 +792,94 @@ const TaskCard = memo(function TaskCard({
             {typeError && <p className="text-xs text-error">{typeError}</p>}
           </div>
 
-          <ItemSection
-            title="References"
-            projectId={projectId}
-            taskId={task.id}
-            section="references"
-            items={task.items.filter((i) => i.section === "references")}
-            canManage={canManage}
-            onEditImage={onEditImage}
-            pushCommand={pushCommand}
-            onHideItem={onHideItem}
-            onUnhideItem={onUnhideItem}
-          />
-          <ItemSection
-            title="Images"
-            projectId={projectId}
-            taskId={task.id}
-            section="images"
-            items={task.items.filter((i) => i.section === "images")}
-            canManage={canManage}
-            onEditImage={onEditImage}
-            pushCommand={pushCommand}
-            onHideItem={onHideItem}
-            onUnhideItem={onUnhideItem}
-          />
-          <ItemSection
-            title="Products"
-            projectId={projectId}
-            taskId={task.id}
-            section="products"
-            items={task.items.filter((i) => i.section === "products")}
-            canManage={canManage}
-            onEditImage={onEditImage}
-            pushCommand={pushCommand}
-            onHideItem={onHideItem}
-            onUnhideItem={onUnhideItem}
-          />
+          {dndError && <p className="-mt-2 text-xs text-error">{dndError}</p>}
+
+          {canManage ? (
+            <DndContext
+              sensors={dndSensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragEnd={handleDragEnd}
+              onDragCancel={handleDragCancel}
+            >
+              <ItemSection
+                title="References"
+                projectId={projectId}
+                taskId={task.id}
+                section="references"
+                items={items.filter((i) => i.section === "references")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Images"
+                projectId={projectId}
+                taskId={task.id}
+                section="images"
+                items={items.filter((i) => i.section === "images")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Products"
+                projectId={projectId}
+                taskId={task.id}
+                section="products"
+                items={items.filter((i) => i.section === "products")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+            </DndContext>
+          ) : (
+            <>
+              <ItemSection
+                title="References"
+                projectId={projectId}
+                taskId={task.id}
+                section="references"
+                items={items.filter((i) => i.section === "references")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Images"
+                projectId={projectId}
+                taskId={task.id}
+                section="images"
+                items={items.filter((i) => i.section === "images")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+              <ItemSection
+                title="Products"
+                projectId={projectId}
+                taskId={task.id}
+                section="products"
+                items={items.filter((i) => i.section === "products")}
+                canManage={canManage}
+                onEditImage={onEditImage}
+                pushCommand={pushCommand}
+                onHideItem={onHideItem}
+                onUnhideItem={onUnhideItem}
+              />
+            </>
+          )}
 
           <FrameSection
             title="Frames"
@@ -769,6 +989,75 @@ function StatusBadge({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Resolves a dnd-kit `over.id` to the BriefItemSection it belongs to --
+// `over` is either another item (dropped near/on it -- use ITS section) or
+// a section's own droppable container id (dropped into its empty space,
+// see ItemSection's `section-${section}` droppable below).
+function sectionOfDroppable(overId: string, items: BriefTaskItem[]): BriefItemSection | null {
+  const overItem = items.find((i) => i.id === overId);
+  if (overItem) return overItem.section;
+  const prefix = "section-";
+  if (overId.startsWith(prefix)) {
+    const candidate = overId.slice(prefix.length);
+    if (candidate === "references" || candidate === "images" || candidate === "products") return candidate;
+  }
+  return null;
+}
+
+// Rebuilds the full items array reflecting a completed move: toSection's
+// items in their new order (targetIds, which includes the moved item),
+// and -- only for a cross-section move -- fromSection's remaining items in
+// their new order too. Every OTHER section's items are left exactly where
+// they were; the exact position of one section's items relative to
+// another's within the combined array never matters, since each
+// ItemSection derives its own list via `items.filter(i => i.section ===
+// X)`, which only cares about relative order among same-section items.
+function applyItemOrder(
+  current: BriefTaskItem[],
+  toSection: BriefItemSection,
+  targetIds: string[],
+  fromSection: BriefItemSection,
+  sourceIds: string[] | null,
+): BriefTaskItem[] {
+  const byId = new Map(current.map((i) => [i.id, i]));
+  const untouched = current.filter((i) => i.section !== toSection && (!sourceIds || i.section !== fromSection));
+  const targetItems = targetIds.map((id) => {
+    const base = byId.get(id);
+    if (!base) return null;
+    return base.section === toSection ? base : { ...base, section: toSection };
+  });
+  const sourceItems = sourceIds ? sourceIds.map((id) => byId.get(id) ?? null) : [];
+  return [...untouched, ...sourceItems, ...targetItems].filter((i): i is BriefTaskItem => i !== null);
+}
+
+// Wraps one item's row (chip + notes field) as a single sortable/draggable
+// unit -- notes travel with the item they belong to, which also keeps drag
+// concerns entirely out of ImageItemChip/LinkItemChip themselves. Listeners
+// go on this OUTER wrapper (not a separate handle icon, per the "no large
+// drag handles unless necessary" brief) -- a plain click/tap on the
+// thumbnail, the name, or the options menu still works normally, since
+// dnd-kit's PointerSensor only activates a drag after real pointer movement
+// past its activationConstraint, not on a stationary click.
+function SortableItemRow({ item, children }: { item: BriefTaskItem; children: React.ReactNode }) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: item.id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="flex touch-none items-center gap-1.5 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
+    >
+      {children}
     </div>
   );
 }
@@ -1039,50 +1328,79 @@ function ItemSection({
     return renameBriefTaskItem(projectId, itemId, label);
   }
 
+  const { setNodeRef: setDroppableRef, isOver } = useDroppable({ id: `section-${section}` });
+  const itemIds = useMemo(() => items.map((item) => item.id), [items]);
+
+  function renderItemRow(item: BriefTaskItem) {
+    return (
+      <>
+        {item.kind === "image" ? (
+          <ImageItemChip
+            item={item}
+            canManage={canManage}
+            onEdit={() =>
+              item.attachmentId &&
+              item.originalUrl &&
+              onEditImage({
+                source: "attachment",
+                itemId: item.id,
+                attachmentId: item.attachmentId,
+                imageUrl: item.originalUrl,
+                annotationJson: item.annotationJson,
+              })
+            }
+            onDelete={() => handleRemove(item.id)}
+            onRename={(label) => handleRename(item.id, label)}
+          />
+        ) : (
+          <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
+        )}
+        {canManage ? (
+          <input
+            key={`${item.id}-notes`}
+            defaultValue={item.notes}
+            placeholder="Add a note"
+            onBlur={(e) => handleNotesBlur(item.id, e.target.value, item.notes)}
+            className="w-28 min-w-0 shrink-0 border-b border-transparent bg-transparent text-[10px] italic text-muted focus:border-foreground focus:text-foreground focus:outline-none"
+          />
+        ) : (
+          item.notes && <span className="text-[10px] italic text-muted">{item.notes}</span>
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <span className={labelClass}>{title}</span>
 
-      {items.length > 0 && (
-        <div className="flex flex-wrap items-center gap-3">
-          {items.map((item) => (
-            <div key={item.id} className="flex items-center gap-1.5">
-              {item.kind === "image" ? (
-                <ImageItemChip
-                  item={item}
-                  canManage={canManage}
-                  onEdit={() =>
-                    item.attachmentId &&
-                    item.originalUrl &&
-                    onEditImage({
-                      source: "attachment",
-                      itemId: item.id,
-                      attachmentId: item.attachmentId,
-                      imageUrl: item.originalUrl,
-                      annotationJson: item.annotationJson,
-                    })
-                  }
-                  onDelete={() => handleRemove(item.id)}
-                  onRename={(label) => handleRename(item.id, label)}
-                />
-              ) : (
-                <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
-              )}
-              {canManage ? (
-                <input
-                  key={`${item.id}-notes`}
-                  defaultValue={item.notes}
-                  placeholder="Add a note"
-                  onBlur={(e) => handleNotesBlur(item.id, e.target.value, item.notes)}
-                  className="w-28 min-w-0 shrink-0 border-b border-transparent bg-transparent text-[10px] italic text-muted focus:border-foreground focus:text-foreground focus:outline-none"
-                />
-              ) : (
-                item.notes && <span className="text-[10px] italic text-muted">{item.notes}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Always rendered (even with zero items) and always registered as a
+          droppable -- an empty section still has to be a valid, reachable
+          drop target, not just a visual gap that appears once something
+          lands in it. min-h-8 keeps it from collapsing to nothing when
+          empty; isOver's highlight is the "this is a valid drop target"
+          cue from the brief (section highlight, not a border everywhere
+          all the time). */}
+      <div
+        ref={setDroppableRef}
+        className={`flex min-h-8 flex-wrap items-center gap-3 rounded-lg transition-colors duration-150 ${
+          isOver ? "bg-black/[.03] ring-1 ring-foreground/25" : ""
+        }`}
+      >
+        <SortableContext items={itemIds} strategy={rectSortingStrategy}>
+          {items.map((item) =>
+            canManage ? (
+              <SortableItemRow key={item.id} item={item}>
+                {renderItemRow(item)}
+              </SortableItemRow>
+            ) : (
+              <div key={item.id} className="flex items-center gap-1.5">
+                {renderItemRow(item)}
+              </div>
+            ),
+          )}
+        </SortableContext>
+      </div>
 
       {canManage && (
         <div className="flex flex-col gap-3">
@@ -1247,7 +1565,15 @@ function ImageItemChip({
   }
 
   return (
-    <div ref={menuRef} className="relative">
+    <div
+      ref={menuRef}
+      className="relative"
+      onContextMenu={(e) => {
+        if (!canManage || renaming) return;
+        e.preventDefault();
+        setMenuOpen(true);
+      }}
+    >
       <div className="flex w-fit max-w-full items-center gap-1 rounded-full border border-foreground bg-background py-1 pr-1 pl-2.5 text-[11px]">
         {renaming ? (
           <input
@@ -1267,28 +1593,49 @@ function ImageItemChip({
             className="max-w-[120px] min-w-0 bg-transparent px-0.5 py-0.5 text-[11px] focus:outline-none"
           />
         ) : (
-          <a
-            href={currentUrl ?? undefined}
-            target="_blank"
-            rel="noreferrer"
-            title={label}
-            onContextMenu={(e) => {
-              if (!canManage) return;
-              e.preventDefault();
-              setMenuOpen(true);
-            }}
-            className="flex min-w-0 items-center gap-1"
-          >
-            <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
-              {item.thumbnailUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
-              ) : (
-                <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
-              )}
+          <>
+            {/* Separate hit area from the name below on purpose -- clicking
+                the thumbnail opens the image, nothing else. Previously the
+                whole chip (thumbnail + name) was one <a>, which meant
+                click-dragging across the name to select it could also
+                register as a click on the link. */}
+            <a
+              href={currentUrl ?? undefined}
+              target="_blank"
+              rel="noreferrer"
+              title="Open image"
+              aria-label="Open image"
+              className="flex shrink-0 items-center"
+            >
+              <span className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-black/10">
+                {item.thumbnailUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-[10px]">🖼</span>
+                )}
+              </span>
+            </a>
+            {/* Real, normally-selectable text -- drag across it with the
+                mouse and Cmd/Ctrl+C copies it exactly like any other
+                webpage text (CSS truncation only clips the RENDERED glyphs;
+                the full string is still the actual DOM text node, so
+                triple-click/Select All still selects/copies the complete
+                untruncated name even when it's visually cut off). The
+                onPointerDown stopPropagation is load-bearing twice over:
+                it stops this row's own drag-to-reorder listener (see
+                SortableItemRow) from hijacking a click-drag text selection,
+                and it means a selection drag can never land on and
+                "click" the <a> above, so selecting the name can never
+                accidentally open the image. */}
+            <span
+              title={label}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="max-w-[100px] cursor-text truncate select-text"
+            >
+              {label}
             </span>
-            <span className="max-w-[100px] truncate">{label}</span>
-          </a>
+          </>
         )}
         {canManage && !renaming && (
           <button

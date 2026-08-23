@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useActionState, useCallback, useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
+import { memo, useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -27,6 +27,7 @@ import { MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
 import { GridCropOverlay, coverTransformStyle } from "./grid-crop-overlay";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -211,18 +212,8 @@ export function GridBoard({
   // the instant a finger lands on any populated tile. Desktop (fine
   // pointer) never sets isTouchDevice, so dragEnabled is always true there
   // and this whole mode is invisible/unused -- mouse drag behaves exactly
-  // as before. useSyncExternalStore (not state+effect) since this reads
-  // external browser state -- getServerSnapshot returns false so SSR/first
-  // paint assumes non-touch, then syncs to the real value on the client.
-  const isTouchDevice = useSyncExternalStore(
-    (onChange) => {
-      const mq = window.matchMedia("(pointer: coarse)");
-      mq.addEventListener("change", onChange);
-      return () => mq.removeEventListener("change", onChange);
-    },
-    () => window.matchMedia("(pointer: coarse)").matches,
-    () => false,
-  );
+  // as before.
+  const isTouchDevice = useIsTouchDevice();
   const [reorderMode, setReorderMode] = useState(false);
   const dragEnabled = !isTouchDevice || reorderMode;
 

@@ -601,6 +601,42 @@ export async function renameBriefTaskItem(projectId: string, itemId: string, lab
   return { success: true };
 }
 
+// Persists the final order of items within ONE section -- both a same-
+// section reorder (call once, with the reordered id list) and a
+// cross-section move (call twice: once for the source section's remaining
+// items in their new relative order, once for the destination section's
+// items including the moved one) go through this single function, since
+// both are really the same operation: "these ids, in this order, now
+// belong to this section." Writing every id's section (not just the moved
+// one's) is deliberate rather than wasteful -- it's a no-op for ids whose
+// section didn't actually change, and it means the caller never has to
+// track which single id needs a different update than the rest.
+//
+// Small parallel per-row updates rather than a single bulk upsert: upsert
+// would attempt an INSERT on conflict (PostgREST's ON CONFLICT DO UPDATE),
+// which requires every NOT NULL column (task_id, kind, label, ...) to be
+// present even though these rows already exist -- a partial-column upsert
+// here would fail outright. A handful of small `.update()` calls is the
+// correct shape for what's actually a small edit (a few items in one
+// section), never a full-table rewrite.
+export async function reorderBriefTaskItems(
+  projectId: string,
+  section: BriefItemSection,
+  orderedItemIds: string[],
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const results = await Promise.all(
+    orderedItemIds.map((id, position) =>
+      supabase.from("brief_task_items").update({ section, position }).eq("id", id),
+    ),
+  );
+  const failed = results.find((r) => r.error);
+  if (failed?.error) return { success: false, message: failed.error.message };
+  // Not revalidating -- the caller's own optimistic state already shows the
+  // final order/section; same convention as every other Brief edit above.
+  return { success: true };
+}
+
 export async function removeBriefTaskItem(projectId: string, itemId: string): Promise<ActionResult> {
   const supabase = await createClient();
   const { error } = await supabase.from("brief_task_items").delete().eq("id", itemId);
