@@ -120,6 +120,39 @@ function extensionFromFilename(fileName: string): string | undefined {
   return fileName.slice(dot + 1).toLowerCase();
 }
 
+// The canonical MIME type for each extension classifyGenericBinaryByFilename
+// can ever return (a closed set -- every key here is exactly one of
+// KNOWN_IMAGE_EXTENSIONS/KNOWN_VIDEO_EXTENSIONS, no fallback ever needed).
+// This is what actually fixes the download/open bug: recovering the right
+// EXTENSION alone was only enough to fix the storage PATH -- the object
+// itself was still being uploaded to Storage (and therefore served back,
+// on every open/download) with the ORIGINAL generic Content-Type
+// ("binary/octet-stream"), since nothing translated "we now know this is a
+// .jpg" into "so this is really image/jpeg." Storage's own served
+// Content-Type is what the browser/OS actually uses to decide how to
+// handle an open or a downloaded blob -- a correct filename extension
+// doesn't fix that on its own.
+const EXTENSION_TO_MIME_TYPE: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  bmp: "image/bmp",
+  tiff: "image/tiff",
+  tif: "image/tiff",
+  svg: "image/svg+xml",
+  avif: "image/avif",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
+  m4v: "video/mp4",
+  avi: "video/x-msvideo",
+  mkv: "video/x-matroska",
+};
+
 // Only ever called once the Content-Type has already failed to classify
 // anything (isGenericBinaryContentType gated this at the call site) -- looks
 // for a REAL, known image/video extension on a filename recovered from
@@ -128,11 +161,13 @@ function extensionFromFilename(fileName: string): string | undefined {
 // source, when a server actually sends one), then the response-content-
 // disposition query parameter some signed URLs carry (WeTransfer's own
 // convention -- not hardcoded TO WeTransfer, just reading the same standard
-// disposition grammar from wherever it's declared).
+// disposition grammar from wherever it's declared). Returns the corrected,
+// specific Content-Type alongside the kind/filename -- this is what gets
+// stored as the asset's real MIME type, not the original generic one.
 function classifyGenericBinaryByFilename(
   response: Response,
   requestUrl: string,
-): { kind: "image" | "video"; fileName: string } | null {
+): { kind: "image" | "video"; fileName: string; contentType: string } | null {
   const headerFileName = extractFilenameFromDisposition(response.headers.get("content-disposition"));
   let fileName = headerFileName;
   if (!fileName) {
@@ -145,8 +180,10 @@ function classifyGenericBinaryByFilename(
   if (!fileName) return null;
   const ext = extensionFromFilename(fileName);
   if (!ext) return null;
-  if (KNOWN_IMAGE_EXTENSIONS.has(ext)) return { kind: "image", fileName };
-  if (KNOWN_VIDEO_EXTENSIONS.has(ext)) return { kind: "video", fileName };
+  const contentType = EXTENSION_TO_MIME_TYPE[ext];
+  if (!contentType) return null;
+  if (KNOWN_IMAGE_EXTENSIONS.has(ext)) return { kind: "image", fileName, contentType };
+  if (KNOWN_VIDEO_EXTENSIONS.has(ext)) return { kind: "video", fileName, contentType };
   return null;
 }
 
@@ -442,7 +479,12 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
         return {
           kind: byFilename.kind,
           buffer,
-          contentType,
+          // The CORRECTED, specific type (e.g. "image/jpeg"), not the raw
+          // generic one the server actually sent -- this is what gets
+          // uploaded as the Storage object's own Content-Type, so every
+          // later open/download of it serves the right type too, not just
+          // a correctly-extensioned filename.
+          contentType: byFilename.contentType,
           fileName: byFilename.fileName,
           label: null,
         };
