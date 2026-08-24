@@ -30,6 +30,7 @@ export default async function InterceptedPostPage({
         links={data.links}
         mediaLibraryPromise={mediaLibraryPromise}
         canManage={data.canManage}
+        role={data.role}
         currentUserId={data.currentUserId}
         members={data.members}
         customFonts={data.customFonts}

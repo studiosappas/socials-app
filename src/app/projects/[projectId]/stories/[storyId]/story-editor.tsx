@@ -21,6 +21,7 @@ import {
   removeStoryFrame,
   removeStoryLink,
   reorderStoryFrames,
+  submitClientStoryReview,
   updateStory,
   updateStoryFrameLink,
   uploadStoryFrame,
@@ -31,13 +32,14 @@ import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
 import { convertToTask } from "@/lib/actions/todo";
 import { addStoryComment, fetchStoryComments } from "@/lib/actions/post-comments";
 import { CONTENT_STATUS_LABEL, CONTENT_STATUS_OPTIONS } from "@/lib/content-status";
+import { canSubmitClientReview } from "@/lib/role-permissions";
 import { Button } from "@/components/ui/button";
 import { ItemComments } from "@/components/ui/item-comments";
 import { useToast } from "@/lib/hooks/use-toast";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem, StoryLinkItem } from "@/lib/data/stories";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
-import type { ReviewStatus, StoryStatus } from "@/types/database";
+import type { ProjectRole, ReviewStatus, StoryStatus } from "@/types/database";
 
 type StoryRecord = {
   id: string;
@@ -59,6 +61,7 @@ export function StoryEditor({
   links,
   mediaLibrary,
   canManage,
+  role,
   currentUserId,
   members,
   hideBackLink = false,
@@ -69,6 +72,9 @@ export function StoryEditor({
   links: StoryLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  // Raw role, alongside canManage -- only consumed by StoryMainForm, to
+  // offer Client their own narrow Approval Status control.
+  role: ProjectRole;
   currentUserId: string;
   members: ProjectMemberOption[];
   hideBackLink?: boolean;
@@ -286,7 +292,7 @@ export function StoryEditor({
         </section>
       )}
 
-      <StoryMainForm projectId={projectId} story={story} links={links} canManage={canManage} />
+      <StoryMainForm projectId={projectId} story={story} links={links} canManage={canManage} role={role} />
 
       <ItemComments
         itemId={story.id}
@@ -437,12 +443,16 @@ function StoryMainForm({
   story,
   links,
   canManage,
+  role,
 }: {
   projectId: string;
   story: StoryRecord;
   links: StoryLinkItem[];
   canManage: boolean;
+  role: ProjectRole;
 }) {
+  const isClient = canSubmitClientReview(role);
+
   // Same shape as Post Editor's PostMainForm: local optimistic field state
   // committed immediately on Save, persisted in the background, reverted
   // + toasted only on failure -- see updateStory's own comment for why it
@@ -453,6 +463,11 @@ function StoryMainForm({
   const [status, setStatus] = useState<StoryStatus>(story.status);
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>(story.review_status);
   const [scheduledDate, setScheduledDate] = useState(story.scheduled_date ?? "");
+  // Client's own optimistic view of review_status -- see PostMainForm's
+  // identical field for why this is deliberately separate from
+  // `reviewStatus` above.
+  const [clientReviewStatus, setClientReviewStatus] = useState<ReviewStatus>(story.review_status);
+  const [clientReviewSaving, setClientReviewSaving] = useState(false);
   if (story !== prevStory) {
     setPrevStory(story);
     setName(story.name);
@@ -460,6 +475,7 @@ function StoryMainForm({
     setStatus(story.status);
     setReviewStatus(story.review_status);
     setScheduledDate(story.scheduled_date ?? "");
+    setClientReviewStatus(story.review_status);
   }
 
   const [addedToTodo, setAddedToTodo] = useState(false);
@@ -468,6 +484,21 @@ function StoryMainForm({
   const [saved, setSaved] = useState(false);
   const [, startTransition] = useTransition();
   const { showError } = useToast();
+
+  function handleClientReview(status: "approved" | "changes_requested") {
+    if (clientReviewSaving) return;
+    const previous = clientReviewStatus;
+    setClientReviewStatus(status);
+    setClientReviewSaving(true);
+    startTransition(async () => {
+      const result = await submitClientStoryReview(story.id, status);
+      setClientReviewSaving(false);
+      if (!result.success) {
+        setClientReviewStatus(previous);
+        showError(result.message ?? "Couldn't save your review. Please try again.");
+      }
+    });
+  }
 
   function handleAddToTodo() {
     setTodoError(undefined);
@@ -563,20 +594,54 @@ function StoryMainForm({
           </label>
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Approval Status</span>
-            {/* Same column a client's review-link submission writes to
-                (set_story_review_status_by_token) -- mirrors Post Editor's
-                own Approval Status field exactly (same options/labels). */}
-            <select
-              name="review_status"
-              value={reviewStatus}
-              onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
-              disabled={!canManage}
-              className={fieldClass}
-            >
-              <option value="pending">Pending Review</option>
-              <option value="approved">Approved</option>
-              <option value="changes_requested">Needs Changes</option>
-            </select>
+            {isClient ? (
+              // Client's own client-safe path -- immediate-submit via
+              // set_story_review_status (see submitClientStoryReview),
+              // mirrors Post Editor's identical branch exactly.
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleClientReview("approved")}
+                  disabled={clientReviewSaving}
+                  className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 disabled:opacity-50 ${
+                    clientReviewStatus === "approved"
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border text-foreground hover:border-foreground/40"
+                  }`}
+                >
+                  Approved
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleClientReview("changes_requested")}
+                  disabled={clientReviewSaving}
+                  className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 disabled:opacity-50 ${
+                    clientReviewStatus === "changes_requested"
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border text-foreground hover:border-foreground/40"
+                  }`}
+                >
+                  Needs Changes
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Same column a client's review-link submission writes to
+                    (set_story_review_status_by_token) -- mirrors Post Editor's
+                    own Approval Status field exactly (same options/labels). */}
+                <select
+                  name="review_status"
+                  value={reviewStatus}
+                  onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
+                  disabled={!canManage}
+                  className={fieldClass}
+                >
+                  <option value="pending">Pending Review</option>
+                  <option value="approved">Approved</option>
+                  <option value="changes_requested">Needs Changes</option>
+                </select>
+              </>
+            )}
           </label>
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>

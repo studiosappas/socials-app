@@ -223,6 +223,7 @@ export interface Database {
           role: ProjectRole;
           custom_permissions: string[] | null;
           notification_prefs: Record<string, boolean>;
+          last_visited_at: string | null;
           created_at: string;
         };
         Insert: {
@@ -231,11 +232,13 @@ export interface Database {
           role?: ProjectRole;
           custom_permissions?: string[] | null;
           notification_prefs?: Record<string, boolean>;
+          last_visited_at?: string | null;
         };
         Update: {
           role?: ProjectRole;
           custom_permissions?: string[] | null;
           notification_prefs?: Record<string, boolean>;
+          last_visited_at?: string | null;
         };
         Relationships: [
           {

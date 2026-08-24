@@ -115,16 +115,23 @@ export function TaskDetail({
     >
       <div className="flex items-center justify-between gap-2 pb-2">
         <div ref={statusRef} className="relative">
-          <button
-            type="button"
-            onClick={() => setStatusOpen((v) => !v)}
-            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs transition-colors duration-150 hover:border-foreground/40"
-          >
-            <span className="text-muted">Status</span>
-            <span className="font-medium">{statusLabel}</span>
-            <ChevronDownIcon className="h-3 w-3 text-muted" />
-          </button>
-          {statusOpen && (
+          {task.canManage ? (
+            <button
+              type="button"
+              onClick={() => setStatusOpen((v) => !v)}
+              className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs transition-colors duration-150 hover:border-foreground/40"
+            >
+              <span className="text-muted">Status</span>
+              <span className="font-medium">{statusLabel}</span>
+              <ChevronDownIcon className="h-3 w-3 text-muted" />
+            </button>
+          ) : (
+            <span className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs">
+              <span className="text-muted">Status</span>
+              <span className="font-medium">{statusLabel}</span>
+            </span>
+          )}
+          {task.canManage && statusOpen && (
             <div className="absolute left-0 top-8 z-20 w-36 rounded-md border border-border bg-background p-1 shadow-lg">
               {STATUS_OPTIONS.map((opt) => (
                 <button
@@ -144,41 +151,49 @@ export function TaskDetail({
 
         {/* Secondary actions -- Delete Task no longer sits permanently
             visible next to Status; Open Linked Content only shows up here
-            when there's actually something to link to. */}
-        <div ref={menuRef} className="relative">
-          <button
-            type="button"
-            onClick={() => setMenuOpen((v) => !v)}
-            title="More actions"
-            className="rounded p-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
-          >
-            ⋯
-          </button>
-          {menuOpen && (
-            <div className="absolute right-0 top-8 z-20 w-44 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-1 shadow-lg">
-              {task.sourceRef && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onOpenLinkedContent();
-                  }}
-                  className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
-                >
-                  Open Linked Content
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={handleDelete}
-                disabled={deleting}
-                className="block w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-50"
-              >
-                {deleting ? "Deleting…" : "Delete Task"}
-              </button>
-            </div>
-          )}
-        </div>
+            when there's actually something to link to. The trigger itself
+            only renders when there's at least one action a Viewer/Client
+            reader is actually allowed to take -- Delete is canManage-gated
+            (it's an editing control), so a read-only task with no linked
+            content would otherwise show a "..." menu that opens empty. */}
+        {(task.sourceRef || task.canManage) && (
+          <div ref={menuRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              title="More actions"
+              className="rounded p-1 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+            >
+              ⋯
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 top-8 z-20 w-44 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-1 shadow-lg">
+                {task.sourceRef && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onOpenLinkedContent();
+                    }}
+                    className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                  >
+                    Open Linked Content
+                  </button>
+                )}
+                {task.canManage && (
+                  <button
+                    type="button"
+                    onClick={handleDelete}
+                    disabled={deleting}
+                    className="block w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-50"
+                  >
+                    {deleting ? "Deleting…" : "Delete Task"}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {task.sourceRef && (

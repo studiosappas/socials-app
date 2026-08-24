@@ -4,11 +4,38 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
+import { INVITABLE_ROLES } from "@/lib/role-permissions";
 import type { ProjectRole } from "@/types/database";
 
 export type InviteMemberState = { message?: string } | undefined;
 
-const VALID_ROLES: ProjectRole[] = ["admin", "editor", "viewer", "client"];
+type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
+
+// Every membership-mutating action below calls this, not just relying on
+// project_members' own RLS policy (which already rejects a non-owner/admin's
+// write at the database layer) -- an explicit app-layer check too, same
+// defense-in-depth reasoning as transferOwnership's own pre-existing check
+// further down this file. Since a caller must pass this to reach ANY of
+// these actions regardless of whose row they target, it's the one gate that
+// covers "a Member/Client can't self-promote," "can't edit their own
+// permission set," and "can't modify another member" all at once -- there's
+// no path through inviteMember/removeMember/updateMemberRole/
+// updateMemberPermissions that skips it.
+async function assertCanManageMembers(supabase: SupabaseServerClient, projectId: string): Promise<void> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not signed in.");
+  const { data: membership } = await supabase
+    .from("project_members")
+    .select("role")
+    .eq("project_id", projectId)
+    .eq("user_id", user.id)
+    .single();
+  if (membership?.role !== "owner" && membership?.role !== "admin") {
+    throw new Error("Only project owners and admins can manage team members.");
+  }
+}
 
 export async function inviteMember(
   projectId: string,
@@ -17,7 +44,7 @@ export async function inviteMember(
 ): Promise<InviteMemberState> {
   const email = String(formData.get("email") ?? "").trim();
   const roleRaw = String(formData.get("role") ?? "editor") as ProjectRole;
-  const role: ProjectRole = VALID_ROLES.includes(roleRaw) ? roleRaw : "editor";
+  const role: ProjectRole = INVITABLE_ROLES.includes(roleRaw) ? roleRaw : "editor";
   if (!email) return { message: "Email is required." };
 
   // Empty selection means "use the role's default access," matching
@@ -25,6 +52,12 @@ export async function inviteMember(
   const permissions = formData.getAll("permissions").map(String);
 
   const supabase = await createClient();
+
+  try {
+    await assertCanManageMembers(supabase, projectId);
+  } catch (err) {
+    return { message: err instanceof Error ? err.message : "Not authorized." };
+  }
 
   // Independent -- neither needs the other's result.
   const [
@@ -95,6 +128,11 @@ export async function removeMember(
   userId: string,
 ): Promise<{ success: true } | { success: false; message: string }> {
   const supabase = await createClient();
+  try {
+    await assertCanManageMembers(supabase, projectId);
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : "Not authorized." };
+  }
   const { error } = await supabase
     .from("project_members")
     .delete()
@@ -107,14 +145,29 @@ export async function removeMember(
 // Not revalidating -- its one caller (TeamMemberRow's handleSaveEdit)
 // already calls router.refresh() itself right after this resolves (along
 // with updateMemberPermissions below, called in the same handler).
-export async function updateMemberRole(projectId: string, userId: string, role: ProjectRole) {
+//
+// applyPreset resets custom_permissions to null (= "use the new role's
+// current default," resolved dynamically by getEffectivePermissions) in the
+// SAME update statement as the role change -- a single atomic write, so
+// there's never a moment where the row has the new role but still the old
+// role's stored permissions (or vice versa) for another request to observe
+// mid-change. Declining the reset (applyPreset: false, the default) leaves
+// custom_permissions completely untouched -- a member's own customized
+// access is never silently rewritten just because their role changed.
+export async function updateMemberRole(
+  projectId: string,
+  userId: string,
+  role: ProjectRole,
+  applyPreset = false,
+) {
   if (role === "owner") {
     throw new Error("Use transferOwnership to make someone the owner.");
   }
   const supabase = await createClient();
+  await assertCanManageMembers(supabase, projectId);
   const { error } = await supabase
     .from("project_members")
-    .update({ role })
+    .update(applyPreset ? { role, custom_permissions: null } : { role })
     .eq("project_id", projectId)
     .eq("user_id", userId);
   if (error) throw new Error(error.message);
@@ -128,6 +181,7 @@ export async function updateMemberPermissions(
   permissions: string[] | null,
 ) {
   const supabase = await createClient();
+  await assertCanManageMembers(supabase, projectId);
   const { error } = await supabase
     .from("project_members")
     .update({ custom_permissions: permissions })

@@ -1,7 +1,9 @@
 ﻿import { createClient } from "@/lib/supabase/server";
 import { getShareLinksData } from "@/lib/data/share-links";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { StoriesBoard } from "./stories-board";
+import { AccessRestricted } from "../access-restricted";
 import type { MediaType } from "@/types/database";
 
 export default async function StoriesPage({
@@ -18,12 +20,18 @@ export default async function StoriesPage({
 
   const { data: membership } = await supabase
     .from("project_members")
-    .select("role")
+    .select("role, custom_permissions")
     .eq("project_id", projectId)
     .eq("user_id", user!.id)
     .single();
 
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "stories")) {
+    return <AccessRestricted />;
+  }
+
+  // Ordinary content-editing capability, not "genuinely privileged" -- see
+  // grid/page.tsx's identical comment.
+  const canManage = canEditContent(membership.role);
 
   const { data: stories } = await supabase
     .from("stories")

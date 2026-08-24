@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { AssetBoard, type AssetCollectionItem } from "./asset-board";
+import { AccessRestricted } from "../access-restricted";
 
 export default async function AssetsPage({
   params,
@@ -16,12 +18,18 @@ export default async function AssetsPage({
 
   const { data: membership } = await supabase
     .from("project_members")
-    .select("role")
+    .select("role, custom_permissions")
     .eq("project_id", projectId)
     .eq("user_id", user!.id)
     .single();
 
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "assets")) {
+    return <AccessRestricted />;
+  }
+
+  // Ordinary content-editing capability, not "genuinely privileged" -- see
+  // grid/page.tsx's identical comment.
+  const canManage = canEditContent(membership.role);
 
   const { data: rows } = await supabase
     .from("asset_collections")

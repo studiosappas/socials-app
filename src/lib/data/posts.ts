@@ -4,7 +4,8 @@ import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/pos
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@/lib/data/brand-moodboard";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
+import { canEditContent } from "@/lib/role-permissions";
+import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 
 export type PostCoreData = {
   post: {
@@ -24,6 +25,11 @@ export type PostCoreData = {
   assets: PostAssetItem[];
   links: PostLinkItem[];
   canManage: boolean;
+  // The raw role, alongside the derived canManage -- needed so the editor
+  // can offer Client their own narrow Approval Status control (see
+  // PostMainForm's isClient branch) without conflating it with canManage,
+  // which stays "owner/admin/editor only" throughout.
+  role: ProjectRole;
   currentUserId: string;
   members: ProjectMemberOption[];
   customFonts: CustomFontFace[];
@@ -95,7 +101,8 @@ export async function getPostCoreData(
     .eq("project_id", projectId)
     .eq("user_id", user!.id)
     .single();
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  const role: ProjectRole = membership?.role ?? "viewer";
+  const canManage = canEditContent(role);
 
   // Isolated from the select above -- preview_storage_path/annotation_json/
   // poster_storage_path are newer columns that may not exist yet on a
@@ -186,6 +193,7 @@ export async function getPostCoreData(
     assets,
     links: postLinks,
     canManage,
+    role,
     currentUserId: user!.id,
     members,
     customFonts,

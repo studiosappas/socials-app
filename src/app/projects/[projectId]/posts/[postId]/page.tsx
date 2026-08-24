@@ -25,6 +25,7 @@ export default async function PostPage({
       links={data.links}
       mediaLibraryPromise={mediaLibraryPromise}
       canManage={data.canManage}
+      role={data.role}
       currentUserId={data.currentUserId}
       members={data.members}
       customFonts={data.customFonts}

@@ -80,19 +80,40 @@ export function TaskWorkspace({
     setLinkedContentTarget({ projectId: task.projectId, type: task.sourceRef.type, id: task.sourceRef.id });
   }
 
+  // Both handlers below are a last-resort safety net, not the primary
+  // gate -- BoardView/ListView/TaskRow/TaskDetail already refuse to call
+  // these at all for a task whose task.canManage is false (see their own
+  // canManage checks), matching "prevent the interaction where the
+  // capability is already known." This still guards + reverts explicitly in
+  // case something ever calls through anyway (or the write fails for an
+  // unrelated reason, e.g. the task was deleted elsewhere in the meantime),
+  // so a blocked/failed write can never look like it silently succeeded.
   function handleStatusChange(taskId: string, status: TaskStatus) {
+    const task = effectiveTasks.find((t) => t.id === taskId);
+    if (!task || !task.canManage) return;
+    const previous = effectiveTasks;
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, status } : t)));
     startTransition(async () => {
-      await updateTaskStatus(taskId, status);
+      const result = await updateTaskStatus(taskId, status);
+      if (!result.success) {
+        setOverrideTasks(previous);
+        showError(result.message);
+      }
     });
   }
 
   function handleAssigneeChange(taskId: string, assigneeId: string | null) {
     const task = effectiveTasks.find((t) => t.id === taskId);
-    const assignee = assigneeId && task?.projectId ? (membersByProject[task.projectId] ?? []).find((m) => m.id === assigneeId) : null;
+    if (!task || !task.canManage) return;
+    const previous = effectiveTasks;
+    const assignee = assigneeId && task.projectId ? (membersByProject[task.projectId] ?? []).find((m) => m.id === assigneeId) : null;
     setOverrideTasks(effectiveTasks.map((t) => (t.id === taskId ? { ...t, assignee: assignee ?? null } : t)));
     startTransition(async () => {
-      await updateTaskAssignee(taskId, assigneeId);
+      const result = await updateTaskAssignee(taskId, assigneeId);
+      if (!result.success) {
+        setOverrideTasks(previous);
+        showError(result.message);
+      }
     });
   }
 

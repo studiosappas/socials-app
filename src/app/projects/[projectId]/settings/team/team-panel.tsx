@@ -12,29 +12,19 @@ import {
   updateMemberPermissions,
   updateMemberRole,
 } from "@/lib/actions/members";
+import {
+  INVITABLE_ROLES,
+  PERMISSION_PAGE_KEYS,
+  PERMISSION_PAGE_LABEL,
+  ROLE_DESCRIPTION,
+  ROLE_LABEL,
+} from "@/lib/role-permissions";
 import type { ProjectRole } from "@/types/database";
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
 const fieldClass =
   "w-full border-0 border-b border-border bg-transparent py-1.5 text-sm focus:border-foreground focus:outline-none";
-
-const INVITE_ROLE_OPTIONS: ProjectRole[] = ["admin", "editor", "viewer", "client"];
-const ROLE_LABEL: Record<ProjectRole, string> = {
-  owner: "Owner",
-  admin: "Admin",
-  designer: "Editor",
-  editor: "Editor",
-  viewer: "Viewer",
-  client: "Client",
-};
-const PERMISSION_PAGES: { key: string; label: string }[] = [
-  { key: "overview", label: "Overview" },
-  { key: "grid", label: "Grid" },
-  { key: "calendar", label: "Calendar" },
-  { key: "stories", label: "Content" },
-  { key: "brief", label: "Brief" },
-  { key: "settings", label: "Settings" },
-];
+const PERMISSION_PAGES = PERMISSION_PAGE_KEYS.map((key) => ({ key, label: PERMISSION_PAGE_LABEL[key] }));
 
 export type TeamMember = {
   userId: string;
@@ -118,7 +108,7 @@ export function TeamPanel({
           <form action={inviteAction} className="flex flex-col gap-4">
             <div className="flex flex-col gap-2 sm:flex-row">
               <select name="role" defaultValue="editor" className={`${fieldClass} sm:w-32`}>
-                {INVITE_ROLE_OPTIONS.map((r) => (
+                {INVITABLE_ROLES.map((r) => (
                   <option key={r} value={r}>
                     {ROLE_LABEL[r]}
                   </option>
@@ -228,12 +218,30 @@ function TeamMemberRow({
   }
 
   function handleSaveEdit() {
+    const roleChanged = role !== member.role;
+    // Deliberate, explicit choice -- never a silent overwrite. Confirming
+    // resets this member's permissions to the new role's default preset
+    // (in the same atomic update as the role change itself, see
+    // updateMemberRole's own comment); declining leaves custom_permissions
+    // completely untouched. Either way this save only ever changes ROLE --
+    // any in-progress edits to the permission checkboxes below are ignored
+    // when the role also changed, so there's no ambiguity about whether a
+    // permission change was intentional. To change both, save the role
+    // first, then reopen this row to adjust permissions separately.
+    const applyPreset = roleChanged
+      ? confirm(
+          `Apply ${ROLE_LABEL[role]} default permissions?\n\nThis resets ${member.name}'s permissions to the ${ROLE_LABEL[role]} preset. Choose Cancel to change their role but keep their current permissions exactly as they are.`,
+        )
+      : false;
+
     setEditing(false);
     onSetRole(member.userId, role);
     startTransition(async () => {
       try {
-        await updateMemberRole(projectId, member.userId, role);
-        await updateMemberPermissions(projectId, member.userId, useCustomPermissions ? permissions : null);
+        await updateMemberRole(projectId, member.userId, role, applyPreset);
+        if (!roleChanged) {
+          await updateMemberPermissions(projectId, member.userId, useCustomPermissions ? permissions : null);
+        }
       } catch (error) {
         console.error("Failed to save member edit:", error);
         onClearRoleOverride(member.userId);
@@ -294,7 +302,16 @@ function TeamMemberRow({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <span className="text-xs tracking-wide text-muted uppercase">{ROLE_LABEL[member.role]}</span>
+          {/* ROLE stays what it's always been (the badge); PERMISSIONS is
+              the separate, per-member override underneath -- see the
+              editing panel's own "use custom permissions instead of..."
+              copy for the same distinction spelled out. */}
+          <span className="text-right">
+            <span className="block text-xs tracking-wide text-foreground uppercase">{ROLE_LABEL[member.role]}</span>
+            <span className="block text-[10px] text-muted">
+              {member.customPermissions ? "Custom permissions" : ROLE_DESCRIPTION[member.role]}
+            </span>
+          </span>
           {canEditThisRow && (
             <div ref={menuRef} className="relative">
               <button
@@ -349,12 +366,13 @@ function TeamMemberRow({
               onChange={(e) => setLocalRole(e.target.value as ProjectRole)}
               className={`${fieldClass} w-40`}
             >
-              {INVITE_ROLE_OPTIONS.map((r) => (
+              {INVITABLE_ROLES.map((r) => (
                 <option key={r} value={r}>
                   {ROLE_LABEL[r]}
                 </option>
               ))}
             </select>
+            <span className="text-xs text-muted">{ROLE_DESCRIPTION[role]}</span>
           </label>
 
           <label className="flex items-center gap-2 text-sm">

@@ -1,6 +1,7 @@
 import { endOfWeek, format, startOfWeek } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrl } from "@/lib/signed-url-cache";
+import { hasPagePermission } from "@/lib/role-permissions";
 import { AnimatedNumber } from "./animated-number";
 import {
   AiRecommendationsPanel,
@@ -8,6 +9,7 @@ import {
   ProfilePanel,
   WorkplaceInsightsPanel,
 } from "./overview-panels";
+import { AccessRestricted } from "./access-restricted";
 
 export default async function ProjectOverviewPage({
   params,
@@ -53,7 +55,7 @@ export default async function ProjectOverviewPage({
       .single(),
     supabase
       .from("project_members")
-      .select("role")
+      .select("role, custom_permissions")
       .eq("project_id", projectId)
       .eq("user_id", user!.id)
       .single(),
@@ -117,7 +119,11 @@ export default async function ProjectOverviewPage({
     supabase.from("projects").select("instagram_url, tiktok_url").eq("id", projectId).maybeSingle(),
   ]);
 
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "overview")) {
+    return <AccessRestricted />;
+  }
+
+  const canManage = membership.role === "owner" || membership.role === "admin";
 
   // The same profile_photo_path nav-data.ts/Grid/Tasks each independently
   // sign for their own display -- routing through the shared cache means

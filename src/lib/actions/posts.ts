@@ -167,6 +167,58 @@ export async function updatePost(
   return undefined;
 }
 
+// Client's own narrow write path for Approval Status -- reuses the
+// existing set_post_review_status DB function (SECURITY DEFINER, already
+// self-restricted to project_role = 'client' and to
+// 'approved'/'changes_requested', see schema.sql) instead of routing
+// through the normal owner/admin/editor-only posts UPDATE RLS policy. This
+// deliberately does NOT touch caption/status/schedule/anything else -- the
+// RPC itself only ever writes review_status, so even a bug in the calling
+// UI's own role check can't escalate what this can do.
+//
+// Matches the anonymous token flow's own canonical values
+// (submitReviewStatus in share-preview-review.ts) -- 'pending' is
+// deliberately not offered here (the RPC itself rejects it), since
+// resetting to pending is an owner/admin/editor action via the normal
+// form save, not something a reviewer submits.
+export async function submitClientPostReview(
+  postId: string,
+  status: "approved" | "changes_requested",
+): Promise<{ success: boolean; message?: string }> {
+  const supabase = await createClient();
+  const { error } = await supabase.rpc("set_post_review_status", { p_post_id: postId, p_status: status });
+  if (error) return { success: false, message: error.message };
+
+  // Best-effort, same reasoning as notifyManagerOfFeedback in
+  // share-preview-review.ts -- an authenticated client's own session can
+  // already read project_members directly (unlike an anonymous token
+  // visitor), so this reuses the same notifyProjectMembers helper the rest
+  // of the app already uses instead of a token-flow-style context RPC.
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const { data: post } = await supabase.from("posts").select("project_id").eq("id", postId).single();
+    if (post) {
+      await notifyProjectMembers(
+        supabase,
+        post.project_id,
+        "review_comment",
+        {
+          title: `Client ${status === "approved" ? "approved" : "requested changes on"} a post`,
+          icon: status === "approved" ? "✅" : "💬",
+          link: `/projects/${post.project_id}/posts/${postId}`,
+        },
+        { excludeUserId: user?.id },
+      );
+    }
+  } catch {
+    // Best-effort.
+  }
+
+  return { success: true };
+}
+
 export async function addPostAsset(
   projectId: string,
   postId: string,

@@ -1,27 +1,65 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { inviteMember } from "@/lib/actions/members";
+import type { ProjectRole } from "@/types/database";
 
-export async function createProject(formData: FormData) {
-  const name = String(formData.get("name") ?? "").trim();
-  if (!name) return;
+export type CreateProjectResult =
+  | { success: true; projectId: string; failedInvites: { email: string; message: string }[] }
+  | { success: false; message: string };
+
+// Client-driven (not a <form action>) so the Create New Project modal can
+// sequence project creation -> optional avatar upload -> optional teammate
+// invites -> navigate, all as one perceived operation, with a single place
+// to show a loading state and prevent a duplicate submission. The owner
+// membership row is never inserted here -- that's the existing
+// on_project_created trigger's job (see schema.sql), same as the old
+// inline-form version of this action relied on.
+//
+// Invites are deliberately best-effort per person, reusing the real
+// inviteMember action unmodified (never a second invitation system): if the
+// project insert itself fails, nothing else runs and no memberships are
+// touched. If the project succeeds but an invite fails (e.g. no account for
+// that email), the project is NOT rolled back -- inviteMember already never
+// throws, so a bad invite can never abort the ones after it or the project
+// that already exists; the caller just gets told which emails failed.
+export async function createProjectWithSetup(
+  name: string,
+  people: { email: string; role: ProjectRole }[],
+): Promise<CreateProjectResult> {
+  const trimmed = name.trim();
+  if (!trimmed) return { success: false, message: "Project name is required." };
 
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  if (!user) return { success: false, message: "Not signed in." };
 
   const { data, error } = await supabase
     .from("projects")
-    .insert({ name, created_by: user.id })
+    .insert({ name: trimmed, created_by: user.id })
     .select("id")
     .single();
 
   if (error || !data) {
-    throw new Error(error?.message ?? "Failed to create project");
+    return { success: false, message: error?.message ?? "Failed to create project." };
+  }
+
+  const projectId = data.id as string;
+
+  const failedInvites: { email: string; message: string }[] = [];
+  for (const person of people) {
+    const email = person.email.trim();
+    if (!email) continue;
+    const formData = new FormData();
+    formData.set("email", email);
+    formData.set("role", person.role);
+    const result = await inviteMember(projectId, undefined, formData);
+    if (result?.message) {
+      failedInvites.push({ email, message: result.message });
+    }
   }
 
   // "layout" mode so the top nav's project list/switcher (fetched once in
@@ -30,7 +68,66 @@ export async function createProject(formData: FormData) {
   // project immediately instead of showing it only after some later,
   // unrelated revalidation.
   revalidatePath("/projects", "layout");
-  redirect(`/projects/${data.id}/grid`);
+  return { success: true, projectId, failedInvites };
+}
+
+export type SetProjectAvatarState = { message?: string } | undefined;
+
+// Isolated avatar-only write, reusing updateProjectProfile's exact upload
+// mechanism (same "project-media" bucket, same `${projectId}/profile-photo`
+// path convention, same profile_photo_path column) -- not a second upload
+// system. Split out from the full profile-form action because the Create
+// Project modal has none of that form's other fields to preserve.
+export async function setProjectAvatar(
+  projectId: string,
+  _state: SetProjectAvatarState,
+  formData: FormData,
+): Promise<SetProjectAvatarState> {
+  const photo = formData.get("avatar");
+  if (!(photo instanceof File) || photo.size === 0) return undefined;
+
+  const supabase = await createClient();
+  const ext = photo.name.includes(".") ? photo.name.split(".").pop() : undefined;
+  const storagePath = `${projectId}/profile-photo${ext ? `.${ext}` : ""}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from("project-media")
+    .upload(storagePath, photo, { contentType: photo.type, upsert: true });
+  if (uploadError) {
+    return { message: uploadError.message };
+  }
+
+  const { error } = await supabase.from("projects").update({ profile_photo_path: storagePath }).eq("id", projectId);
+  if (error) {
+    return { message: error.message };
+  }
+
+  revalidatePath("/projects", "layout");
+  return undefined;
+}
+
+// Fire-and-forget, called once per genuine "entered/switched into this
+// project" event -- see TrackProjectVisit (mounted in the [projectId]
+// layout), whose effect only re-fires when projectId itself changes, since
+// that layout stays mounted across sibling-page navigation (Grid ->
+// Calendar -> Tasks, etc.) within the same project. Never throws: a failed
+// write here must never break navigation, and it's a harmless no-op if
+// last_visited_at doesn't exist yet on a not-yet-migrated database.
+export async function markProjectVisited(projectId: string): Promise<void> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+    await supabase
+      .from("project_members")
+      .update({ last_visited_at: new Date().toISOString() })
+      .eq("project_id", projectId)
+      .eq("user_id", user.id);
+  } catch {
+    // Best-effort.
+  }
 }
 
 export async function updateBrandNotes(projectId: string, value: string) {

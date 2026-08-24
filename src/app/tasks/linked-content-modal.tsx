@@ -68,6 +68,7 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           // to satisfy PostEditor's prop type, not to defer anything.
           mediaLibraryPromise={Promise.resolve(result.data.mediaLibrary)}
           canManage={result.data.canManage}
+          role={result.data.role}
           currentUserId={result.data.currentUserId}
           members={result.data.members}
           customFonts={result.data.customFonts}
@@ -82,6 +83,7 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           links={result.data.links}
           mediaLibrary={result.data.mediaLibrary}
           canManage={result.data.canManage}
+          role={result.data.role}
           currentUserId={result.data.currentUserId}
           members={result.data.members}
           hideBackLink

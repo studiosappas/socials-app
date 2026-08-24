@@ -74,7 +74,7 @@ function DesktopBoard({
     if (!over) return;
     const nextStatus = over.id as TaskStatus;
     const task = tasks.find((t) => t.id === active.id);
-    if (!task || task.status === nextStatus) return;
+    if (!task || task.status === nextStatus || !task.canManage) return;
     onStatusChange(task.id, nextStatus);
   }
 
@@ -156,7 +156,10 @@ function BoardColumn({
 }
 
 function DraggableTaskCard({ task, children }: { task: TaskItem; children: React.ReactNode }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: task.id,
+    disabled: !task.canManage,
+  });
   const style = { transform: CSS.Translate.toString(transform) };
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners} className={isDragging ? "opacity-30" : ""}>

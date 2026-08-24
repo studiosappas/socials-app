@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
 import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
+import { notifyProjectMembers } from "@/lib/notifications";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaType, ReviewStatus, StoryStatus } from "@/types/database";
 
@@ -394,6 +395,44 @@ export async function updateStory(
   // name/status, so they still need to reflect the change next visit.
   revalidatePath(`/projects/${projectId}/stories`);
   revalidatePath(`/projects/${projectId}/calendar`);
+  return { success: true };
+}
+
+// Client's own narrow write path for Approval Status -- mirrors
+// submitClientPostReview in actions/posts.ts exactly, reusing
+// set_story_review_status (SECURITY DEFINER, self-restricted to
+// project_role = 'client' and to 'approved'/'changes_requested') instead of
+// the normal owner/admin/editor-only stories UPDATE RLS policy.
+export async function submitClientStoryReview(
+  storyId: string,
+  status: "approved" | "changes_requested",
+): Promise<{ success: boolean; message?: string }> {
+  const supabase = await createClient();
+  const { error } = await supabase.rpc("set_story_review_status", { p_story_id: storyId, p_status: status });
+  if (error) return { success: false, message: error.message };
+
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const { data: story } = await supabase.from("stories").select("project_id").eq("id", storyId).single();
+    if (story) {
+      await notifyProjectMembers(
+        supabase,
+        story.project_id,
+        "review_comment",
+        {
+          title: `Client ${status === "approved" ? "approved" : "requested changes on"} a content item`,
+          icon: status === "approved" ? "✅" : "💬",
+          link: `/projects/${story.project_id}/stories/${storyId}`,
+        },
+        { excludeUserId: user?.id },
+      );
+    }
+  } catch {
+    // Best-effort.
+  }
+
   return { success: true };
 }
 

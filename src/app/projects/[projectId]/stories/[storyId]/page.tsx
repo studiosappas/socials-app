@@ -20,6 +20,7 @@ export default async function StoryPage({
       links={data.links}
       mediaLibrary={data.mediaLibrary}
       canManage={data.canManage}
+      role={data.role}
       currentUserId={data.currentUserId}
       members={data.members}
     />

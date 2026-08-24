@@ -51,23 +51,20 @@ export function TaskRow({
         expanded ? "bg-black/[.02]" : "hover:bg-black/[.02]"
       }`}
     >
-      <button
-        type="button"
-        onClick={handleStatusCircleClick}
-        title={done ? "Mark not done" : "Mark done"}
-        className="shrink-0 rounded-full"
-      >
-        {done ? (
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <circle cx="9" cy="9" r="8" className="fill-success" />
-            <path d="M5.5 9.2 7.7 11.3 12.5 6.5" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        ) : (
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <circle cx="9" cy="9" r="8" stroke="currentColor" strokeWidth="1.4" className="text-border" />
-          </svg>
-        )}
-      </button>
+      {task.canManage ? (
+        <button
+          type="button"
+          onClick={handleStatusCircleClick}
+          title={done ? "Mark not done" : "Mark done"}
+          className="shrink-0 rounded-full"
+        >
+          <StatusCircle done={done} />
+        </button>
+      ) : (
+        <span className="shrink-0 rounded-full" title={done ? "Done" : "Not done"}>
+          <StatusCircle done={done} />
+        </span>
+      )}
 
       <div className="min-w-0 flex-1">
         <span className={`block truncate text-sm ${done ? "text-muted line-through" : ""}`}>{task.title}</span>
@@ -100,21 +97,31 @@ export function TaskRow({
       <SourceBadge source={task.source} />
 
       <div ref={assigneeRef} className="relative shrink-0">
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setAssigneeOpen((v) => !v);
-          }}
-          title={task.assignee ? task.assignee.name : "Unassigned"}
-        >
-          {task.assignee ? (
-            <Avatar name={task.assignee.name} avatarUrl={task.assignee.avatarUrl} />
-          ) : (
-            <EmptyAvatar />
-          )}
-        </button>
-        {assigneeOpen && (
+        {task.canManage ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setAssigneeOpen((v) => !v);
+            }}
+            title={task.assignee ? task.assignee.name : "Unassigned"}
+          >
+            {task.assignee ? (
+              <Avatar name={task.assignee.name} avatarUrl={task.assignee.avatarUrl} />
+            ) : (
+              <EmptyAvatar />
+            )}
+          </button>
+        ) : (
+          <span title={task.assignee ? task.assignee.name : "Unassigned"}>
+            {task.assignee ? (
+              <Avatar name={task.assignee.name} avatarUrl={task.assignee.avatarUrl} />
+            ) : (
+              <EmptyAvatar />
+            )}
+          </span>
+        )}
+        {task.canManage && assigneeOpen && (
           <div
             onClick={(e) => e.stopPropagation()}
             className="absolute right-0 top-6 z-20 w-44 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background p-1 shadow-lg"
@@ -165,6 +172,19 @@ export function TaskRow({
         </span>
       )}
     </div>
+  );
+}
+
+function StatusCircle({ done }: { done: boolean }) {
+  return done ? (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <circle cx="9" cy="9" r="8" className="fill-success" />
+      <path d="M5.5 9.2 7.7 11.3 12.5 6.5" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ) : (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <circle cx="9" cy="9" r="8" stroke="currentColor" strokeWidth="1.4" className="text-border" />
+    </svg>
   );
 }
 

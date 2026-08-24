@@ -13,6 +13,8 @@ import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-
 import { getProjectMemberOptions } from "@/lib/data/post-comments";
 import { mergeWorkspaceSettings } from "@/lib/account-settings";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
+import { AccessRestricted } from "../access-restricted";
 
 export default async function CalendarPage({
   params,
@@ -80,7 +82,7 @@ export default async function CalendarPage({
     supabase.from("profiles").select("workspace_settings").eq("id", user!.id).single(),
     supabase
       .from("project_members")
-      .select("role")
+      .select("role, custom_permissions")
       .eq("project_id", projectId)
       .eq("user_id", user!.id)
       .single(),
@@ -117,7 +119,13 @@ export default async function CalendarPage({
   const gridStartStr = format(gridStart, "yyyy-MM-dd");
   const gridEndStr = format(gridEnd, "yyyy-MM-dd");
 
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "calendar")) {
+    return <AccessRestricted />;
+  }
+
+  // Ordinary content-editing capability, not "genuinely privileged" -- see
+  // grid/page.tsx's identical comment.
+  const canManage = canEditContent(membership.role);
 
   const allPostIds = [
     ...(scheduledPosts ?? []).map((p) => p.id),
