@@ -128,5 +128,36 @@ export default async function BriefPage({
       })),
   }));
 
-  return <BriefBoard projectId={projectId} tasks={taskData} canManage={canManage} brandMoodboard={brandMoodboard} />;
+  // TEMPORARY DEBUG BUILD MARKER -- remove once the user confirms seeing
+  // it. VERCEL_GIT_COMMIT_SHA is set automatically by Vercel at build time
+  // (not inferred/guessed), so this proves which actual commit produced the
+  // page currently rendering in the browser.
+  const buildMarker = process.env.VERCEL_GIT_COMMIT_SHA
+    ? `vercel:${process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 12)}`
+    : "no-VERCEL_GIT_COMMIT_SHA-env-var-present";
+
+  // TEMPORARY DIAGNOSTIC LOGGING -- remove once the regression is confirmed
+  // found. Logs exactly what THIS fresh server-side read of brief_task_items
+  // returns for every item, right before it's handed to the client -- so a
+  // "server created image but the render shows link" report can be checked
+  // against what this specific re-fetch (the one router.refresh() triggers
+  // after an add) actually read back from the database.
+  for (const task of taskData) {
+    for (const item of task.items) {
+      console.log(
+        "[REAL_LINK_UI_FLOW] server:BriefPage item from DB",
+        JSON.stringify({ itemId: item.id, kind: item.kind, url: item.url, hasAttachment: Boolean(item.attachmentId) }),
+      );
+    }
+  }
+
+  return (
+    <BriefBoard
+      projectId={projectId}
+      tasks={taskData}
+      canManage={canManage}
+      brandMoodboard={brandMoodboard}
+      buildMarker={buildMarker}
+    />
+  );
 }

@@ -381,6 +381,13 @@ function fileNameFromUrl(url: string): string {
 // the initial URL, a provider-normalized direct-asset URL, a scraped
 // og:image/og:video URL, and the root-page comparison fetch alike.
 export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExternalMedia> {
+  // TEMPORARY DIAGNOSTIC LOGGING -- remove once the regression is confirmed
+  // found. Server-side only (Vercel function logs). This exact line firing
+  // is the proof this function was actually invoked for a given paste --
+  // its absence means the UI action calling in is not reaching this module
+  // at all.
+  console.log("[REAL_LINK_UI_FLOW] server:resolveExternalMedia RESOLVER_REACHED", JSON.stringify({ rawUrl }));
+
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
