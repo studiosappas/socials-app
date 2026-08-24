@@ -214,8 +214,25 @@ export async function transferOwnership(projectId: string, newOwnerUserId: strin
 
   // Two different rows (different user_id) of the same table -- no shared
   // state between them, safe to run together.
+  //
+  // custom_permissions: null on the demote side -- getEffectivePermissions
+  // never reads an owner's custom_permissions (role === "owner" always
+  // resolves to every page, regardless of what's stored), so whatever value
+  // happened to be sitting in this column before they became owner (or
+  // simply predates a page later being added to PERMISSION_PAGE_KEYS) has
+  // been completely dormant and harmless this whole time. The moment this
+  // update lands and their role becomes "admin", that same stale value
+  // would otherwise turn live and enforced for the first time, potentially
+  // hiding whole pages (e.g. Assets) despite Admin's own default preset
+  // being every page too -- same "role change must not leave stale
+  // permissions behind" atomicity updateMemberRole's applyPreset already
+  // guarantees for every other role change, just missing here until now.
   const [{ error: demoteError }, { error: promoteError }] = await Promise.all([
-    supabase.from("project_members").update({ role: "admin" }).eq("project_id", projectId).eq("user_id", user.id),
+    supabase
+      .from("project_members")
+      .update({ role: "admin", custom_permissions: null })
+      .eq("project_id", projectId)
+      .eq("user_id", user.id),
     supabase
       .from("project_members")
       .update({ role: "owner" })
