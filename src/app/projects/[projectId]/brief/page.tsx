@@ -53,9 +53,9 @@ export default async function BriefPage({
   // own isolated select for the same reason -- same reasoning as the
   // folder_id isolation in stories/page.tsx -- just run alongside the other
   // three now instead of before them.
-  const [{ data: statusRows }, { data: items }, { data: frames }, { data: attachments }] =
+  const [{ data: statusRows }, { data: items }, { data: frames }, { data: attachments }, { data: posterRows }] =
     taskIds.length === 0
-      ? [{ data: [] }, { data: [] }, { data: [] }, { data: [] }]
+      ? [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }]
       : await Promise.all([
           supabase.from("brief_tasks").select("id, status").in("id", taskIds),
           supabase
@@ -72,10 +72,19 @@ export default async function BriefPage({
             .from("brief_attachments")
             .select("id, original_storage_path, preview_storage_path, annotation_json")
             .eq("project_id", projectId),
+          // Isolated from the main attachments select above -- poster_storage_path
+          // is a brand-new column that may not exist yet on a not-yet-migrated
+          // database, and PostgREST fails the whole select if any referenced
+          // column is missing. A failed/empty lookup here just means no video
+          // shows a poster yet, never a broken Brief page.
+          supabase.from("brief_attachments").select("id, poster_storage_path").eq("project_id", projectId),
         ]);
   const statusByTask = new Map((statusRows ?? []).map((r) => [r.id, r.status]));
 
   const attachmentById = new Map((attachments ?? []).map((a) => [a.id, a]));
+  const posterPathById = new Map(
+    (posterRows ?? []).map((r) => [r.id, (r as { poster_storage_path: string | null }).poster_storage_path]),
+  );
 
   function publicUrl(path: string) {
     return supabase.storage.from("brief-media").getPublicUrl(path).data.publicUrl;
@@ -103,6 +112,10 @@ export default async function BriefPage({
             : null,
           originalUrl: attachment ? publicUrl(attachment.original_storage_path) : null,
           annotationJson: attachment?.annotation_json ?? null,
+          posterUrl: (() => {
+            const posterPath = attachment ? posterPathById.get(attachment.id) : null;
+            return posterPath ? publicUrl(posterPath) : null;
+          })(),
         };
       }),
     frames: (frames ?? [])

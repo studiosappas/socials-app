@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useMemo, useRef, useState, useTransition } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -28,6 +28,7 @@ import {
   addBriefTaskFrame,
   addBriefTaskImage,
   addBriefTaskLink,
+  addBriefTaskVideo,
   createBriefTask,
   deleteBriefTask,
   generateBriefDesign,
@@ -47,6 +48,7 @@ import {
 } from "@/lib/actions/brief";
 import { saveMediaAssetAnnotation } from "@/lib/actions/media";
 import { AnnotationEditor } from "@/components/annotation-editor";
+import { RichTextField } from "@/components/ui/rich-text-field";
 import { BrandMoodboardDialog } from "@/components/brand-moodboard-dialog";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon } from "../grid/grid-board";
@@ -55,6 +57,7 @@ import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
+import { generateVideoPosterBlob } from "@/lib/video-poster";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskStatus, BriefTaskType } from "@/types/database";
 
 export type BriefTaskItem = {
@@ -68,6 +71,11 @@ export type BriefTaskItem = {
   thumbnailUrl: string | null;
   originalUrl: string | null;
   annotationJson: object | null;
+  // Video-only: the auto-generated poster frame, if generation succeeded.
+  // Always null for image/link items -- see video-poster.ts and
+  // insertBriefMediaItem's own comment for when this can legitimately stay
+  // null even for a real video (poster generation failing is not fatal).
+  posterUrl: string | null;
 };
 export type BriefTaskFrame = {
   id: string;
@@ -1224,23 +1232,24 @@ function ItemSection({
       if (!result.itemId) return;
 
       const current = { id: result.itemId };
-      if (result.kind === "image" && result.attachmentId) {
+      if ((result.kind === "image" || result.kind === "video") && result.attachmentId) {
         const attachmentId = result.attachmentId;
+        const kind = result.kind;
         const label = result.label ?? url;
         pushCommand({
-          label: "Add image from link",
+          label: kind === "video" ? "Add video from link" : "Add image from link",
           undo: async () => {
             await removeBriefTaskItem(projectId, current.id);
             router.refresh();
           },
           redo: async () => {
             // Re-links the same already-fetched attachment -- never
-            // re-fetches the URL, same reasoning as handleAddImage's redo.
+            // re-fetches the URL, same reasoning as handleAddMedia's redo.
             const r = await restoreBriefTaskItem(
               projectId,
               taskId,
               section,
-              "image",
+              kind,
               label,
               notes,
               attachmentId,
@@ -1270,13 +1279,19 @@ function ItemSection({
 
   // fileOverride lets a paste event (handlePasteImage below) reuse this
   // exact same upload+insert+undo flow without going through the file
-  // picker/pendingFile state at all -- paste is a "the image is already
+  // picker/pendingFile state at all -- paste is a "the media is already
   // right here, just add it" gesture, so it skips the extra manual Add
   // click the file-picker path still requires. Must stay a NO-ARG call at
-  // its own "Add" button's onClick site below (not `onClick={handleAddImage}`
+  // its own "Add" button's onClick site below (not `onClick={handleAddMedia}`
   // directly) or React would pass the click SyntheticEvent through as
   // fileOverride.
-  function handleAddImage(fileOverride?: File) {
+  //
+  // Handles both image and video uploads -- kind is detected from the
+  // file's own MIME type, matching the same accept="image/*,video/*" +
+  // file.type.startsWith("video/") convention Grid/Post/Story already use
+  // for a unified media picker, rather than a separate parallel "Video"
+  // control.
+  function handleAddMedia(fileOverride?: File) {
     const file = fileOverride ?? pendingFile;
     if (!file) {
       fileInputRef.current?.click();
@@ -1285,6 +1300,7 @@ function ItemSection({
     const notes = imageNotesRef.current?.value ?? "";
     const position = items.length;
     const fileName = file.name;
+    const isVideo = file.type.startsWith("video/");
     setImageError(undefined);
     setImagePending(true);
     startTransition(async () => {
@@ -1298,13 +1314,38 @@ function ItemSection({
         setImageError(uploaded.error);
         return;
       }
+
+      // Poster generation only applies to video, and only ever runs
+      // client-side (a real <video>/<canvas>, same as Grid/Post/Story --
+      // see video-poster.ts). A failure here is NOT fatal to the upload:
+      // posterStoragePath is simply omitted, and the item still saves with
+      // its video playable, just without a real poster frame -- the chip
+      // falls back to a generic video icon in that case (see VideoItemChip).
+      let posterStoragePath: string | null = null;
+      if (isVideo) {
+        try {
+          const posterBlob = await generateVideoPosterBlob(file);
+          if (posterBlob) {
+            const posterFile = new File([posterBlob], "poster.jpg", { type: "image/jpeg" });
+            const posterPath = newStoragePath(projectId, "poster.jpg");
+            const posterUploaded = await uploadFileDirect("brief-media", posterPath, posterFile);
+            if (!("error" in posterUploaded)) posterStoragePath = posterUploaded.path;
+          }
+        } catch {
+          // Falls through with posterStoragePath left null -- see comment above.
+        }
+      }
+
       const formData = new FormData();
       formData.set("storagePath", uploaded.path);
       formData.set("fileName", fileName);
-      const result = await addBriefTaskImage(projectId, taskId, section, notes, position, formData);
+      if (posterStoragePath) formData.set("posterStoragePath", posterStoragePath);
+      const result = isVideo
+        ? await addBriefTaskVideo(projectId, taskId, section, notes, position, formData)
+        : await addBriefTaskImage(projectId, taskId, section, notes, position, formData);
       setImagePending(false);
       if (!result.success) {
-        setImageError(result.message ?? "Couldn't upload that image.");
+        setImageError(result.message ?? `Couldn't upload that ${isVideo ? "video" : "image"}.`);
         return;
       }
       setPendingFile(null);
@@ -1317,8 +1358,9 @@ function ItemSection({
         // otherwise redoing this command after an undo would restore the
         // item with a different label than what was actually shown/saved.
         const label = result.label ?? fileName;
+        const kind: BriefItemKind = isVideo ? "video" : "image";
         pushCommand({
-          label: "Add image",
+          label: isVideo ? "Add video" : "Add image",
           undo: async () => {
             await removeBriefTaskItem(projectId, current.id);
             router.refresh();
@@ -1331,7 +1373,7 @@ function ItemSection({
               projectId,
               taskId,
               section,
-              "image",
+              kind,
               label,
               notes,
               attachmentId,
@@ -1368,7 +1410,7 @@ function ItemSection({
           return;
         }
         setImageError(undefined);
-        handleAddImage(file);
+        handleAddMedia(file);
         return;
       }
     }
@@ -1461,6 +1503,13 @@ function ItemSection({
             onDelete={() => handleRemove(item.id)}
             onRename={(label) => handleRename(item.id, label)}
           />
+        ) : item.kind === "video" ? (
+          <VideoItemChip
+            item={item}
+            canManage={canManage}
+            onDelete={() => handleRemove(item.id)}
+            onRename={(label) => handleRename(item.id, label)}
+          />
         ) : (
           <LinkItemChip item={item} canManage={canManage} onDelete={() => handleRemove(item.id)} />
         )}
@@ -1526,7 +1575,7 @@ function ItemSection({
               <span className={pillLabelClass}>Link</span>
               <input
                 ref={urlRef}
-                placeholder="Converts to an image with image url"
+                placeholder="Converts to an image/video when the link resolves to one"
                 onKeyDown={(e) => e.key === "Enter" && handleAddLink()}
                 onPaste={handlePasteImage}
                 className={pillInputClass}
@@ -1547,18 +1596,18 @@ function ItemSection({
           </div>
           <div className="flex flex-col gap-2">
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-              <span className={pillLabelClass}>Image</span>
+              <span className={pillLabelClass}>Media</span>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 className={`${pillInputClass} truncate text-left ${pendingFile ? "" : "text-muted"}`}
               >
-                {pendingFile?.name ?? "Upload file"}
+                {pendingFile?.name ?? "Upload image or video"}
               </button>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/*,video/*"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
@@ -1584,7 +1633,7 @@ function ItemSection({
                 type="button"
                 variant="primary"
                 radius="full"
-                onClick={() => handleAddImage()}
+                onClick={() => handleAddMedia()}
                 disabled={imagePending}
                 className="w-full sm:w-auto"
               >
@@ -1811,6 +1860,212 @@ function ImageItemChip({
   );
 }
 
+// Full-screen video preview -- deliberately NOT the media-gallery.tsx
+// Lightbox that Content/Client Review already use, even though reuse was
+// the first thing tried here: that Lightbox hard-codes a fixed 3:4/9:16
+// post/story aspect box with object-cover cropping, which is correct for a
+// social-post preview but would visibly crop/distort an arbitrary uploaded
+// or externally-sourced video that isn't one of those two ratios. This
+// keeps the SAME visual language (full-screen dark backdrop, Escape/close
+// button, native <video controls>) without forcing Brief's arbitrary-aspect
+// videos into a box built for a different, fixed-ratio use case.
+function VideoLightbox({ url, poster, onClose }: { url: string; poster: string | null; onClose: () => void }) {
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background/98 backdrop-blur-sm">
+      <button type="button" aria-label="Close" onClick={onClose} className="fixed inset-0 -z-10 cursor-default" />
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Close"
+        className="absolute right-4 top-4 z-10 flex h-9 w-9 items-center justify-center rounded-full text-foreground/60 transition-colors duration-150 hover:text-foreground"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      </button>
+      <video
+        src={url}
+        poster={poster ?? undefined}
+        controls
+        playsInline
+        autoPlay
+        className="max-h-[86dvh] max-w-[92vw]"
+      />
+    </div>
+  );
+}
+
+function VideoItemChip({
+  item,
+  canManage,
+  onDelete,
+  onRename,
+}: {
+  item: BriefTaskItem;
+  canManage: boolean;
+  onDelete: () => void;
+  onRename: (label: string) => Promise<{ success: boolean; message?: string }>;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(item.label);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+  // Same optimistic-label pattern as ImageItemChip -- see its own comment.
+  const { value: label, set: setOptimisticLabel, reset: resetOptimisticLabel } = useOptimisticOverride(item.label);
+
+  // No annotation editor ever touches a video item (no video editing in
+  // scope) -- originalUrl is always the real, unmodified upload, never a
+  // "preview wins over original" choice the way ImageItemChip makes.
+  const currentUrl = item.originalUrl;
+
+  function handleDownload() {
+    setMenuOpen(false);
+    if (!currentUrl) return;
+    setDownloading(true);
+    downloadAsset(currentUrl, filenameFromUrl(currentUrl, label || "video")).finally(() => setDownloading(false));
+  }
+
+  function startRename() {
+    setMenuOpen(false);
+    setRenameValue(label);
+    setRenaming(true);
+  }
+
+  function commitRename() {
+    setRenaming(false);
+    const next = renameValue.trim();
+    if (!next || next === label) return;
+    setOptimisticLabel(next);
+    onRename(next).then((result) => {
+      if (!result.success) resetOptimisticLabel();
+    });
+  }
+
+  return (
+    <div
+      ref={menuRef}
+      className="relative"
+      onContextMenu={(e) => {
+        if (!canManage || renaming) return;
+        e.preventDefault();
+        setMenuOpen(true);
+      }}
+    >
+      <div className="flex w-fit max-w-full items-center gap-1 rounded-full border border-foreground bg-background py-1 pr-1 pl-2.5 text-[11px]">
+        {renaming ? (
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                setRenaming(false);
+                setRenameValue(label);
+              }
+            }}
+            className="max-w-[120px] min-w-0 bg-transparent px-0.5 py-0.5 text-[11px] focus:outline-none"
+          />
+        ) : (
+          <>
+            {/* Same separate-hit-area convention as ImageItemChip -- clicking
+                the thumbnail opens the video preview, nothing else. */}
+            <button
+              type="button"
+              onClick={() => setPreviewOpen(true)}
+              title="Open video"
+              aria-label="Open video"
+              className="flex shrink-0 items-center"
+            >
+              <span className="relative flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-black/10">
+                {item.posterUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.posterUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-[10px]">🎬</span>
+                )}
+                {/* Subtle play-badge so a video chip reads differently from an
+                    image chip at a glance, even when a real poster is shown. */}
+                <span className="absolute inset-0 flex items-center justify-center bg-black/10">
+                  <svg viewBox="0 0 24 24" fill="white" className="h-2 w-2 drop-shadow">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                </span>
+              </span>
+            </button>
+            {/* Real, normally-selectable text -- same onPointerDown
+                stopPropagation load-bearing reasoning as ImageItemChip's own
+                name span (protects text selection from the row's own
+                drag-to-reorder listener, and keeps a selection drag from
+                ever landing on and "opening" the video). */}
+            <span
+              title={label}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="max-w-[100px] cursor-text truncate select-text"
+            >
+              {label}
+            </span>
+          </>
+        )}
+        {canManage && !renaming && (
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            title="Video options"
+            className="shrink-0 rounded-full px-1.5 text-muted transition-all duration-150 hover:bg-black/[.08] hover:text-foreground active:scale-90"
+          >
+            ⋮
+          </button>
+        )}
+      </div>
+      {menuOpen && (
+        <div className="absolute left-0 top-full z-20 mt-1 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
+          <button
+            type="button"
+            onClick={startRename}
+            className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07]"
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07] disabled:opacity-60"
+          >
+            {downloading ? "Downloading..." : "Download Video"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(false);
+              onDelete();
+            }}
+            className="w-full rounded px-2 py-1 text-left text-xs text-error transition-colors duration-150 hover:bg-error/10"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+      {previewOpen && currentUrl && (
+        <VideoLightbox url={currentUrl} poster={item.posterUrl} onClose={() => setPreviewOpen(false)} />
+      )}
+    </div>
+  );
+}
+
 function FrameSection({
   title,
   projectId,
@@ -1845,10 +2100,16 @@ function FrameSection({
     });
   }
 
-  function handleBodyBlur(frameId: string, value: string, original: string) {
-    if (value === original) return;
+  // No equality short-circuit here (unlike handleLabelBlur above) --
+  // RichTextField's onSave always hands back the serialized form
+  // (brief-rich-text.ts), so a frame whose stored body is still legacy
+  // plain text will differ from its own freshly-serialized value on the
+  // very first blur even with zero edits; saving anyway just upgrades it to
+  // the new format in place, which is harmless and correct rather than
+  // something worth detecting and skipping.
+  function handleBodySave(frameId: string, serialized: string) {
     startTransition(async () => {
-      await updateBriefTaskFrameBody(projectId, frameId, value);
+      await updateBriefTaskFrameBody(projectId, frameId, serialized);
     });
   }
 
@@ -1919,7 +2180,7 @@ function FrameSection({
             projectId={projectId}
             canManage={canManage}
             onLabelBlur={handleLabelBlur}
-            onBodyBlur={handleBodyBlur}
+            onBodySave={handleBodySave}
             onRemove={handleRemoveFrame}
           />
         ))}
@@ -1949,20 +2210,20 @@ function FrameRow({
   projectId,
   canManage,
   onLabelBlur,
-  onBodyBlur,
+  onBodySave,
   onRemove,
 }: {
   frame: BriefTaskFrame;
   projectId: string;
   canManage: boolean;
   onLabelBlur: (frameId: string, value: string, original: string) => void;
-  onBodyBlur: (frameId: string, value: string, original: string) => void;
+  onBodySave: (frameId: string, serialized: string) => void;
   onRemove: (frameId: string) => void;
 }) {
-  const [bodyEl, setBodyEl] = useState<HTMLInputElement | null>(null);
+  const [bodyEl, setBodyEl] = useState<HTMLDivElement | null>(null);
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-start gap-2">
       {/* group + relative wrapper: the pencil is a passive visual cue, not an
           interactive element -- it sits over the input's own right padding
           (pr-4, reserved for exactly this) so it can never overlap the
@@ -1972,7 +2233,7 @@ function FrameRow({
           is a text field" cue as desktop, rather than only mouse users. This
           is the one thing beta feedback said was missing: the input itself,
           its focus state, and blur-to-save already worked correctly. */}
-      <div className="group relative w-24 shrink-0 sm:w-28">
+      <div className="group relative w-24 shrink-0 pt-2 sm:w-28">
         <input
           defaultValue={frame.label}
           disabled={!canManage}
@@ -1983,20 +2244,21 @@ function FrameRow({
           <PencilIcon className="pointer-events-none absolute top-1/2 right-1.5 h-2.5 w-2.5 -translate-y-1/2 text-muted opacity-40 transition-opacity duration-150 group-hover:opacity-70 group-focus-within:opacity-90" />
         )}
       </div>
-      <input
-        ref={setBodyEl}
-        defaultValue={frame.body}
+      <RichTextField
+        value={frame.body}
+        onSave={(serialized) => onBodySave(frame.id, serialized)}
         disabled={!canManage}
         placeholder="Live text"
-        onBlur={(e) => onBodyBlur(frame.id, e.target.value, frame.body)}
-        className="min-w-0 flex-1 rounded-none border border-border bg-transparent px-3 py-2 text-sm focus:border-foreground focus:outline-none disabled:opacity-60"
+        onEditorRef={setBodyEl}
       />
-      <BrandWriterField projectId={projectId} field={bodyEl} disabled={!canManage} />
+      <div className="pt-2">
+        <BrandWriterField projectId={projectId} field={bodyEl} disabled={!canManage} />
+      </div>
       {canManage && (
         <button
           type="button"
           onClick={() => onRemove(frame.id)}
-          className="shrink-0 rounded-full px-1.5 text-muted transition-all duration-150 hover:bg-error/10 hover:text-error active:scale-90"
+          className="mt-2 shrink-0 rounded-full px-1.5 text-muted transition-all duration-150 hover:bg-error/10 hover:text-error active:scale-90"
         >
           ×
         </button>

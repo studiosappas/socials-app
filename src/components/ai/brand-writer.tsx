@@ -17,7 +17,23 @@ import { generateBrandCopy, type BrandWriterAlternative, type BrandWriterTurn } 
 // own recommended pattern for reactively observing a DOM node), rather than
 // `useRef`, since a `useRef`-backed value read during render (e.g. to hand
 // out a stable per-row ref from a list) trips the react-hooks/refs rule.
-export type WriterFieldElement = HTMLTextAreaElement | HTMLInputElement;
+//
+// A plain HTMLDivElement is also accepted -- Brief's frame text box is now
+// RichTextField's contentEditable div, not a plain input/textarea, but it's
+// still a single "field" this same Insert affordance should work on.
+// Inserting AI text into it always replaces the field with one plain
+// (unformatted) block of text, exactly like inserting into a plain
+// input/textarea does -- the user can still select it afterward and apply
+// Bold/Italic themselves, same as any other typed text.
+export type WriterFieldElement = HTMLTextAreaElement | HTMLInputElement | HTMLDivElement;
+
+function isPlainValueField(field: WriterFieldElement): field is HTMLTextAreaElement | HTMLInputElement {
+  return field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement;
+}
+
+function getFieldText(field: WriterFieldElement): string {
+  return isPlainValueField(field) ? field.value : (field.textContent ?? "");
+}
 
 // A plain module-level helper, not part of the component -- react-hooks'
 // stricter "immutability" rule disallows assigning a property directly on a
@@ -26,7 +42,11 @@ export type WriterFieldElement = HTMLTextAreaElement | HTMLInputElement;
 // write, not a React-owned value. Doing the actual mutation in a plain
 // function outside the component sidesteps that false positive.
 function insertIntoField(field: WriterFieldElement, text: string) {
-  field.value = text;
+  if (isPlainValueField(field)) {
+    field.value = text;
+  } else {
+    field.textContent = text;
+  }
   field.dispatchEvent(new Event("input", { bubbles: true }));
   field.dispatchEvent(new Event("change", { bubbles: true }));
   // Some fields (Brief's frame text) auto-save on blur rather than via a
@@ -63,7 +83,7 @@ export function BrandWriterField({
   useEffect(() => {
     if (!field || disabled) return;
     function handleFocus() {
-      if (!field!.value.trim()) setOpen(true);
+      if (!getFieldText(field!).trim()) setOpen(true);
     }
     field.addEventListener("focus", handleFocus);
     return () => field.removeEventListener("focus", handleFocus);
