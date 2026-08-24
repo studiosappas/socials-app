@@ -287,15 +287,21 @@ export const StoryCard = memo(function StoryCard({
       )}
 
       {/* Bulk-select circle for Move/Delete-all-at-once -- exact top-left
-          corner, same spot as Share's own selection circle. Only ever
-          rendered while bulkSelectionMode is explicitly active (entered via
-          the Share/export menu's "Select" item, stories-board.tsx) -- no
-          hover-reveal/opacity dance and no pointer-coarse-always-on
-          fallback like this used to have; both were what made every card
-          look permanently in selection mode on touch, since a coarse
-          pointer has no hover state to fall back to. Hidden during Share's
-          own selectionMode, which owns that corner as its own picker. */}
-      {canManage && !selectionMode && bulkSelectionMode && onToggleBulkSelect && (
+          corner, same spot as Share's own selection circle. Desktop keeps
+          its exact original behavior, restored as-is: the button is always
+          present (not gated by any mode), invisible at rest, revealed by
+          group-hover, and forced visible once bulkSelected regardless of
+          hover -- pure CSS, no explicit "Select" step needed there.
+          Touch has no hover state to fall back on, which is what made this
+          circle effectively always-on on mobile before (a plain
+          pointer-coarse:opacity-100, unconditional) -- now that fallback
+          only activates once bulkSelectionMode is explicitly entered (the
+          Share/export menu's "Select Items" item, stories-board.tsx),
+          so mobile stays circle-free until asked for exactly like the
+          desktop-only behavior always intended, without losing desktop's
+          own hover/click interaction at all. Hidden during Share's own
+          selectionMode, which owns that corner as its own picker. */}
+      {canManage && !selectionMode && onToggleBulkSelect && (
         <button
           type="button"
           onClick={(e) => {
@@ -304,7 +310,9 @@ export const StoryCard = memo(function StoryCard({
             onToggleBulkSelect(storyId);
           }}
           title={bulkSelected ? "Deselect" : "Select"}
-          className="absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full"
+          className={`absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 ${
+            bulkSelectionMode ? "pointer-coarse:opacity-100" : ""
+          } ${bulkSelected ? "opacity-100" : "opacity-0"}`}
         >
           {bulkSelected ? (
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">

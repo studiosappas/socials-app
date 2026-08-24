@@ -545,7 +545,14 @@ export function StoriesBoard({
         </div>
       )}
 
-      {bulkSelectionMode && (
+      {/* Shows if EITHER bulkSelectionMode is explicitly active (mobile's
+          "Select Items" entry, with nothing chosen yet) OR anything is
+          already selected (desktop's original hover+click-the-circle flow,
+          which never needed or used an explicit mode) -- restores the
+          exact original "the bar just appears once something's checked"
+          desktop behavior while still giving mobile's explicit entry point
+          an immediate, obvious way to exit. */}
+      {(bulkSelectionMode || bulkSelectedIds.size > 0) && (
         <div className="fixed inset-x-0 bottom-0 z-30 flex flex-wrap items-center justify-center gap-3 border-t border-border bg-background px-4 py-3 shadow-[0_-2px_10px_rgba(0,0,0,0.06)]">
           <span className="text-xs tracking-wide text-muted uppercase">{bulkSelectedIds.size} selected</span>
           <Button type="button" variant="secondary" radius="none" onClick={handleCancelBulkSelection}>
