@@ -164,13 +164,15 @@ export function RichTextField({
         onBlur={handleBlur}
         onInput={handleInput}
         onPaste={handlePaste}
-        // Resting: compact, close to the old single-line input's height.
-        // Focused: expands to a genuinely useful writing area. Either way,
-        // grows with content up to a sane max, then scrolls -- min-h-9/
-        // focus:min-h-32/max-h-64 is CSS-only (no JS resize logic needed;
+        // Resting: locked to a single compact row (min-h and max-h equal,
+        // overflow-hidden) -- purely visual clipping, never touches the
+        // actual content/model, so a long-content frame still LOOKS compact
+        // at rest instead of growing to fit it. Focused: expands to the
+        // real writing area, grows with content up to a sane max, then
+        // scrolls. CSS-only either way (no JS resize logic needed;
         // contentEditable already grows/scrolls like any other block box).
-        className={`min-h-9 max-h-64 min-w-0 overflow-y-auto rounded-none border border-border bg-transparent px-3 py-2 text-sm whitespace-pre-wrap transition-[min-height] duration-150 focus:border-foreground focus:outline-none disabled:opacity-60 ${
-          focused ? "min-h-32" : ""
+        className={`min-w-0 rounded-none border border-border bg-transparent px-3 py-2 text-sm whitespace-pre-wrap transition-[min-height,max-height] duration-150 focus:border-foreground focus:outline-none disabled:opacity-60 ${
+          focused ? "min-h-32 max-h-64 overflow-y-auto" : "min-h-9 max-h-9 overflow-hidden"
         }`}
       />
       {isEmpty && placeholder && (
