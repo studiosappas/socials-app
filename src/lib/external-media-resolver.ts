@@ -49,6 +49,107 @@ const MIME_EXTENSIONS: Record<string, string> = {
   "video/ogg": "ogv",
 };
 
+// Shared known-extension allowlists -- moved here (from brief.ts, which
+// originally defined its own copy) so both the classification path here and
+// brief.ts's own filename/label handling read from the SAME single list,
+// rather than two lists that could drift apart.
+export const KNOWN_IMAGE_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+  "heic",
+  "heif",
+  "bmp",
+  "tiff",
+  "tif",
+  "svg",
+  "avif",
+]);
+
+export const KNOWN_VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v", "avi", "mkv"]);
+
+// A small set of content types that mean "this is definitely binary data,
+// but the server declined to say what kind" -- some CDNs (confirmed live:
+// WeTransfer's signed CloudFront/S3 links) serve real image/video bytes
+// under one of these instead of the correct image/*|video/* type. This is
+// NOT treated as "unknown, guess" -- it only ever unlocks the filename-based
+// fallback below, which still requires a real, known media extension before
+// anything is trusted as image/video; anything else still correctly falls
+// through to the existing LINK behavior.
+const GENERIC_BINARY_CONTENT_TYPES = new Set(["binary/octet-stream", "application/octet-stream"]);
+
+export function isGenericBinaryContentType(cleanType: string): boolean {
+  return GENERIC_BINARY_CONTENT_TYPES.has(cleanType);
+}
+
+// Parses a Content-Disposition header value OR the equivalent
+// response-content-disposition query-param value some signed CDN URLs use
+// (same shape, S3/CloudFront's "override what Content-Disposition this
+// response should carry" convention) -- both are the exact same grammar, so
+// one parser handles both call sites. Prefers the RFC 5987 filename*=
+// extended form (UTF-8 percent-encoded, what browsers prefer for non-ASCII
+// names and what WeTransfer's own links use) over the plain filename="..."
+// form, per RFC 6266.
+export function extractFilenameFromDisposition(value: string | null): string | null {
+  if (!value) return null;
+  const extended = value.match(/filename\*\s*=\s*([^;]+)/i);
+  if (extended) {
+    const raw = extended[1].trim();
+    // charset'lang'value -- charset is almost always UTF-8, lang usually empty.
+    const parts = raw.split("'");
+    const encoded = parts.length >= 3 ? parts.slice(2).join("'") : raw;
+    try {
+      const decoded = decodeURIComponent(encoded);
+      if (decoded) return decoded;
+    } catch {
+      // Falls through to the plain form below.
+    }
+  }
+  const quoted = value.match(/filename\s*=\s*"([^"]+)"/i);
+  if (quoted?.[1]) return quoted[1];
+  const bare = value.match(/filename\s*=\s*([^;]+)/i);
+  if (bare?.[1]) return bare[1].trim();
+  return null;
+}
+
+function extensionFromFilename(fileName: string): string | undefined {
+  const dot = fileName.lastIndexOf(".");
+  if (dot < 0) return undefined;
+  return fileName.slice(dot + 1).toLowerCase();
+}
+
+// Only ever called once the Content-Type has already failed to classify
+// anything (isGenericBinaryContentType gated this at the call site) -- looks
+// for a REAL, known image/video extension on a filename recovered from
+// actual response/URL metadata, never from guessing at file bytes. Checks
+// the real Content-Disposition response header first (the more authoritative
+// source, when a server actually sends one), then the response-content-
+// disposition query parameter some signed URLs carry (WeTransfer's own
+// convention -- not hardcoded TO WeTransfer, just reading the same standard
+// disposition grammar from wherever it's declared).
+function classifyGenericBinaryByFilename(
+  response: Response,
+  requestUrl: string,
+): { kind: "image" | "video"; fileName: string } | null {
+  const headerFileName = extractFilenameFromDisposition(response.headers.get("content-disposition"));
+  let fileName = headerFileName;
+  if (!fileName) {
+    try {
+      fileName = extractFilenameFromDisposition(new URL(requestUrl).searchParams.get("response-content-disposition"));
+    } catch {
+      fileName = null;
+    }
+  }
+  if (!fileName) return null;
+  const ext = extensionFromFilename(fileName);
+  if (!ext) return null;
+  if (KNOWN_IMAGE_EXTENSIONS.has(ext)) return { kind: "image", fileName };
+  if (KNOWN_VIDEO_EXTENSIONS.has(ext)) return { kind: "video", fileName };
+  return null;
+}
+
 // cleanType must already be run through cleanMimeType -- no ";"-parameters,
 // already lowercased.
 export function extensionForContentType(cleanType: string): string | undefined {
@@ -280,42 +381,25 @@ function fileNameFromUrl(url: string): string {
 // the initial URL, a provider-normalized direct-asset URL, a scraped
 // og:image/og:video URL, and the root-page comparison fetch alike.
 export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExternalMedia> {
-  // TEMPORARY DIAGNOSTIC LOGGING -- remove before merge. Traces every
-  // decision point per the requested debug protocol.
-  const trace = (point: string, data: Record<string, unknown>) =>
-    console.log(`[BRIEF_LINK_TRACE] ${point}`, JSON.stringify(data));
-  trace("start", { rawUrl });
-
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    trace("invalid_url", {});
     return { kind: "error", message: "That doesn't look like a valid URL." };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    trace("unsupported_protocol", { protocol: parsed.protocol });
     return { kind: "error", message: "Only http/https URLs are supported." };
   }
 
   const normalized = normalizeProviderUrl(parsed);
-  trace("normalized_url", { normalized: normalized.toString() });
   const first = await safeFetch(normalized.toString());
   if (!first.ok) {
-    trace("safeFetch_failed", { reason: first.error.reason, host: "host" in first.error ? first.error.host : undefined });
     if (first.error.reason === "blocked_host") {
       return { kind: "error", message: "This link isn't allowed." };
     }
     return { kind: "link", url: rawUrl };
   }
-  trace("safeFetch_ok", {
-    status: first.response.status,
-    finalUrl: first.finalUrl,
-    contentType: first.response.headers.get("content-type"),
-    contentLength: first.response.headers.get("content-length"),
-  });
   if (!first.response.ok) {
-    trace("response_not_ok", { status: first.response.status });
     // A provider-normalized URL that 403/404s (e.g. Drive's uc?download for
     // a restricted file, or a dead Dropbox link) means "not accessible,"
     // not "this URL is broken" -- the ORIGINAL url is still a perfectly
@@ -325,47 +409,61 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
 
   const contentType = cleanMimeType(first.response.headers.get("content-type") ?? "");
   const contentLengthHeader = first.response.headers.get("content-length");
-  trace("content_type_resolved", { rawHeader: first.response.headers.get("content-type"), cleaned: contentType });
   if (contentLengthHeader && Number(contentLengthHeader) > MAX_FETCH_BYTES) {
-    trace("content_length_exceeded", { contentLengthHeader, MAX_FETCH_BYTES });
     return { kind: "link", url: rawUrl };
   }
 
   if (contentType.startsWith("image/") || contentType.startsWith("video/")) {
     const buffer = await readBodyWithLimit(first.response, MAX_FETCH_BYTES);
-    trace("direct_media_branch", { contentType, bufferBytes: buffer?.length ?? null });
     if (!buffer) return { kind: "link", url: rawUrl };
     const kind = contentType.startsWith("video/") ? "video" : "image";
-    trace("direct_media_success", { kind });
     return { kind, buffer, contentType, fileName: fileNameFromUrl(first.finalUrl), label: null };
   }
 
-  if (!contentType.startsWith("text/html")) {
-    trace("not_html_not_media_fallback_link", { contentType });
-    // Some other content type (application/octet-stream, pdf, etc.) --
-    // not something this pass classifies as image/video, keep as a link
-    // rather than guessing.
+  // Content-Type didn't say image/video -- but a generic binary type
+  // (confirmed live: WeTransfer's signed CloudFront/S3 links) can still be
+  // real image/video bytes whose actual type the server just declined to
+  // name. Only trusted when a REAL, known media extension can be recovered
+  // from actual disposition metadata (never guessed from bytes) -- anything
+  // that doesn't clear that bar still falls through to the ordinary link
+  // fallback below, unchanged.
+  if (isGenericBinaryContentType(contentType)) {
+    const byFilename = classifyGenericBinaryByFilename(first.response, first.finalUrl);
+    if (byFilename) {
+      const buffer = await readBodyWithLimit(first.response, MAX_FETCH_BYTES);
+      if (buffer) {
+        return {
+          kind: byFilename.kind,
+          buffer,
+          contentType,
+          fileName: byFilename.fileName,
+          label: null,
+        };
+      }
+    }
     return { kind: "link", url: rawUrl };
   }
-  trace("html_branch_entered", {});
+
+  if (!contentType.startsWith("text/html")) {
+    // Some other content type (application/pdf, etc.) -- not something
+    // this pass classifies as image/video, keep as a link rather than
+    // guessing.
+    return { kind: "link", url: rawUrl };
+  }
 
   // An HTML share/preview page -- look for the page's OWN declared media,
   // never a generic first <img> guess.
   const html = await first.response.text();
   const scrapedTitle = extractPageTitle(html);
-  trace("html_scraped", { htmlLength: html.length, scrapedTitle });
 
   const declaredVideoUrl = extractDeclaredVideoUrl(html, first.finalUrl);
-  trace("declared_video_url", { declaredVideoUrl });
   if (declaredVideoUrl) {
     const videoResult = await safeFetch(declaredVideoUrl);
     if (videoResult.ok && videoResult.response.ok) {
       const videoType = cleanMimeType(videoResult.response.headers.get("content-type") ?? "");
-      trace("declared_video_fetched", { status: videoResult.response.status, videoType });
       if (videoType.startsWith("video/")) {
         const buffer = await readBodyWithLimit(videoResult.response, MAX_FETCH_BYTES);
         if (buffer) {
-          trace("declared_video_success", {});
           return {
             kind: "video",
             buffer,
@@ -375,25 +473,19 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
           };
         }
       }
-    } else {
-      trace("declared_video_fetch_failed", { ok: videoResult.ok });
     }
   }
 
   const declaredImageUrl = extractDeclaredImageUrl(html, first.finalUrl);
-  trace("declared_image_url", { declaredImageUrl });
   if (declaredImageUrl) {
     const isGeneric = await isLikelyGenericSiteImage(declaredImageUrl, first.finalUrl);
-    trace("is_likely_generic_site_image", { isGeneric });
     if (!isGeneric) {
       const imageResult = await safeFetch(declaredImageUrl);
       if (imageResult.ok && imageResult.response.ok) {
         const imageType = cleanMimeType(imageResult.response.headers.get("content-type") ?? "");
-        trace("declared_image_fetched", { status: imageResult.response.status, imageType });
         if (imageType.startsWith("image/")) {
           const buffer = await readBodyWithLimit(imageResult.response, MAX_FETCH_BYTES);
           if (buffer) {
-            trace("declared_image_success", {});
             return {
               kind: "image",
               buffer,
@@ -403,12 +495,9 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
             };
           }
         }
-      } else {
-        trace("declared_image_fetch_failed", { ok: imageResult.ok });
       }
     }
   }
-  trace("final_fallback_link", {});
 
   return { kind: "link", url: rawUrl };
 }

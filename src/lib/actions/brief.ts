@@ -9,7 +9,12 @@ import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
-import { resolveExternalMedia, extensionForContentType } from "@/lib/external-media-resolver";
+import {
+  resolveExternalMedia,
+  extensionForContentType,
+  KNOWN_IMAGE_EXTENSIONS,
+  KNOWN_VIDEO_EXTENSIONS,
+} from "@/lib/external-media-resolver";
 import { plainTextFromBody } from "@/lib/brief-rich-text";
 import type {
   BriefFrameSection,
@@ -39,23 +44,6 @@ const DEFAULT_FRAME_LABELS = ["Cover", "Body 1", "Body 2", "Closure"];
 //   3. A clean fallback ("Image") when neither exists -- never a generic
 //      browser-assigned name like "image.png", "blob", or a UUID.
 // ---------------------------------------------------------------------------
-
-const KNOWN_IMAGE_EXTENSIONS = new Set([
-  "jpg",
-  "jpeg",
-  "png",
-  "gif",
-  "webp",
-  "heic",
-  "heif",
-  "bmp",
-  "tiff",
-  "tif",
-  "svg",
-  "avif",
-]);
-
-const KNOWN_VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v", "avi", "mkv"]);
 
 // Generic/camera/clipboard-style names carry no real information -- IMG_1234,
 // image.png, blob, a bare UUID/hash. Prettifying one of these into "Img
@@ -423,10 +411,7 @@ export async function addBriefTaskLink(
   const trimmedUrl = url.trim();
   if (!trimmedUrl) return { success: false, message: "URL is required." };
 
-  // TEMPORARY DIAGNOSTIC LOGGING -- remove before merge.
-  console.log("[BRIEF_LINK_TRACE] addBriefTaskLink called", JSON.stringify({ trimmedUrl }));
   const resolved = await resolveExternalMedia(trimmedUrl);
-  console.log("[BRIEF_LINK_TRACE] resolveExternalMedia returned", JSON.stringify({ kind: resolved.kind }));
 
   if (resolved.kind === "error") {
     return { success: false, message: resolved.message };
@@ -445,7 +430,6 @@ export async function addBriefTaskLink(
       resolved.kind,
       resolved.label,
     );
-    console.log("[BRIEF_LINK_TRACE] createBriefMediaItem result", JSON.stringify({ success: result.success, message: result.message, kind: resolved.kind }));
     return { ...result, kind: resolved.kind };
   }
 
@@ -454,7 +438,6 @@ export async function addBriefTaskLink(
   // what gets saved (see its own comment on preserving the original on any
   // fallback).
   const linkResult = await createBriefLinkItem(projectId, taskId, section, resolved.url, notes, position);
-  console.log("[BRIEF_LINK_TRACE] createBriefLinkItem result (fell back to LINK)", JSON.stringify({ success: linkResult.success }));
   return { ...linkResult, kind: "link" };
 }
 
