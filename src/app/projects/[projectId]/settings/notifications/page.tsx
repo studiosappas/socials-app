@@ -1,5 +1,6 @@
 import { getSettingsAccess } from "@/lib/settings-access";
 import { NotificationsPanel } from "./notifications-panel";
+import { AccessRestricted } from "../../access-restricted";
 
 export default async function NotificationsPage({
   params,
@@ -7,7 +8,11 @@ export default async function NotificationsPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  const { supabase, user } = await getSettingsAccess(projectId);
+  const { supabase, user, hasSettingsAccess } = await getSettingsAccess(projectId);
+
+  if (!hasSettingsAccess) {
+    return <AccessRestricted />;
+  }
 
   const { data: membership } = await supabase
     .from("project_members")

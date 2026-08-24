@@ -1,9 +1,16 @@
 import type { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import type { ProjectRole } from "@/types/database";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
-export type NavProject = { id: string; name: string; avatarUrl: string | null };
+export type NavProject = {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+  role: ProjectRole;
+  customPermissions: string[] | null;
+};
 
 // Shared by AppHeader's project-switcher dropdown AND its current-project
 // avatar/hover-menu -- one fetch covers both, since "current project" is
@@ -21,21 +28,22 @@ export async function getUserProjectsForNav(
 ): Promise<NavProject[]> {
   const { data: memberships } = await supabase
     .from("project_members")
-    .select("projects(id, name, profile_photo_path, created_at)")
+    .select("role, custom_permissions, projects(id, name, profile_photo_path, created_at)")
     .eq("user_id", userId);
 
-  const projects = (memberships ?? [])
-    .map((m) => m.projects)
-    .filter((p): p is NonNullable<typeof p> => Boolean(p?.id))
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const rows = (memberships ?? [])
+    .filter((m): m is typeof m & { projects: NonNullable<(typeof m)["projects"]> } => Boolean(m.projects?.id))
+    .sort((a, b) => (a.projects.created_at < b.projects.created_at ? 1 : -1));
 
-  const paths = projects.map((p) => p.profile_photo_path).filter((p): p is string => Boolean(p));
+  const paths = rows.map((m) => m.projects.profile_photo_path).filter((p): p is string => Boolean(p));
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", paths);
 
-  return projects.map((p) => ({
-    id: p.id,
-    name: p.name,
-    avatarUrl: p.profile_photo_path ? urlByPath.get(p.profile_photo_path) ?? null : null,
+  return rows.map((m) => ({
+    id: m.projects.id,
+    name: m.projects.name,
+    avatarUrl: m.projects.profile_photo_path ? urlByPath.get(m.projects.profile_photo_path) ?? null : null,
+    role: m.role,
+    customPermissions: m.custom_permissions ?? null,
   }));
 }
 

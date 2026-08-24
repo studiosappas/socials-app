@@ -1,5 +1,6 @@
 import { getSettingsAccess } from "@/lib/settings-access";
 import { ProjectInformationPanel } from "./project-information-panel";
+import { AccessRestricted } from "../access-restricted";
 
 export default async function ProjectInformationPage({
   params,
@@ -7,7 +8,11 @@ export default async function ProjectInformationPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  const { supabase, canManage } = await getSettingsAccess(projectId);
+  const { supabase, canManage, hasSettingsAccess } = await getSettingsAccess(projectId);
+
+  if (!hasSettingsAccess) {
+    return <AccessRestricted />;
+  }
 
   const [{ data: project }, { data: ownerRow }] = await Promise.all([
     supabase

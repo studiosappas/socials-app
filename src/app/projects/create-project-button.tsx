@@ -7,24 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Avatar } from "@/components/ui/avatar";
 import { useToast } from "@/lib/hooks/use-toast";
 import { createProjectWithSetup, setProjectAvatar } from "@/lib/actions/projects";
+import { INVITABLE_ROLES, ROLE_DESCRIPTION, ROLE_LABEL } from "@/lib/role-permissions";
 import type { ProjectRole } from "@/types/database";
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
 const fieldClass =
   "w-full border-0 border-b border-border bg-transparent py-1.5 text-sm focus:border-foreground focus:outline-none";
-
-// Same 4 invitable roles as Project Settings > Team (members.ts's own
-// VALID_ROLES) -- owner is granted only via the on_project_created trigger,
-// 'designer' is legacy-only, neither belongs in a fresh invite here.
-const ROLE_OPTIONS: ProjectRole[] = ["admin", "editor", "viewer", "client"];
-const ROLE_LABEL: Record<ProjectRole, string> = {
-  owner: "Owner",
-  admin: "Admin",
-  designer: "Editor",
-  editor: "Editor",
-  viewer: "Viewer",
-  client: "Client",
-};
 
 type PersonRow = { key: number; email: string; role: ProjectRole };
 
@@ -194,35 +182,38 @@ export function CreateProjectButton({
             </div>
 
             {people.map((person) => (
-              <div key={person.key} className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <input
-                  type="email"
-                  value={person.email}
-                  onChange={(e) => updatePerson(person.key, { email: e.target.value })}
-                  placeholder="Email address"
-                  className={`${fieldClass} flex-1`}
-                />
-                <div className="flex items-center gap-2">
-                  <select
-                    value={person.role}
-                    onChange={(e) => updatePerson(person.key, { role: e.target.value as ProjectRole })}
-                    className={`${fieldClass} sm:w-28`}
-                  >
-                    {ROLE_OPTIONS.map((r) => (
-                      <option key={r} value={r}>
-                        {ROLE_LABEL[r]}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => removePerson(person.key)}
-                    title="Remove"
-                    className="shrink-0 text-xs text-muted transition-colors duration-150 hover:text-error"
-                  >
-                    ×
-                  </button>
+              <div key={person.key} className="flex flex-col gap-1">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <input
+                    type="email"
+                    value={person.email}
+                    onChange={(e) => updatePerson(person.key, { email: e.target.value })}
+                    placeholder="Email address"
+                    className={`${fieldClass} flex-1`}
+                  />
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={person.role}
+                      onChange={(e) => updatePerson(person.key, { role: e.target.value as ProjectRole })}
+                      className={`${fieldClass} sm:w-28`}
+                    >
+                      {INVITABLE_ROLES.map((r) => (
+                        <option key={r} value={r}>
+                          {ROLE_LABEL[r]}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => removePerson(person.key)}
+                      title="Remove"
+                      className="shrink-0 text-xs text-muted transition-colors duration-150 hover:text-error"
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
+                <span className="text-xs text-muted">{ROLE_DESCRIPTION[person.role]}</span>
               </div>
             ))}
 

@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { getBrandMoodboard } from "@/lib/data/brand-moodboard";
+import { hasPagePermission } from "@/lib/role-permissions";
 import { BriefBoard, type BriefTaskData } from "./brief-board";
+import { AccessRestricted } from "../access-restricted";
 
 export default async function BriefPage({
   params,
@@ -25,7 +27,7 @@ export default async function BriefPage({
   const [{ data: membership }, { data: tasks }] = await Promise.all([
     supabase
       .from("project_members")
-      .select("role")
+      .select("role, custom_permissions")
       .eq("project_id", projectId)
       .eq("user_id", user!.id)
       .single(),
@@ -36,7 +38,11 @@ export default async function BriefPage({
       .order("position"),
   ]);
 
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "brief")) {
+    return <AccessRestricted />;
+  }
+
+  const canManage = membership.role === "owner" || membership.role === "admin";
   const taskIds = (tasks ?? []).map((t) => t.id);
 
   // Fetched as flat, independent queries (rather than a nested embed) so a

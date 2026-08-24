@@ -63,7 +63,11 @@ export function AppHeader({
           <NavNotificationBell items={notificationItems} unreadCount={unreadCount} />
           <div className="flex items-center gap-2">
             {currentProject && <NavProjectSwitcher projects={projects} currentProject={currentProject} />}
-            <NavProjectMenu projectId={currentProjectId} />
+            <NavProjectMenu
+              projectId={currentProjectId}
+              role={currentProject?.role}
+              customPermissions={currentProject?.customPermissions}
+            />
           </div>
           {/* /tasks, not /projects/todo -- a static route sharing the same
               path depth/prefix as the dynamic /projects/[projectId] segment

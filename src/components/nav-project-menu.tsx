@@ -4,21 +4,41 @@ import { useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { getEffectivePermissions, type PermissionPageKey } from "@/lib/role-permissions";
+import type { ProjectRole } from "@/types/database";
 
-const PROJECT_PAGES = [
-  { href: "", label: "Overview" },
-  { href: "grid", label: "Grid" },
-  { href: "calendar", label: "Calendar" },
-  { href: "stories", label: "Content" },
-  { href: "assets", label: "Assets" },
-  { href: "brief", label: "Brief" },
-  { href: "settings", label: "Settings" },
+// href/key stay `null` for Overview (the bare project root, e.g.
+// /projects/abc) since it has no path segment of its own to match a
+// PermissionPageKey against by name -- handled by its own explicit "overview"
+// key below instead.
+const PROJECT_PAGES: { href: string; label: string; key: PermissionPageKey }[] = [
+  { href: "", label: "Overview", key: "overview" },
+  { href: "grid", label: "Grid", key: "grid" },
+  { href: "calendar", label: "Calendar", key: "calendar" },
+  { href: "stories", label: "Content", key: "stories" },
+  { href: "assets", label: "Assets", key: "assets" },
+  { href: "brief", label: "Brief", key: "brief" },
+  { href: "settings", label: "Settings", key: "settings" },
 ];
 
 const CLOSE_DELAY_MS = 120;
 
-export function NavProjectMenu({ projectId }: { projectId: string | null }) {
+export function NavProjectMenu({
+  projectId,
+  role,
+  customPermissions,
+}: {
+  projectId: string | null;
+  // Both null for a render outside any project (nothing to filter) -- the
+  // trigger falls back to the plain "Projects" link in that case anyway, so
+  // PROJECT_PAGES is never actually consulted then.
+  role?: ProjectRole | null;
+  customPermissions?: string[] | null;
+}) {
   const pathname = usePathname();
+  const visiblePages = role
+    ? PROJECT_PAGES.filter((page) => getEffectivePermissions(role, customPermissions).includes(page.key))
+    : PROJECT_PAGES;
   const [open, setOpen] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Closes on an outside tap/click -- the only way to dismiss on touch,
@@ -121,7 +141,7 @@ export function NavProjectMenu({ projectId }: { projectId: string | null }) {
           }`}
         >
           <div className="w-44 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background py-1 shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
-            {PROJECT_PAGES.map((page) => {
+            {visiblePages.map((page) => {
               const href = page.href ? `${base}/${page.href}` : base;
               const active = page.href ? pathname.startsWith(href) : pathname === base;
               return (

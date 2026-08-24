@@ -1,4 +1,5 @@
 import { getSettingsAccess } from "@/lib/settings-access";
+import { AccessRestricted } from "../../access-restricted";
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
 
@@ -22,7 +23,11 @@ export default async function ActivityLogPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  const { supabase } = await getSettingsAccess(projectId);
+  const { supabase, hasSettingsAccess } = await getSettingsAccess(projectId);
+
+  if (!hasSettingsAccess) {
+    return <AccessRestricted />;
+  }
 
   // Best-effort feed (see lib/activity-log.ts) -- isolated query since
   // activity_log may not exist yet on a not-yet-migrated database.

@@ -2,7 +2,9 @@ import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { getShareLinksData } from "@/lib/data/share-links";
 import { getCachedSignedUrl, getCachedSignedUrls } from "@/lib/signed-url-cache";
+import { hasPagePermission } from "@/lib/role-permissions";
 import { GridBoard, type GridBoardRow, type MediaFolder, type MediaLibraryItem } from "./grid-board";
+import { AccessRestricted } from "../access-restricted";
 
 export default async function GridPage({
   params,
@@ -18,12 +20,16 @@ export default async function GridPage({
 
   const { data: membership } = await supabase
     .from("project_members")
-    .select("role")
+    .select("role, custom_permissions")
     .eq("project_id", projectId)
     .eq("user_id", user!.id)
     .single();
 
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "grid")) {
+    return <AccessRestricted />;
+  }
+
+  const canManage = membership.role === "owner" || membership.role === "admin";
 
   const { data: project } = await supabase
     .from("projects")

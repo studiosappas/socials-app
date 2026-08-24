@@ -1,5 +1,6 @@
 import { getSettingsAccess } from "@/lib/settings-access";
 import { TeamPanel } from "./team-panel";
+import { AccessRestricted } from "../../access-restricted";
 
 export default async function TeamPermissionsPage({
   params,
@@ -7,7 +8,11 @@ export default async function TeamPermissionsPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  const { supabase, canManage, isOwner, user } = await getSettingsAccess(projectId);
+  const { supabase, canManage, isOwner, user, hasSettingsAccess } = await getSettingsAccess(projectId);
+
+  if (!hasSettingsAccess) {
+    return <AccessRestricted />;
+  }
 
   // Base membership + name/avatar first, using only long-established
   // columns -- this is what every other row on the page depends on, so it
