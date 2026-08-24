@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useState, useTransition } from "react";
+import { memo, useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteStory, moveStoryToFolder } from "@/lib/actions/stories";
@@ -461,6 +461,8 @@ function AssetPreviewModal({
   const [index, setIndex] = useState(initialIndex);
   const [downloading, setDownloading] = useState(false);
   const file = files[index];
+  const trackRef = useRef<HTMLDivElement>(null);
+  const settleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -471,6 +473,37 @@ function AssetPreviewModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose, files.length]);
+
+  // Keeps the scroll-snap track (the actual finger-swipe surface, below) in
+  // sync whenever `index` changes for a reason OTHER than the user's own
+  // swipe -- the Prev/Next arrows and the keyboard handler above both still
+  // just set `index`, same as before this track existed. Also runs once on
+  // mount, which is a harmless no-op scroll to the already-correct position.
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    el.scrollTo({ left: index * el.clientWidth, behavior: "smooth" });
+  }, [index]);
+
+  // The reverse direction: a real finger swipe moves scrollLeft natively
+  // (CSS scroll-snap, no JS involved in the gesture itself) and this is
+  // what notices where it landed and updates `index` to match, once the
+  // gesture has actually settled -- not on every scroll tick mid-drag,
+  // which would fight the in-progress gesture by immediately re-triggering
+  // the programmatic scrollTo effect above at a stale target.
+  function handleTrackScroll() {
+    if (settleTimeoutRef.current) clearTimeout(settleTimeoutRef.current);
+    settleTimeoutRef.current = setTimeout(() => {
+      const el = trackRef.current;
+      if (!el || el.clientWidth === 0) return;
+      const nearest = Math.min(Math.max(Math.round(el.scrollLeft / el.clientWidth), 0), files.length - 1);
+      setIndex((prev) => (prev === nearest ? prev : nearest));
+    }, 100);
+  }
+
+  useEffect(() => () => {
+    if (settleTimeoutRef.current) clearTimeout(settleTimeoutRef.current);
+  }, []);
 
   if (!file) return null;
 
@@ -532,7 +565,7 @@ function AssetPreviewModal({
         </svg>
       </button>
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center px-4 sm:px-16">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center">
         {files.length > 1 && (
           <>
             <button
@@ -558,38 +591,61 @@ function AssetPreviewModal({
           </>
         )}
 
-        {/* Keyed by index, not file.url -- the url is a signed URL that gets
-            a new token every time it's re-signed even though the underlying
-            file didn't change, so keying by it forced a full remount (video
-            restart/image flash) on every unrelated background revalidation,
-            not just on an actual Prev/Next navigation. index is stable for
-            "which file is this" across re-signs, and still changes exactly
-            when the user navigates to a different file. */}
-        {file.mediaType === "video" ? (
-          <video
-            key={index}
-            src={file.url}
-            controls
-            playsInline
-            autoPlay
-            className="max-h-[86dvh] max-w-[92vw] object-contain"
-          />
-        ) : file.mediaType === "pdf" ? (
-          // The browser's own native PDF viewer (same one a direct link to
-          // a .pdf opens in a new tab) -- no client-side decoding/rendering
-          // of our own, and the original file is what's embedded, never a
-          // rasterized substitute, so page 2+ and text selection/search
-          // still work exactly like opening the PDF directly would.
-          <embed
-            key={index}
-            src={file.url}
-            type="application/pdf"
-            className="h-[86dvh] w-[92vw] max-w-4xl rounded bg-white"
-          />
-        ) : (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img key={index} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
-        )}
+        {/* Native horizontal scroll-snap track, Instagram-carousel-style --
+            every file is a full-width slide sitting side by side; a finger
+            swipe is the browser's own touch-scroll (no custom gesture/touch
+            handlers of our own to fight or get wrong), and CSS scroll-snap
+            settles it cleanly on a slide boundary every time. The Prev/Next
+            arrows above and the keyboard handler still just set `index` --
+            the effect above translates that into a smooth programmatic
+            scroll here, so all three input methods (swipe, arrows, keyboard)
+            drive the exact same state. overscroll-x-contain keeps a swipe
+            that runs out of slides from handing off to whatever's behind
+            this fixed full-screen modal; this axis is independent of page
+            vertical scroll, which this modal doesn't use and doesn't touch. */}
+        <div
+          ref={trackRef}
+          onScroll={handleTrackScroll}
+          className="flex h-full w-full snap-x snap-mandatory overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {files.map((f, i) => (
+            // Keyed by position, not f.url -- the url is a signed URL that
+            // gets a new token every time it's re-signed even though the
+            // underlying file didn't change, so keying by it forced a full
+            // remount (video restart/image flash) on every unrelated
+            // background revalidation. Position is stable for "which file is
+            // this" across re-signs.
+            <div
+              key={i}
+              className="flex h-full w-full shrink-0 snap-center items-center justify-center px-4 sm:px-16"
+            >
+              {f.mediaType === "video" ? (
+                <video
+                  src={f.url}
+                  controls
+                  playsInline
+                  // Only the currently-active slide autoplays -- every file
+                  // is mounted at once now (scroll-snap needs every slide
+                  // present to swipe between), so an unconditional autoPlay
+                  // here would start every video in the item simultaneously.
+                  autoPlay={i === index}
+                  className="max-h-[86dvh] max-w-[92vw] object-contain"
+                />
+              ) : f.mediaType === "pdf" ? (
+                // The browser's own native PDF viewer (same one a direct
+                // link to a .pdf opens in a new tab) -- no client-side
+                // decoding/rendering of our own, and the original file is
+                // what's embedded, never a rasterized substitute, so page 2+
+                // and text selection/search still work exactly like opening
+                // the PDF directly would.
+                <embed src={f.url} type="application/pdf" className="h-[86dvh] w-[92vw] max-w-4xl rounded bg-white" />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={f.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="flex shrink-0 flex-col items-center gap-1 pb-6">
