@@ -55,7 +55,7 @@ export type AssetType =
 // real enum so a future integration can flip a row through these states
 // without a schema change.
 export type AssetCollectionAiStatus = "not_configured" | "indexing" | "analyzed" | "error";
-export type BriefItemKind = "link" | "image";
+export type BriefItemKind = "link" | "image" | "video";
 export type BriefFrameSection = "frames" | "text";
 export type BrandMoodboardCategory =
   | "logo"
@@ -524,6 +524,7 @@ export interface Database {
           original_storage_path: string;
           preview_storage_path: string | null;
           annotation_json: object | null;
+          poster_storage_path: string | null;
           created_at: string;
         };
         Insert: {
@@ -531,10 +532,12 @@ export interface Database {
           original_storage_path: string;
           preview_storage_path?: string | null;
           annotation_json?: object | null;
+          poster_storage_path?: string | null;
         };
         Update: {
           preview_storage_path?: string | null;
           annotation_json?: object | null;
+          poster_storage_path?: string | null;
         };
         Relationships: [];
       };

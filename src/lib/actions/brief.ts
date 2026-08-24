@@ -9,6 +9,8 @@ import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
+import { resolveExternalMedia } from "@/lib/external-media-resolver";
+import { plainTextFromBody } from "@/lib/brief-rich-text";
 import type {
   BriefFrameSection,
   BriefItemKind,
@@ -24,7 +26,7 @@ const DEFAULT_FRAME_LABELS = ["Cover", "Body 1", "Body 2", "Closure"];
 // Image/product naming.
 //
 // There is no reliable way to know a "product name" for an arbitrary pasted
-// or uploaded image -- see insertBriefImageItem's own comment. What IS
+// or uploaded image/video -- see insertBriefMediaItem's own comment. What IS
 // available and worth using well:
 //   1. A page's own declared title (og:title/twitter:title/<title>) when an
 //      image was added via the "Link" field and we had to scrape a webpage
@@ -53,6 +55,8 @@ const KNOWN_IMAGE_EXTENSIONS = new Set([
   "avif",
 ]);
 
+const KNOWN_VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v", "avi", "mkv"]);
+
 // Generic/camera/clipboard-style names carry no real information -- IMG_1234,
 // image.png, blob, a bare UUID/hash. Prettifying one of these into "Img
 // 1234" would LOOK like a real name without being one, which is exactly the
@@ -75,14 +79,14 @@ const GENERIC_NAME_PATTERNS = [
   /^[0-9a-f]{16,}$/i, // long hex hash
 ];
 
-function stripKnownImageExtension(name: string): string {
+function stripKnownMediaExtension(name: string): string {
   const dot = name.lastIndexOf(".");
   if (dot < 0) return name;
-  // Only strips a KNOWN image extension, never just "whatever's after the
-  // last dot" -- a scraped page title like "Necklace by J.Crew" has a dot
-  // too, and naively slicing at lastIndexOf(".") would mangle it.
+  // Only strips a KNOWN image/video extension, never just "whatever's after
+  // the last dot" -- a scraped page title like "Necklace by J.Crew" has a
+  // dot too, and naively slicing at lastIndexOf(".") would mangle it.
   const ext = name.slice(dot + 1).toLowerCase();
-  return KNOWN_IMAGE_EXTENSIONS.has(ext) ? name.slice(0, dot) : name;
+  return KNOWN_IMAGE_EXTENSIONS.has(ext) || KNOWN_VIDEO_EXTENSIONS.has(ext) ? name.slice(0, dot) : name;
 }
 
 function isMeaningfulName(baseName: string): boolean {
@@ -99,7 +103,7 @@ function isMeaningfulName(baseName: string): boolean {
 // raw source name through, so the naming hierarchy only has to be right
 // here, not duplicated per caller.
 function prettifyLabel(rawName: string, fallbackLabel = "Image"): string {
-  const withoutExt = stripKnownImageExtension(rawName);
+  const withoutExt = stripKnownMediaExtension(rawName);
   if (!isMeaningfulName(withoutExt)) return fallbackLabel;
   const spaced = withoutExt
     .replace(/[-_+]+/g, " ")
@@ -110,45 +114,6 @@ function prettifyLabel(rawName: string, fallbackLabel = "Image"): string {
     .split(" ")
     .map((word) => (word.length > 0 ? word[0].toUpperCase() + word.slice(1) : word))
     .join(" ");
-}
-
-const HTML_ENTITIES: Record<string, string> = {
-  "&amp;": "&",
-  "&lt;": "<",
-  "&gt;": ">",
-  "&quot;": '"',
-  "&#39;": "'",
-  "&apos;": "'",
-  "&nbsp;": " ",
-};
-
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-    .replace(/&amp;|&lt;|&gt;|&quot;|&#39;|&apos;|&nbsp;/g, (entity) => HTML_ENTITIES[entity] ?? entity);
-}
-
-// og:title/twitter:title first (a page's own declared social-share title --
-// e-commerce product pages commonly set this to the actual product name),
-// falling back to the plain <title> tag. Capped at a sane length since a
-// page's <title> can be a long "Product Name | Category | Store Name |
-// Free Shipping" string -- still better than nothing, but not allowed to
-// balloon into something absurd as an item label.
-function extractPageTitle(html: string): string | null {
-  const patterns = [
-    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i,
-    /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:title["']/i,
-    /<title[^>]*>([^<]+)<\/title>/i,
-  ];
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (!match?.[1]) continue;
-    const decoded = decodeHtmlEntities(match[1]).trim();
-    if (decoded && decoded.length <= 120) return decoded;
-  }
-  return null;
 }
 
 const BRIEF_STATUS_LABEL: Record<BriefTaskStatus, string> = {
@@ -284,15 +249,16 @@ export async function deleteBriefTask(projectId: string, taskId: string): Promis
   return { success: true };
 }
 
-// Shared by every path that creates an "image" brief_task_item, once the
-// bytes already live at `storagePath` in the brief-media bucket -- a real
-// upload (addBriefTaskImage, direct browser-to-Storage, see below) and a
-// pasted URL (addBriefTaskLink, createBriefImageItem's own server-side
-// fetch-then-upload) end up with the exact same brief_attachments +
-// brief_task_items rows, so they're indistinguishable afterward: same
-// editable object, same "Edit Image" flow, no link-shaped item ever
-// created for either path.
-async function insertBriefImageItem(
+// Shared by every path that creates an "image" or "video" brief_task_item,
+// once the bytes already live at `storagePath` in the brief-media bucket --
+// a real upload (addBriefTaskImage/addBriefTaskVideo, direct
+// browser-to-Storage, see below) and a pasted URL (addBriefTaskLink,
+// createBriefMediaItem's own server-side fetch-then-upload) end up with the
+// exact same brief_attachments + brief_task_items shape, so they're
+// indistinguishable afterward: same editable object (for images -- "Edit
+// Image" stays image-only, no video-editing flow exists), no link-shaped
+// item ever created for either path.
+async function insertBriefMediaItem(
   projectId: string,
   taskId: string,
   section: BriefItemSection,
@@ -300,12 +266,14 @@ async function insertBriefImageItem(
   position: number,
   storagePath: string,
   fileName: string,
+  kind: "image" | "video",
+  posterStoragePath: string | null,
 ): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
   const supabase = await createClient();
 
   const { data: attachment, error: attachmentError } = await supabase
     .from("brief_attachments")
-    .insert({ project_id: projectId, original_storage_path: storagePath })
+    .insert({ project_id: projectId, original_storage_path: storagePath, poster_storage_path: posterStoragePath })
     .select("id")
     .single();
   if (attachmentError || !attachment) {
@@ -317,14 +285,14 @@ async function insertBriefImageItem(
   // File.name, a scraped page title, or a URL's last path segment), and
   // this is the one place that turns it into a clean, human item label
   // rather than showing a raw filename/slug/generic browser-assigned name.
-  const label = prettifyLabel(fileName);
+  const label = prettifyLabel(fileName, kind === "video" ? "Video" : "Image");
 
   const { data: item, error: itemError } = await supabase
     .from("brief_task_items")
     .insert({
       task_id: taskId,
       section,
-      kind: "image",
+      kind,
       label,
       notes: notes.trim(),
       attachment_id: attachment.id,
@@ -335,19 +303,27 @@ async function insertBriefImageItem(
   if (itemError) return { success: false, message: itemError.message };
 
   // Not revalidating -- every caller chain (addBriefTaskImage,
-  // addBriefTaskLink's image path) ends at a client handler that already
-  // calls router.refresh() itself, since no optimistic item insertion
-  // exists yet.
+  // addBriefTaskVideo, addBriefTaskLink's image/video path) ends at a
+  // client handler that already calls router.refresh() itself, since no
+  // optimistic item insertion exists yet.
   return { success: true, itemId: item?.id, attachmentId: attachment.id, label };
 }
 
 // Only reached from addBriefTaskLink now -- fetching an arbitrary external
 // URL happens server-side by necessity (there's no client File involved at
 // all), so this is the one real upload path that's still an exception to
-// "the browser uploads direct to Storage." The bytes here are always
-// small/moderate (a single web image), nowhere near Vercel's Function
-// request-body limit.
-async function createBriefImageItem(
+// "the browser uploads direct to Storage." resolveExternalMedia already
+// caps the fetched size at the same ceiling a direct upload allows, so this
+// is never a surprise multi-hundred-MB body.
+//
+// No poster is generated for a video resolved this way -- poster generation
+// (video-poster.ts) needs a real browser <video>/<canvas>, which doesn't
+// exist in this server environment, and there's no ffmpeg/server-side video
+// decoder in this app to substitute. The video item still saves and plays
+// correctly; the chip just falls back to a generic video icon instead of a
+// real poster frame, exactly like a poster-generation failure on a direct
+// upload does (see addBriefTaskVideo).
+async function createBriefMediaItem(
   projectId: string,
   taskId: string,
   section: BriefItemSection,
@@ -356,7 +332,8 @@ async function createBriefImageItem(
   fileBytes: Buffer,
   contentType: string,
   fileName: string,
-  // A scraped page title (og:title/twitter:title/<title>), when addBriefTaskLink
+  kind: "image" | "video",
+  // A scraped page title (og:title/twitter:title), when addBriefTaskLink
   // had one -- kept as a SEPARATE parameter from fileName rather than reused
   // in its place, since fileName still has to stay filename-shaped here
   // (it's what derives the storage path's extension below); a title can
@@ -376,31 +353,17 @@ async function createBriefImageItem(
     return { success: false, message: uploadError.message };
   }
 
-  return insertBriefImageItem(projectId, taskId, section, notes, position, storagePath, labelOverride || fileName);
-}
-
-// og:image (checked both attribute orders) first, then twitter:image, then
-// the first real <img> on the page -- a plain regex scan rather than a full
-// HTML parser dependency, which is enough for meta tags' simple, regular
-// shape and matches how most lightweight link-preview scrapers work.
-function extractPrimaryImageUrl(html: string, pageUrl: string): string | null {
-  const patterns = [
-    /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["']/i,
-    /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i,
-    /<img[^>]+src=["'](https?:\/\/[^"']+|\/[^"']+)["']/i,
-  ];
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (!match?.[1]) continue;
-    try {
-      return new URL(match[1], pageUrl).toString();
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  return insertBriefMediaItem(
+    projectId,
+    taskId,
+    section,
+    notes,
+    position,
+    storagePath,
+    labelOverride || fileName,
+    kind,
+    null,
+  );
 }
 
 async function createBriefLinkItem(
@@ -424,12 +387,15 @@ async function createBriefLinkItem(
   return { success: true, itemId: data?.id };
 }
 
-// One "Link" entry point: tries to convert the URL into a real editable
-// image first -- a direct image URL is used as-is, a webpage's primary
-// image (og:image/twitter:image/first real <img>) is fetched otherwise --
-// and only falls back to a plain external-link item when no image can be
-// found anywhere. Covers both "paste a product photo URL" and "paste a
-// reference doc/article link" from one field, no separate tabs.
+// One "Link" entry point: hands the URL to the shared external-media
+// resolver (src/lib/external-media-resolver.ts), which safely (SSRF-
+// protected) figures out whether it's a direct image, a direct video, a
+// share-page that resolves to one (Dropbox/Drive's documented direct-asset
+// conventions, or a webpage's own declared og:image/og:video), or genuinely
+// just a link -- and only falls back to a plain external-link item when no
+// media can be found anywhere. Covers "paste a product photo URL," "paste a
+// Dropbox/Drive share link," and "paste a reference doc/article link" from
+// one field, no separate tabs.
 export async function addBriefTaskLink(
   projectId: string,
   taskId: string,
@@ -441,75 +407,33 @@ export async function addBriefTaskLink(
   const trimmedUrl = url.trim();
   if (!trimmedUrl) return { success: false, message: "URL is required." };
 
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmedUrl);
-  } catch {
-    return { success: false, message: "That doesn't look like a valid URL." };
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return { success: false, message: "Only http/https URLs are supported." };
+  const resolved = await resolveExternalMedia(trimmedUrl);
+
+  if (resolved.kind === "error") {
+    return { success: false, message: resolved.message };
   }
 
-  let targetUrl = trimmedUrl;
-  let response: Response;
-  try {
-    response = await fetch(targetUrl);
-  } catch {
-    return { success: false, message: "Couldn't reach that URL." };
-  }
-  if (!response.ok) return { success: false, message: `Couldn't fetch that URL (${response.status}).` };
-
-  let contentType = response.headers.get("content-type") ?? "";
-  let imageBuffer: Buffer | null = null;
-  // Only ever set when we had to scrape a webpage (never for a URL that was
-  // already a direct image, which has no HTML/title to read) -- see
-  // extractPageTitle's own comment on why this is a genuinely reliable
-  // signal, unlike a clipboard-paste's filename/alt text.
-  let scrapedTitle: string | null = null;
-
-  if (contentType.startsWith("image/")) {
-    imageBuffer = Buffer.from(await response.arrayBuffer());
-  } else {
-    // Not a direct image -- look for the page's primary image instead of
-    // giving up immediately. Any failure along this path (no image found,
-    // fetch failed, wasn't actually an image) just falls through to the
-    // plain-link fallback below rather than erroring the whole add.
-    const html = await response.text();
-    scrapedTitle = extractPageTitle(html);
-    const imageUrl = extractPrimaryImageUrl(html, targetUrl);
-    if (imageUrl) {
-      try {
-        const fetched = await fetch(imageUrl);
-        const fetchedType = fetched.headers.get("content-type") ?? "";
-        if (fetched.ok && fetchedType.startsWith("image/")) {
-          imageBuffer = Buffer.from(await fetched.arrayBuffer());
-          contentType = fetchedType;
-          targetUrl = imageUrl;
-        }
-      } catch {
-        // Falls through to the plain-link path.
-      }
-    }
-  }
-
-  if (imageBuffer) {
-    const fileName = decodeURIComponent(targetUrl.split("/").pop()?.split("?")[0] || "image");
-    const result = await createBriefImageItem(
+  if (resolved.kind === "image" || resolved.kind === "video") {
+    const result = await createBriefMediaItem(
       projectId,
       taskId,
       section,
       notes,
       position,
-      imageBuffer,
-      contentType,
-      fileName,
-      scrapedTitle,
+      resolved.buffer,
+      resolved.contentType,
+      resolved.fileName,
+      resolved.kind,
+      resolved.label,
     );
-    return { ...result, kind: "image" };
+    return { ...result, kind: resolved.kind };
   }
 
-  const linkResult = await createBriefLinkItem(projectId, taskId, section, trimmedUrl, notes, position);
+  // resolved.kind === "link" -- resolveExternalMedia never substitutes a
+  // different URL here, so the original, exactly-as-pasted url is always
+  // what gets saved (see its own comment on preserving the original on any
+  // fallback).
+  const linkResult = await createBriefLinkItem(projectId, taskId, section, resolved.url, notes, position);
   return { ...linkResult, kind: "link" };
 }
 
@@ -558,7 +482,7 @@ export async function addBriefTaskImage(
   if (typeof storagePath !== "string" || !storagePath) {
     return { success: false, message: "No file provided." };
   }
-  return insertBriefImageItem(
+  return insertBriefMediaItem(
     projectId,
     taskId,
     section,
@@ -566,6 +490,43 @@ export async function addBriefTaskImage(
     position,
     storagePath,
     typeof fileName === "string" ? fileName : "image",
+    "image",
+    null,
+  );
+}
+
+// Mirrors addBriefTaskImage exactly -- the video file AND its generated
+// poster (see video-poster.ts's generateVideoPosterBlob, called client-side
+// before this) both already went direct browser-to-Storage before this
+// action ever runs; posterStoragePath is optional in the FormData because
+// poster generation can legitimately fail (a corrupt file, a browser that
+// can't decode this codec, a timeout) without that being a reason to lose
+// the otherwise-successful video upload -- see the client handler's own
+// comment for the graceful-degradation behavior.
+export async function addBriefTaskVideo(
+  projectId: string,
+  taskId: string,
+  section: BriefItemSection,
+  notes: string,
+  position: number,
+  formData: FormData,
+): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
+  const storagePath = formData.get("storagePath");
+  const fileName = formData.get("fileName");
+  const posterStoragePath = formData.get("posterStoragePath");
+  if (typeof storagePath !== "string" || !storagePath) {
+    return { success: false, message: "No file provided." };
+  }
+  return insertBriefMediaItem(
+    projectId,
+    taskId,
+    section,
+    notes,
+    position,
+    storagePath,
+    typeof fileName === "string" ? fileName : "video",
+    "video",
+    typeof posterStoragePath === "string" && posterStoragePath ? posterStoragePath : null,
   );
 }
 
@@ -582,8 +543,8 @@ export async function updateBriefTaskItemNotes(projectId: string, itemId: string
 
 // Renames a Brief item's own display label -- deliberately scoped to just
 // this one brief_task_items row. It can't touch brief_attachments (which
-// has no name/label column at all -- the "name" of an image has only ever
-// lived on the item row, see insertBriefImageItem's own comment) or
+// has no name/label column at all -- the "name" of an image/video has only
+// ever lived on the item row, see insertBriefMediaItem's own comment) or
 // media_assets (Brief images are never inserted there; Grid/Calendar/
 // Stories all read media_assets, a completely separate table/bucket from
 // brief_attachments/brief-media, so this rename can never be visible
@@ -904,9 +865,14 @@ export async function generateBriefDesign(
     `Audience: ${strategy?.audience_notes || "(none provided)"}`,
   ].join("\n");
 
+  // f.body may be either legacy plain text or the serialized Bold/Italic
+  // format (brief-rich-text.ts) -- plainTextFromBody handles both and
+  // always returns plain words, which is all an LLM prompt needs regardless
+  // of what's bold/italic.
   const frameLines = (frames ?? [])
-    .filter((f) => f.body.trim())
-    .map((f) => `${f.section === "text" ? "Text" : "Frame"} "${f.label}": ${f.body}`)
+    .map((f) => ({ ...f, plainBody: plainTextFromBody(f.body) }))
+    .filter((f) => f.plainBody.trim())
+    .map((f) => `${f.section === "text" ? "Text" : "Frame"} "${f.label}": ${f.plainBody}`)
     .join("\n");
 
   const assetLines = contentAssets.map((i) => `- id "${i.id}" (${i.section}): ${i.label || i.notes || "untitled"}`).join("\n");
