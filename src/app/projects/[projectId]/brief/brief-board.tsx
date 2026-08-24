@@ -109,15 +109,11 @@ export function BriefBoard({
   tasks,
   canManage,
   brandMoodboard,
-  buildMarker,
 }: {
   projectId: string;
   tasks: BriefTaskData[];
   canManage: boolean;
   brandMoodboard: BrandMoodboardItem[];
-  // TEMPORARY -- remove once the user confirms seeing the debug badge this
-  // drives. See BriefPage's own comment for where this actually comes from.
-  buildMarker?: string;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -277,14 +273,6 @@ export function BriefBoard({
 
   return (
     <div className="flex flex-col gap-8">
-      {buildMarker && (
-        <div
-          className="fixed bottom-2 right-2 z-[999] rounded bg-black/85 px-2 py-1 font-mono text-[10px] text-white"
-          data-debug-build-marker={buildMarker}
-        >
-          DEBUG BUILD: {buildMarker}
-        </div>
-      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <button
           type="button"
@@ -1231,15 +1219,8 @@ function ItemSection({
     const position = items.length;
     setLinkError(undefined);
     setLinkPending(true);
-    // TEMPORARY DIAGNOSTIC LOGGING -- remove once the regression is
-    // confirmed found. This is the actual, real onClick handler for the
-    // "Add" button next to the "Link" pill in this exact ItemSection --
-    // check the BROWSER console (not the server logs) for this line to
-    // confirm this is the code path a real paste-and-click actually runs.
-    console.log("[REAL_LINK_UI_FLOW] client:handleAddLink called", { url, section, taskId });
     startTransition(async () => {
       const result = await addBriefTaskLink(projectId, taskId, section, url, notes, position);
-      console.log("[REAL_LINK_UI_FLOW] client:addBriefTaskLink returned", result);
       setLinkPending(false);
       if (!result.success) {
         setLinkError(result.message ?? "Couldn't add that link.");
@@ -1504,16 +1485,6 @@ function ItemSection({
   function renderItemRow(item: BriefTaskItem) {
     return (
       <>
-        {/* TEMPORARY -- remove once the regression is confirmed found.
-            Renders the ACTUAL item.kind string this specific chip's render
-            branch chose between, directly in the DOM, so it's visible
-            without opening devtools console. */}
-        <span
-          data-debug-item-kind={item.kind}
-          className="rounded bg-black/10 px-1 py-0.5 font-mono text-[9px] text-muted"
-        >
-          kind:{item.kind}
-        </span>
         {item.kind === "image" ? (
           <ImageItemChip
             item={item}

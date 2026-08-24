@@ -411,21 +411,7 @@ export async function addBriefTaskLink(
   const trimmedUrl = url.trim();
   if (!trimmedUrl) return { success: false, message: "URL is required." };
 
-  // TEMPORARY DIAGNOSTIC LOGGING -- remove once the regression is confirmed
-  // found. This runs SERVER-SIDE -- check Vercel's function logs (not the
-  // browser console) for these lines.
-  console.log("[REAL_LINK_UI_FLOW] server:addBriefTaskLink entered", JSON.stringify({ trimmedUrl, projectId, taskId, section }));
   const resolved = await resolveExternalMedia(trimmedUrl);
-  console.log(
-    "[REAL_LINK_UI_FLOW] server:addBriefTaskLink got resolver result",
-    JSON.stringify({
-      kind: resolved.kind,
-      contentType: "contentType" in resolved ? resolved.contentType : undefined,
-      fileName: "fileName" in resolved ? resolved.fileName : undefined,
-      url: "url" in resolved ? resolved.url : undefined,
-      message: "message" in resolved ? resolved.message : undefined,
-    }),
-  );
 
   if (resolved.kind === "error") {
     return { success: false, message: resolved.message };
@@ -444,10 +430,6 @@ export async function addBriefTaskLink(
       resolved.kind,
       resolved.label,
     );
-    console.log(
-      "[REAL_LINK_UI_FLOW] server:addBriefTaskLink returning MEDIA result",
-      JSON.stringify({ success: result.success, message: result.message, itemId: result.itemId, kind: resolved.kind }),
-    );
     return { ...result, kind: resolved.kind };
   }
 
@@ -455,7 +437,6 @@ export async function addBriefTaskLink(
   // different URL here, so the original, exactly-as-pasted url is always
   // what gets saved (see its own comment on preserving the original on any
   // fallback).
-  console.log("[REAL_LINK_UI_FLOW] server:addBriefTaskLink falling back to LINK item", JSON.stringify({ url: resolved.url }));
   const linkResult = await createBriefLinkItem(projectId, taskId, section, resolved.url, notes, position);
   return { ...linkResult, kind: "link" };
 }
