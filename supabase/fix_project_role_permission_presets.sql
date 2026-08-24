@@ -20,11 +20,18 @@
 --      manage any task in the project, despite having no business doing
 --      either. Section 1 (already written, unapplied) closes that.
 --
--- Run this in the Supabase SQL editor. Idempotent (safe to re-run) and
--- transactional (all-or-nothing, no window with a mix of old/new policies).
--- Purely additive-restrictive or additive-permissive per policy -- no
--- existing row's data, membership, role, or custom_permissions is ever
--- touched; this only changes who is ALLOWED to write going forward.
+-- Run this in the Supabase SQL editor. Transactional (one begin/commit
+-- wraps the whole file -- all-or-nothing, no window with a mix of old/new
+-- policies, and a failure anywhere rolls back everything, never leaving a
+-- table with a weaker or missing policy). Genuinely safe to re-run: every
+-- `create policy` is preceded by a `drop policy if exists` for BOTH the
+-- name it's replacing AND its own target name, so a second run cleanly
+-- recreates the same end state instead of erroring on "policy already
+-- exists" (which a create-only idempotency check would hit, since Postgres
+-- has no `create policy if not exists`). Purely additive-restrictive or
+-- additive-permissive per policy -- no existing row's data, membership,
+-- role, or custom_permissions is ever touched; this only changes who is
+-- ALLOWED to write going forward.
 --
 -- Deliberately NOT touched, even in this expanded pass (see the accompanying
 -- report for the full reasoning):
@@ -60,6 +67,7 @@ begin;
 
 -- ---------- media_assets: upload restricted to owner/admin/editor ----------
 drop policy if exists "Members can upload media" on public.media_assets;
+drop policy if exists "Owners/admins/editors can upload media" on public.media_assets;
 create policy "Owners/admins/editors can upload media"
   on public.media_assets for insert to authenticated
   with check (
@@ -70,6 +78,7 @@ create policy "Owners/admins/editors can upload media"
 
 -- ---------- project-media storage: upload/update restricted the same way ----------
 drop policy if exists "Members can upload project media" on storage.objects;
+drop policy if exists "Owners/admins/editors can upload project media" on storage.objects;
 create policy "Owners/admins/editors can upload project media"
   on storage.objects for insert to authenticated
   with check (
@@ -79,6 +88,7 @@ create policy "Owners/admins/editors can upload project media"
   );
 
 drop policy if exists "Members can update project media" on storage.objects;
+drop policy if exists "Owners/admins/editors can update project media" on storage.objects;
 create policy "Owners/admins/editors can update project media"
   on storage.objects for update to authenticated
   using (
@@ -98,6 +108,10 @@ create policy "Owners/admins/editors can update project media"
 -- "project_id is null and user_id = auth.uid()" self-service clause the
 -- single combined policy already had.
 drop policy if exists "Members manage project tasks, users manage personal tasks" on public.tasks;
+drop policy if exists "Members view project tasks, users view personal tasks" on public.tasks;
+drop policy if exists "Owners/admins/editors manage project tasks, users manage personal tasks" on public.tasks;
+drop policy if exists "Owners/admins/editors update project tasks, users update personal tasks" on public.tasks;
+drop policy if exists "Owners/admins/editors delete project tasks, users delete personal tasks" on public.tasks;
 
 create policy "Members view project tasks, users view personal tasks"
   on public.tasks for select to authenticated
@@ -146,6 +160,7 @@ create policy "Owners/admins/editors delete project tasks, users delete personal
 -- grid_rows | ALL | before: owner/admin | after: owner/admin/editor
 -- Adding/removing a Grid row (addGridRow/removeGridRow).
 drop policy if exists "Admins manage grid rows" on public.grid_rows;
+drop policy if exists "Owners/admins/editors manage grid rows" on public.grid_rows;
 create policy "Owners/admins/editors manage grid rows" on public.grid_rows for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
@@ -154,6 +169,7 @@ create policy "Owners/admins/editors manage grid rows" on public.grid_rows for a
 -- Creating/editing/deleting a post (placeMediaInSlot, updatePost,
 -- deletePost, updatePostCoverTransform's crop save).
 drop policy if exists "Admins manage posts" on public.posts;
+drop policy if exists "Owners/admins/editors manage posts" on public.posts;
 create policy "Owners/admins/editors manage posts" on public.posts for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
@@ -164,6 +180,7 @@ create policy "Owners/admins/editors manage posts" on public.posts for all to au
 -- per row for a non-owner/admin caller under the old policy; this is what
 -- makes Member's Grid drag-reorder actually take effect).
 drop policy if exists "Admins manage grid slots" on public.grid_slots;
+drop policy if exists "Owners/admins/editors manage grid slots" on public.grid_slots;
 create policy "Owners/admins/editors manage grid slots" on public.grid_slots for all to authenticated
   using (exists (select 1 from public.grid_rows r where r.id = row_id and public.project_role(r.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.grid_rows r where r.id = row_id and public.project_role(r.project_id) in ('owner', 'admin', 'editor')));
@@ -171,6 +188,7 @@ create policy "Owners/admins/editors manage grid slots" on public.grid_slots for
 -- post_assets | ALL | before: owner/admin | after: owner/admin/editor
 -- Adding/removing/reordering a post's media assets.
 drop policy if exists "Admins manage post assets" on public.post_assets;
+drop policy if exists "Owners/admins/editors manage post assets" on public.post_assets;
 create policy "Owners/admins/editors manage post assets" on public.post_assets for all to authenticated
   using (exists (select 1 from public.posts p where p.id = post_id and public.project_role(p.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.posts p where p.id = post_id and public.project_role(p.project_id) in ('owner', 'admin', 'editor')));
@@ -178,6 +196,7 @@ create policy "Owners/admins/editors manage post assets" on public.post_assets f
 -- post_links | ALL | before: owner/admin | after: owner/admin/editor
 -- Adding/removing a post's link-out URLs.
 drop policy if exists "Admins manage post links" on public.post_links;
+drop policy if exists "Owners/admins/editors manage post links" on public.post_links;
 create policy "Owners/admins/editors manage post links" on public.post_links for all to authenticated
   using (exists (select 1 from public.posts p where p.id = post_id and public.project_role(p.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.posts p where p.id = post_id and public.project_role(p.project_id) in ('owner', 'admin', 'editor')));
@@ -185,6 +204,7 @@ create policy "Owners/admins/editors manage post links" on public.post_links for
 -- media_folders | ALL | before: owner/admin | after: owner/admin/editor
 -- Creating a folder in the Media Library (Grid's library sidebar).
 drop policy if exists "Admins manage media folders" on public.media_folders;
+drop policy if exists "Owners/admins/editors manage media folders" on public.media_folders;
 create policy "Owners/admins/editors manage media folders" on public.media_folders for all
   to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
@@ -195,6 +215,7 @@ create policy "Owners/admins/editors manage media folders" on public.media_folde
 -- moveMediaToFolder) -- this is the SAME "Admins update media" policy that
 -- also governs annotation/crop saves and poster regeneration.
 drop policy if exists "Admins update media" on public.media_assets;
+drop policy if exists "Owners/admins/editors update media" on public.media_assets;
 create policy "Owners/admins/editors update media"
   on public.media_assets for update
   to authenticated
@@ -205,6 +226,7 @@ create policy "Owners/admins/editors update media"
 -- Hard-deleting a truly-unreferenced asset (deleteMedia/bulkDeleteMedia's
 -- delete path, once nothing references it).
 drop policy if exists "Owners/admins can delete media" on public.media_assets;
+drop policy if exists "Owners/admins/editors can delete media" on public.media_assets;
 create policy "Owners/admins/editors can delete media"
   on public.media_assets for delete
   to authenticated
@@ -217,6 +239,7 @@ create policy "Owners/admins/editors can delete media"
 
 -- calendar_notes | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage calendar notes" on public.calendar_notes;
+drop policy if exists "Owners/admins/editors manage calendar notes" on public.calendar_notes;
 create policy "Owners/admins/editors manage calendar notes" on public.calendar_notes for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
@@ -231,30 +254,35 @@ create policy "Owners/admins/editors manage calendar notes" on public.calendar_n
 
 -- brief_tasks | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage brief tasks" on public.brief_tasks;
+drop policy if exists "Owners/admins/editors manage brief tasks" on public.brief_tasks;
 create policy "Owners/admins/editors manage brief tasks" on public.brief_tasks for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
 
 -- brief_task_items | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage brief task items" on public.brief_task_items;
+drop policy if exists "Owners/admins/editors manage brief task items" on public.brief_task_items;
 create policy "Owners/admins/editors manage brief task items" on public.brief_task_items for all to authenticated
   using (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin', 'editor')));
 
 -- brief_task_frames | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage brief task frames" on public.brief_task_frames;
+drop policy if exists "Owners/admins/editors manage brief task frames" on public.brief_task_frames;
 create policy "Owners/admins/editors manage brief task frames" on public.brief_task_frames for all to authenticated
   using (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.brief_tasks t where t.id = task_id and public.project_role(t.project_id) in ('owner', 'admin', 'editor')));
 
 -- brief_attachments | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage brief attachments" on public.brief_attachments;
+drop policy if exists "Owners/admins/editors manage brief attachments" on public.brief_attachments;
 create policy "Owners/admins/editors manage brief attachments" on public.brief_attachments for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
 
 -- brand_moodboard_items | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage brand moodboard" on public.brand_moodboard_items;
+drop policy if exists "Owners/admins/editors manage brand moodboard" on public.brand_moodboard_items;
 create policy "Owners/admins/editors manage brand moodboard" on public.brand_moodboard_items for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
@@ -263,6 +291,7 @@ create policy "Owners/admins/editors manage brand moodboard" on public.brand_moo
 -- (existing policy name "Members can upload brief media" is misleading --
 -- it was already owner/admin-only, not member-wide; renamed for clarity)
 drop policy if exists "Members can upload brief media" on storage.objects;
+drop policy if exists "Owners/admins/editors can upload brief media" on storage.objects;
 create policy "Owners/admins/editors can upload brief media"
   on storage.objects for insert
   to authenticated
@@ -273,6 +302,7 @@ create policy "Owners/admins/editors can upload brief media"
 
 -- storage brief-media DELETE | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins can delete brief media" on storage.objects;
+drop policy if exists "Owners/admins/editors can delete brief media" on storage.objects;
 create policy "Owners/admins/editors can delete brief media"
   on storage.objects for delete
   to authenticated
@@ -287,24 +317,28 @@ create policy "Owners/admins/editors can delete brief media"
 
 -- stories | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage stories" on public.stories;
+drop policy if exists "Owners/admins/editors manage stories" on public.stories;
 create policy "Owners/admins/editors manage stories" on public.stories for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
 
 -- story_frames | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage story frames" on public.story_frames;
+drop policy if exists "Owners/admins/editors manage story frames" on public.story_frames;
 create policy "Owners/admins/editors manage story frames" on public.story_frames for all to authenticated
   using (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin', 'editor')));
 
 -- story_links | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage story links" on public.story_links;
+drop policy if exists "Owners/admins/editors manage story links" on public.story_links;
 create policy "Owners/admins/editors manage story links" on public.story_links for all to authenticated
   using (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin', 'editor')))
   with check (exists (select 1 from public.stories s where s.id = story_id and public.project_role(s.project_id) in ('owner', 'admin', 'editor')));
 
 -- content_folders | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage content folders" on public.content_folders;
+drop policy if exists "Owners/admins/editors manage content folders" on public.content_folders;
 create policy "Owners/admins/editors manage content folders" on public.content_folders for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
@@ -315,6 +349,7 @@ create policy "Owners/admins/editors manage content folders" on public.content_f
 
 -- asset_collections | ALL | before: owner/admin | after: owner/admin/editor
 drop policy if exists "Admins manage asset collections" on public.asset_collections;
+drop policy if exists "Owners/admins/editors manage asset collections" on public.asset_collections;
 create policy "Owners/admins/editors manage asset collections" on public.asset_collections for all to authenticated
   using (public.project_role(project_id) in ('owner', 'admin', 'editor'))
   with check (public.project_role(project_id) in ('owner', 'admin', 'editor'));
@@ -467,49 +502,132 @@ commit;
 -- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
+-- READ-ONLY PRE-MIGRATION COUNTS -- run this BEFORE the migration and keep
+-- the result. Same shape as verification query #2 below, so the two are a
+-- direct before/after diff -- every column should read identically both
+-- times; if any pair differs, stop and do not treat the migration as clean.
+--
+-- select
+--   (select count(*) from public.project_members) as project_members,
+--   (select count(*) from public.media_assets) as media_assets,
+--   (select count(*) from public.tasks) as tasks,
+--   (select count(*) from public.grid_rows) as grid_rows,
+--   (select count(*) from public.grid_slots) as grid_slots,
+--   (select count(*) from public.posts) as posts,
+--   (select count(*) from public.post_assets) as post_assets,
+--   (select count(*) from public.post_links) as post_links,
+--   (select count(*) from public.media_folders) as media_folders,
+--   (select count(*) from public.calendar_notes) as calendar_notes,
+--   (select count(*) from public.brief_tasks) as brief_tasks,
+--   (select count(*) from public.brief_task_items) as brief_task_items,
+--   (select count(*) from public.brief_task_frames) as brief_task_frames,
+--   (select count(*) from public.brief_attachments) as brief_attachments,
+--   (select count(*) from public.brand_moodboard_items) as brand_moodboard_items,
+--   (select count(*) from public.stories) as stories,
+--   (select count(*) from public.story_frames) as story_frames,
+--   (select count(*) from public.story_links) as story_links,
+--   (select count(*) from public.content_folders) as content_folders,
+--   (select count(*) from public.asset_collections) as asset_collections;
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
 -- READ-ONLY POST-MIGRATION VERIFICATION -- run these after, no writes.
 --
--- 1. Confirm every new policy exists (expect 30 rows: 4 tasks + 3 section-1
---    media/storage + 23 section-2 policies across public+storage):
+-- 1. Confirm every new policy exists (expect 28 rows total: 3 section-1
+--    media/storage insert+update + 4 tasks select/insert/update/delete +
+--    21 section-2 policies -- 19 on public tables, 2 on storage.objects for
+--    brief-media). Parenthesized explicitly (the schema/table filter must
+--    apply to BOTH storage name patterns, not just the first):
 -- select schemaname, tablename, policyname, cmd
 -- from pg_policies
--- where (schemaname = 'public' and tablename in (
---          'media_assets','tasks','grid_rows','posts','grid_slots','post_assets',
---          'post_links','media_folders','calendar_notes','brief_tasks',
---          'brief_task_items','brief_task_frames','brief_attachments',
---          'brand_moodboard_items','stories','story_frames','story_links',
---          'content_folders','asset_collections'
---        ))
---    or (schemaname = 'storage' and tablename = 'objects' and policyname like '%project media%' or policyname like '%brief media%')
+-- where (
+--   schemaname = 'public' and tablename in (
+--     'media_assets','tasks','grid_rows','posts','grid_slots','post_assets',
+--     'post_links','media_folders','calendar_notes','brief_tasks',
+--     'brief_task_items','brief_task_frames','brief_attachments',
+--     'brand_moodboard_items','stories','story_frames','story_links',
+--     'content_folders','asset_collections'
+--   )
+-- ) or (
+--   schemaname = 'storage' and tablename = 'objects'
+--   and (policyname ilike '%project media%' or policyname ilike '%brief media%')
+-- )
 -- order by tablename, policyname;
 --
 -- 2. Confirm no existing rows were touched/lost (compare these counts to
 --    whatever you already know them to be before running -- every one of
---    these should be identical before and after):
+--    these should be identical before and after; see the matching
+--    PRE-MIGRATION count block below):
 -- select
+--   (select count(*) from public.project_members) as project_members,
 --   (select count(*) from public.media_assets) as media_assets,
 --   (select count(*) from public.tasks) as tasks,
 --   (select count(*) from public.grid_rows) as grid_rows,
---   (select count(*) from public.posts) as posts,
 --   (select count(*) from public.grid_slots) as grid_slots,
+--   (select count(*) from public.posts) as posts,
+--   (select count(*) from public.post_assets) as post_assets,
+--   (select count(*) from public.post_links) as post_links,
+--   (select count(*) from public.media_folders) as media_folders,
 --   (select count(*) from public.calendar_notes) as calendar_notes,
 --   (select count(*) from public.brief_tasks) as brief_tasks,
+--   (select count(*) from public.brief_task_items) as brief_task_items,
+--   (select count(*) from public.brief_task_frames) as brief_task_frames,
+--   (select count(*) from public.brief_attachments) as brief_attachments,
+--   (select count(*) from public.brand_moodboard_items) as brand_moodboard_items,
 --   (select count(*) from public.stories) as stories,
+--   (select count(*) from public.story_frames) as story_frames,
+--   (select count(*) from public.story_links) as story_links,
 --   (select count(*) from public.content_folders) as content_folders,
 --   (select count(*) from public.asset_collections) as asset_collections;
 --
 -- 3. Confirm every existing project_members row's role/custom_permissions
 --    is completely untouched (this migration only changes RLS policies,
---    never writes to project_members itself):
+--    never writes to project_members itself -- compare this role
+--    breakdown to what you already know it to be before running):
 -- select role, count(*) from public.project_members group by role order by 1;
 --
--- 4. Spot-check that Client/Viewer were never added anywhere in Section 2
---    (every policy touched by this migration should mention only
---    owner/admin/editor, never client or viewer):
--- select tablename, policyname, qual, with_check
+-- 4. Confirm the membership-management policy itself is untouched --
+--    still exactly owner/admin, this migration never modifies it:
+-- select policyname, cmd, qual, with_check
+-- from pg_policies
+-- where schemaname = 'public' and tablename = 'project_members';
+-- -- expect exactly 2 rows: "Members can view project membership" (select,
+-- -- is_project_member) and "Owners/admins can manage membership" (all,
+-- -- project_role(id) in ('owner','admin') -- no 'editor', no 'client', no
+-- -- 'viewer' -- unchanged from before this migration).
+--
+-- 5. Every policy this migration touched contains 'editor' (proves the
+--    widening actually landed, not just that the policy exists) AND never
+--    contains 'client'/'viewer'/'designer' (proves no accidental
+--    over-widening) -- one query, three columns to eyeball per row:
+-- select
+--   tablename,
+--   policyname,
+--   (qual ilike '%editor%' or with_check ilike '%editor%') as has_editor,
+--   (qual ilike '%client%' or with_check ilike '%client%'
+--     or qual ilike '%viewer%' or with_check ilike '%viewer%'
+--     or qual ilike '%designer%' or with_check ilike '%designer%') as has_forbidden_role
 -- from pg_policies
 -- where schemaname = 'public'
 --   and policyname like 'Owners/admins/editors%'
---   and (qual ilike '%client%' or qual ilike '%viewer%' or with_check ilike '%client%' or with_check ilike '%viewer%');
--- -- expect: 0 rows
+-- order by tablename;
+-- -- expect: has_editor = true and has_forbidden_role = false on every row.
+--
+-- 6. Same check, scoped to storage.objects (project-media + brief-media
+--    write policies specifically):
+-- select
+--   policyname,
+--   cmd,
+--   (qual ilike '%editor%' or with_check ilike '%editor%') as has_editor,
+--   (qual ilike '%client%' or with_check ilike '%client%'
+--     or qual ilike '%viewer%' or with_check ilike '%viewer%'
+--     or qual ilike '%designer%' or with_check ilike '%designer%') as has_forbidden_role
+-- from pg_policies
+-- where schemaname = 'storage' and tablename = 'objects'
+--   and policyname like 'Owners/admins/editors%';
+-- -- expect: has_editor = true and has_forbidden_role = false on every row,
+-- -- and (separately eyeball qual/with_check) every row still filters on
+-- -- ((storage.foldername(name))[1])::uuid -- the project-scoping clause --
+-- -- not just bucket_id, so a crafted path into another project's folder
+-- -- still resolves that OTHER project's role, not the caller's.
 -- ---------------------------------------------------------------------------
