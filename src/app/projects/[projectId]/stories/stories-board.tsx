@@ -368,8 +368,21 @@ export function StoriesBoard({
         </label>
         {/* Same top-right icon pairing as Grid's own "Add New Post" row
             (grid-board.tsx) -- share + "+" as compact icon buttons, not a
-            full-width text button, so the two content boards read the same. */}
-        <div className="flex shrink-0 items-center gap-1">
+            full-width text button, so the two content boards read the same.
+            justify-end: on mobile this row is a full-width flex item of the
+            parent's flex-col stack (unlike Grid's own row, which is always
+            a single flex-row with justify-between doing this for free), so
+            its own children default-align to the row's LEFT edge instead of
+            the right -- which put ShareMenuButton's trigger near x≈32 on a
+            narrow phone instead of the right edge, and since its dropdown
+            panel is right-0-anchored TO THAT TRIGGER (not the viewport), the
+            224px-wide panel rendered almost entirely off-screen to the left,
+            making every item in it (Share for Review/Select Items/Manage
+            Review Links) untappable on mobile. justify-end is a no-op on
+            desktop (sm:flex-row): there this div is already only as wide as
+            its own content, so redistributing space along its main axis has
+            nothing to do. */}
+        <div className="flex shrink-0 items-center justify-end gap-1">
           {stories.length > 0 && (
             <ShareMenuButton
               projectId={projectId}
