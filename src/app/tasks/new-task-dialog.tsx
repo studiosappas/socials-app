@@ -80,6 +80,11 @@ export function NewTaskDialog({
       createdAt: now,
       updatedAt: now,
       commentCount: 0,
+      // Reaching this point at all means createTask's own RLS check (or the
+      // personal-task self clause) is about to allow it -- if it doesn't,
+      // onTaskCreateFailed removes this optimistic row entirely, so there's
+      // no window where an unauthorized create is shown as manageable.
+      canManage: true,
     };
     onTaskCreated(optimisticTask);
     onClose();

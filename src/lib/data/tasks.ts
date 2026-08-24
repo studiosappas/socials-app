@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import type { TaskStatus } from "@/types/database";
+import { canEditContent } from "@/lib/role-permissions";
+import type { ProjectRole, TaskStatus } from "@/types/database";
 
 export type TaskSource = "manual" | "auto";
 export type TaskSourceRef = { type: "post" | "story"; id: string } | null;
@@ -20,6 +21,17 @@ export type TaskItem = {
   createdAt: string;
   updatedAt: string;
   commentCount: number;
+  // Whether the CURRENT user can mutate (status/assignee/delete) THIS task --
+  // computed once, here, from the same canEditContent capability every other
+  // page's canManage already resolves through (never a second role table).
+  // For a project task: owner/admin/editor in that specific project (matches
+  // the RLS split in supabase/fix_project_role_permission_presets.sql's
+  // Section 1 exactly). For a personal task (projectId null): always true --
+  // the "Members view project tasks, users view personal tasks" SELECT
+  // policy already guarantees a personal task is only ever visible to its
+  // own owner, so any personal task reaching this list already belongs to
+  // the current user and RLS already lets them manage it.
+  canManage: boolean;
 };
 
 export type TeamMember = { id: string; name: string; avatarUrl: string | null };
@@ -44,7 +56,7 @@ export async function getTasksForUser(
   const [{ data: memberships }, { data: taskRows }] = await Promise.all([
     supabase
       .from("project_members")
-      .select("project_id, user_id, projects(id, name, profile_photo_path), profiles(name, avatar_url)")
+      .select("project_id, user_id, role, projects(id, name, profile_photo_path), profiles(name, avatar_url)")
       .eq("user_id", userId),
     supabase
       .from("tasks")
@@ -58,9 +70,15 @@ export async function getTasksForUser(
   );
 
   const projectRows = new Map<string, { id: string; name: string; profile_photo_path: string | null }>();
+  // Every row here is the current user's OWN membership (the query above is
+  // .eq("user_id", userId)), so this is exactly "my role in each project I
+  // belong to" -- the per-task canManage below reads through this, never a
+  // second lookup.
+  const roleByProjectId = new Map<string, ProjectRole>();
   for (const m of memberships ?? []) {
     const project = m.projects as { id: string; name: string; profile_photo_path: string | null } | null;
     if (project) projectRows.set(project.id, project);
+    if (m.project_id) roleByProjectId.set(m.project_id, m.role as ProjectRole);
   }
   const projectPhotoPaths = Array.from(projectRows.values())
     .map((p) => p.profile_photo_path)
@@ -145,6 +163,7 @@ export async function getTasksForUser(
       createdAt: t.created_at,
       updatedAt: t.updated_at,
       commentCount: commentCountByTask.get(t.id) ?? 0,
+      canManage: t.project_id ? canEditContent(roleByProjectId.get(t.project_id)) : true,
     };
   });
 

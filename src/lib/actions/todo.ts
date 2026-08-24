@@ -79,31 +79,67 @@ export async function updateTask(
   return { success: true };
 }
 
+export type TaskMutationResult = { success: true } | { success: false; message: string };
+
 // Not revalidating -- its one caller (task-workspace.tsx's
 // handleStatusChange) already applies the change optimistically via
-// overrideTasks before this action ever runs.
-export async function updateTaskStatus(taskId: string, status: TaskStatus) {
+// overrideTasks before this action ever runs, and reverts it if this
+// reports failure.
+//
+// A plain `.update(...).eq(...)` with no `.select()` returns NO error when
+// RLS's USING clause filters the row out -- Postgres/PostgREST treat "0 rows
+// matched" and "1 row matched and was updated" identically at the HTTP
+// level for UPDATE/DELETE (unlike INSERT, where a WITH CHECK violation IS a
+// real error). A Viewer/Client whose write gets correctly blocked by RLS
+// would therefore see `error` stay null and have no way to know the write
+// never happened. Chaining `.select("id")` forces PostgREST to return the
+// actually-affected rows, so an RLS-filtered write is distinguishable from
+// a real one by checking `data.length` -- this is the fix.
+export async function updateTaskStatus(taskId: string, status: TaskStatus): Promise<TaskMutationResult> {
   const supabase = await createClient();
-  await supabase.from("tasks").update({ status, updated_at: new Date().toISOString() }).eq("id", taskId);
+  const { data, error } = await supabase
+    .from("tasks")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", taskId)
+    .select("id");
+  if (error) return { success: false, message: "Couldn't update that task's status." };
+  if (!data || data.length === 0) {
+    return { success: false, message: "You don't have permission to change this task's status." };
+  }
+  return { success: true };
 }
 
 // Not revalidating -- same reasoning as updateTaskStatus above
 // (task-workspace.tsx's handleAssigneeChange already applies this
-// optimistically via overrideTasks).
-export async function updateTaskAssignee(taskId: string, assigneeId: string | null) {
+// optimistically via overrideTasks and reverts on failure). Same
+// 0-rows-affected-is-not-an-error caveat applies -- see updateTaskStatus.
+export async function updateTaskAssignee(taskId: string, assigneeId: string | null): Promise<TaskMutationResult> {
   const supabase = await createClient();
-  await supabase.from("tasks").update({ assignee_id: assigneeId, updated_at: new Date().toISOString() }).eq("id", taskId);
+  const { data, error } = await supabase
+    .from("tasks")
+    .update({ assignee_id: assigneeId, updated_at: new Date().toISOString() })
+    .eq("id", taskId)
+    .select("id");
+  if (error) return { success: false, message: "Couldn't reassign that task." };
+  if (!data || data.length === 0) {
+    return { success: false, message: "You don't have permission to reassign this task." };
+  }
+  return { success: true };
 }
 
 // Not revalidating -- its one caller (task-detail.tsx's handleDelete)
 // already hides the task optimistically before this runs, and only
-// restores it + surfaces a toast if the delete actually failed.
-export async function deleteTask(
-  taskId: string,
-): Promise<{ success: true } | { success: false; message: string }> {
+// restores it + surfaces a toast if the delete actually failed. Same
+// 0-rows-affected-is-not-an-error caveat as updateTaskStatus above applies
+// to DELETE too -- `.select("id")` is what makes an RLS-blocked delete
+// distinguishable from a real one instead of silently reporting success.
+export async function deleteTask(taskId: string): Promise<TaskMutationResult> {
   const supabase = await createClient();
-  const { error } = await supabase.from("tasks").delete().eq("id", taskId);
-  if (error) return { success: false, message: error.message };
+  const { data, error } = await supabase.from("tasks").delete().eq("id", taskId).select("id");
+  if (error) return { success: false, message: "Couldn't delete that task." };
+  if (!data || data.length === 0) {
+    return { success: false, message: "You don't have permission to delete this task." };
+  }
   return { success: true };
 }
 
