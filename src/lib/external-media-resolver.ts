@@ -12,6 +12,62 @@ import { MAX_IMAGE_UPLOAD_SIZE_BYTES } from "@/lib/upload-limits";
 // allowed to keep either.
 const MAX_FETCH_BYTES = MAX_IMAGE_UPLOAD_SIZE_BYTES;
 
+// A raw Content-Type header can carry parameters -- "image/jpeg; charset=UTF-8"
+// is a real header some image hosts/CDNs send even for binary content, not a
+// hypothetical. Every contentType this module hands back is run through this
+// first, so nothing downstream (extension derivation, what gets stored as the
+// asset's own MIME type) ever sees the raw header with its parameters intact.
+function cleanMimeType(rawContentType: string): string {
+  return rawContentType.split(";")[0].trim().toLowerCase();
+}
+
+// image/jpeg -> jpg (the extension people actually expect, not the "jpeg"
+// you'd get from a blind split), plus every other common image/video subtype
+// this app already handles. Not exhaustive by hardcoded list alone -- an
+// unlisted-but-real subtype still gets a reasonable extension via the
+// sanitized-subtype fallback below, so a real image/video type this map
+// doesn't happen to name still produces something valid rather than nothing.
+const MIME_EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/pjpeg": "jpg",
+  "image/png": "png",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+  "image/tiff": "tiff",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "image/avif": "avif",
+  "image/x-icon": "ico",
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
+  "video/x-msvideo": "avi",
+  "video/x-matroska": "mkv",
+  "video/mpeg": "mpeg",
+  "video/ogg": "ogv",
+};
+
+// cleanType must already be run through cleanMimeType -- no ";"-parameters,
+// already lowercased.
+export function extensionForContentType(cleanType: string): string | undefined {
+  if (MIME_EXTENSIONS[cleanType]) return MIME_EXTENSIONS[cleanType];
+  const subtype = cleanType.split("/")[1];
+  if (!subtype) return undefined;
+  // Strips a "+xml"-style suffix and an "x-" vendor prefix, then keeps only
+  // filename-safe characters -- so a real but unlisted subtype (some other
+  // vendor-prefixed or "+xml"-suffixed image/video type) still yields a
+  // plain, valid-looking extension instead of smuggling through stray
+  // characters a MIME subtype is allowed to have but a filename extension
+  // should never contain.
+  const safe = subtype
+    .replace(/^x-/, "")
+    .replace(/\+.*$/, "")
+    .replace(/[^a-z0-9]/g, "");
+  return safe || undefined;
+}
+
 const HTML_ENTITIES: Record<string, string> = {
   "&amp;": "&",
   "&lt;": "<",
@@ -250,7 +306,7 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
     return { kind: "link", url: rawUrl };
   }
 
-  const contentType = first.response.headers.get("content-type") ?? "";
+  const contentType = cleanMimeType(first.response.headers.get("content-type") ?? "");
   const contentLengthHeader = first.response.headers.get("content-length");
   if (contentLengthHeader && Number(contentLengthHeader) > MAX_FETCH_BYTES) {
     return { kind: "link", url: rawUrl };
@@ -279,7 +335,7 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
   if (declaredVideoUrl) {
     const videoResult = await safeFetch(declaredVideoUrl);
     if (videoResult.ok && videoResult.response.ok) {
-      const videoType = videoResult.response.headers.get("content-type") ?? "";
+      const videoType = cleanMimeType(videoResult.response.headers.get("content-type") ?? "");
       if (videoType.startsWith("video/")) {
         const buffer = await readBodyWithLimit(videoResult.response, MAX_FETCH_BYTES);
         if (buffer) {
@@ -301,7 +357,7 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
     if (!isGeneric) {
       const imageResult = await safeFetch(declaredImageUrl);
       if (imageResult.ok && imageResult.response.ok) {
-        const imageType = imageResult.response.headers.get("content-type") ?? "";
+        const imageType = cleanMimeType(imageResult.response.headers.get("content-type") ?? "");
         if (imageType.startsWith("image/")) {
           const buffer = await readBodyWithLimit(imageResult.response, MAX_FETCH_BYTES);
           if (buffer) {

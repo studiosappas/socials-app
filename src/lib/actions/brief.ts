@@ -9,7 +9,7 @@ import { parseDesignLayout, layoutToFabricJson } from "@/lib/ai/design-layout";
 import { logActivity } from "@/lib/activity-log";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
-import { resolveExternalMedia } from "@/lib/external-media-resolver";
+import { resolveExternalMedia, extensionForContentType } from "@/lib/external-media-resolver";
 import { plainTextFromBody } from "@/lib/brief-rich-text";
 import type {
   BriefFrameSection,
@@ -342,8 +342,24 @@ async function createBriefMediaItem(
   labelOverride?: string | null,
 ): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
   const supabase = await createClient();
-  const extFromName = fileName.includes(".") ? fileName.split(".").pop() : undefined;
-  const ext = extFromName || contentType.split("/").pop();
+  // A dot in `fileName` only counts as a real extension if it's actually a
+  // known image/video one -- a URL's last path segment can contain a "."
+  // that isn't an extension at all (an id/version/timestamp fragment), and
+  // trusting it blindly used to produce a garbage storage-path suffix in
+  // exactly that case. contentType (already parameter-stripped by
+  // resolveExternalMedia -- see cleanMimeType there) is the reliable
+  // fallback either way, via a real MIME->extension mapping rather than a
+  // blind split on "/" (which broke for a Content-Type carrying a
+  // parameter, e.g. "image/jpeg; charset=UTF-8", producing a ".jpeg;
+  // charset=UTF-8" suffix that Windows/macOS don't recognize as anything --
+  // this was the regression a downloaded external image stopped having a
+  // usable extension at all).
+  const rawExtFromName = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : undefined;
+  const extFromName =
+    rawExtFromName && (KNOWN_IMAGE_EXTENSIONS.has(rawExtFromName) || KNOWN_VIDEO_EXTENSIONS.has(rawExtFromName))
+      ? rawExtFromName
+      : undefined;
+  const ext = extFromName || extensionForContentType(contentType);
   const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
 
   const { error: uploadError } = await supabase.storage
