@@ -28,6 +28,7 @@ export const StoryCard = memo(function StoryCard({
   selectionMode = false,
   selected = false,
   onToggleSelect,
+  bulkSelectionMode = false,
   bulkSelected = false,
   onToggleBulkSelect,
   folders = [],
@@ -44,11 +45,15 @@ export const StoryCard = memo(function StoryCard({
   selectionMode?: boolean;
   selected?: boolean;
   onToggleSelect?: (storyId: string) => void;
-  // Separate, always-available multi-select for bulk Move/Delete (like Grid
-  // Media Library's corner circle) -- distinct from `selectionMode` above,
-  // which is the full-tile Share-for-Review picker. The two are mutually
-  // exclusive in the UI (see the render below) so they never fight over the
-  // same click.
+  // Separate multi-select for bulk Move/Delete -- distinct from
+  // `selectionMode` above, which is the full-tile Share-for-Review picker.
+  // The two are mutually exclusive in the UI (see the render below) so they
+  // never fight over the same click. Like `selectionMode`, this only ever
+  // shows its selection circle while its own explicit mode is active --
+  // never by default, and never just because of touch/hover (see
+  // bulkSelectionMode's own comment at its call site for why that used to
+  // be different).
+  bulkSelectionMode?: boolean;
   bulkSelected?: boolean;
   onToggleBulkSelect?: (storyId: string) => void;
   folders?: ContentFolderItem[];
@@ -141,6 +146,10 @@ export const StoryCard = memo(function StoryCard({
       onToggleSelect?.(storyId);
       return;
     }
+    if (bulkSelectionMode) {
+      onToggleBulkSelect?.(storyId);
+      return;
+    }
     if (files.length > 0) {
       setPreviewOpen(true);
     } else {
@@ -200,7 +209,7 @@ export const StoryCard = memo(function StoryCard({
           a full-size preview on click, not just a cursor change (same
           "View larger" intent as MediaFrame's zoom cursor in
           components/media-gallery.tsx). */}
-      {!selectionMode && thumbnailUrl && (
+      {!selectionMode && !bulkSelectionMode && thumbnailUrl && (
         <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all duration-150 group-hover:bg-black/20 group-hover:opacity-100">
           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm">
             <ZoomIcon className="h-4 w-4" />
@@ -225,7 +234,7 @@ export const StoryCard = memo(function StoryCard({
           title={name}
           onClick={handleOpen}
           className={`relative flex h-full w-full flex-col overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
-            selectionMode ? "cursor-pointer" : "cursor-zoom-in"
+            selectionMode || bulkSelectionMode ? "cursor-pointer" : "cursor-zoom-in"
           } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
         >
           <div className="relative min-h-0 flex-1 overflow-hidden">{coverContent}</div>
@@ -239,7 +248,7 @@ export const StoryCard = memo(function StoryCard({
           title={name}
           onClick={handleOpen}
           className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
-            selectionMode ? "cursor-pointer" : "cursor-zoom-in"
+            selectionMode || bulkSelectionMode ? "cursor-pointer" : "cursor-zoom-in"
           } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
         >
           {coverContent}
@@ -278,11 +287,15 @@ export const StoryCard = memo(function StoryCard({
       )}
 
       {/* Bulk-select circle for Move/Delete-all-at-once -- exact top-left
-          corner, same spot/hover-reveal pattern as Grid Media Library's
-          MediaThumb (always visible on touch via pointer-coarse, hover-only
-          on desktop). Hidden during Share's selectionMode, which already
-          owns that corner as its own picker. */}
-      {canManage && !selectionMode && onToggleBulkSelect && (
+          corner, same spot as Share's own selection circle. Only ever
+          rendered while bulkSelectionMode is explicitly active (entered via
+          the Share/export menu's "Select" item, stories-board.tsx) -- no
+          hover-reveal/opacity dance and no pointer-coarse-always-on
+          fallback like this used to have; both were what made every card
+          look permanently in selection mode on touch, since a coarse
+          pointer has no hover state to fall back to. Hidden during Share's
+          own selectionMode, which owns that corner as its own picker. */}
+      {canManage && !selectionMode && bulkSelectionMode && onToggleBulkSelect && (
         <button
           type="button"
           onClick={(e) => {
@@ -291,9 +304,7 @@ export const StoryCard = memo(function StoryCard({
             onToggleBulkSelect(storyId);
           }}
           title={bulkSelected ? "Deselect" : "Select"}
-          className={`absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100 ${
-            bulkSelected ? "opacity-100" : "opacity-0"
-          }`}
+          className="absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full"
         >
           {bulkSelected ? (
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">

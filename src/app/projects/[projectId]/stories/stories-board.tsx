@@ -122,12 +122,13 @@ export function StoriesBoard({
     setSelectedStoryIds(new Set());
   }
 
-  // Bulk Move/Delete: an always-available corner circle per card (see
-  // StoryCard's bulkSelected/onToggleBulkSelect), same Grid Media Library
-  // pattern -- no explicit "enter selection mode" step, the bottom bar just
-  // appears once anything is checked. Kept as its own Set/handlers rather
-  // than reusing selectionMode's above, since that one is the full-tile
-  // Share-for-Review picker and the two are mutually exclusive in the UI.
+  // Bulk Move/Delete: explicit "Select" entry (Share/export menu's own
+  // "Select Items" item, same corner circle spot as Share's own
+  // selectionMode above) -- no circle shows on any card until this is
+  // true. Kept as its own boolean/Set/handlers rather than reusing
+  // selectionMode above, since that one is the full-tile Share-for-Review
+  // picker and the two are mutually exclusive in the UI.
+  const [bulkSelectionMode, setBulkSelectionMode] = useState(false);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMoveDialogOpen, setBulkMoveDialogOpen] = useState(false);
   const [, startBulkAction] = useTransition();
@@ -164,6 +165,7 @@ export function StoriesBoard({
   }, []);
 
   function handleCancelBulkSelection() {
+    setBulkSelectionMode(false);
     setBulkSelectedIds(new Set());
     setBulkMoveDialogOpen(false);
   }
@@ -378,6 +380,14 @@ export function StoriesBoard({
                 handleCancelBulkSelection();
                 setSelectionMode(true);
               }}
+              onEnterBulkSelectionMode={
+                canManage
+                  ? () => {
+                      handleCancelSelection();
+                      setBulkSelectionMode(true);
+                    }
+                  : undefined
+              }
             />
           )}
           {/* Last in this cluster, not first -- its panel anchors via
@@ -478,6 +488,7 @@ export function StoriesBoard({
             selectionMode={selectionMode}
             selected={selectedStoryIds.has(story.id)}
             onToggleSelect={handleToggleSelect}
+            bulkSelectionMode={bulkSelectionMode}
             bulkSelected={bulkSelectedIds.has(story.id)}
             onToggleBulkSelect={handleToggleBulkSelect}
             folders={visibleFolders}
@@ -534,18 +545,24 @@ export function StoriesBoard({
         </div>
       )}
 
-      {bulkSelectedIds.size > 0 && (
+      {bulkSelectionMode && (
         <div className="fixed inset-x-0 bottom-0 z-30 flex flex-wrap items-center justify-center gap-3 border-t border-border bg-background px-4 py-3 shadow-[0_-2px_10px_rgba(0,0,0,0.06)]">
           <span className="text-xs tracking-wide text-muted uppercase">{bulkSelectedIds.size} selected</span>
           <Button type="button" variant="secondary" radius="none" onClick={handleCancelBulkSelection}>
             Cancel
           </Button>
           {visibleFolders.length > 0 && (
-            <Button type="button" variant="secondary" radius="none" onClick={() => setBulkMoveDialogOpen(true)}>
+            <Button
+              type="button"
+              variant="secondary"
+              radius="none"
+              onClick={() => setBulkMoveDialogOpen(true)}
+              disabled={bulkSelectedIds.size === 0}
+            >
               Move to Folder
             </Button>
           )}
-          <Button type="button" variant="primary" radius="none" onClick={handleBulkDelete}>
+          <Button type="button" variant="primary" radius="none" onClick={handleBulkDelete} disabled={bulkSelectedIds.size === 0}>
             Delete
           </Button>
         </div>
