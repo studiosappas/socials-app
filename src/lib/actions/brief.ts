@@ -423,7 +423,10 @@ export async function addBriefTaskLink(
   const trimmedUrl = url.trim();
   if (!trimmedUrl) return { success: false, message: "URL is required." };
 
+  // TEMPORARY DIAGNOSTIC LOGGING -- remove before merge.
+  console.log("[BRIEF_LINK_TRACE] addBriefTaskLink called", JSON.stringify({ trimmedUrl }));
   const resolved = await resolveExternalMedia(trimmedUrl);
+  console.log("[BRIEF_LINK_TRACE] resolveExternalMedia returned", JSON.stringify({ kind: resolved.kind }));
 
   if (resolved.kind === "error") {
     return { success: false, message: resolved.message };
@@ -442,6 +445,7 @@ export async function addBriefTaskLink(
       resolved.kind,
       resolved.label,
     );
+    console.log("[BRIEF_LINK_TRACE] createBriefMediaItem result", JSON.stringify({ success: result.success, message: result.message, kind: resolved.kind }));
     return { ...result, kind: resolved.kind };
   }
 
@@ -450,6 +454,7 @@ export async function addBriefTaskLink(
   // what gets saved (see its own comment on preserving the original on any
   // fallback).
   const linkResult = await createBriefLinkItem(projectId, taskId, section, resolved.url, notes, position);
+  console.log("[BRIEF_LINK_TRACE] createBriefLinkItem result (fell back to LINK)", JSON.stringify({ success: linkResult.success }));
   return { ...linkResult, kind: "link" };
 }
 
