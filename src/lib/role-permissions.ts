@@ -75,12 +75,14 @@ const WORKSPACE_PAGES: PermissionPageKey[] = ["overview", "grid", "calendar", "s
 // resolves an unset (null) custom_permissions through it too. There is no
 // second copy of this mapping anywhere else in the app.
 //
-// Owner isn't really "a preset" here -- getEffectivePermissions/
-// hasPagePermission below special-case it to always resolve to every page
-// regardless of this table's owner entry, so a role change or a stray
-// custom_permissions value can never lock an owner out of their own
-// project. It's still listed for completeness (e.g. so ROLE_DEFAULT_
-// PERMISSIONS[role] is total over ProjectRole without an `undefined` case).
+// Owner and Admin aren't really "a preset" here -- getEffectivePermissions/
+// hasPagePermission below special-case both to always resolve to every page
+// regardless of this table's entries or any stored custom_permissions, so a
+// role change or a stray custom_permissions value can never lock either out
+// of a project they're already a member of. They're still listed here for
+// completeness (e.g. so ROLE_DEFAULT_PERMISSIONS[role] is total over
+// ProjectRole without an `undefined` case, and so "Apply Admin default
+// permissions?" in Team & Permissions has a real preset to reset to).
 export const ROLE_DEFAULT_PERMISSIONS: Record<ProjectRole, PermissionPageKey[]> = {
   owner: ALL_PAGES,
   admin: ALL_PAGES,
@@ -121,7 +123,18 @@ export function getEffectivePermissions(
   role: ProjectRole,
   customPermissions: string[] | null | undefined,
 ): PermissionPageKey[] {
-  if (role === "owner") return ALL_PAGES;
+  // Owner and Admin are functionally equivalent for normal project access --
+  // both always get every page within a project they're already a member
+  // of, and custom_permissions can never narrow either (the incident that
+  // prompted this: an admin's page access silently depends on a role
+  // change/ownership transfer leaving stale custom_permissions behind, or on
+  // someone editing their row in Team & Permissions -- neither should be
+  // able to happen to an owner or admin, only to the roles below where
+  // restricted access is intentionally useful). Project-level MEMBERSHIP is
+  // untouched by this -- a user with no project_members row at all still
+  // gets no access whatsoever, regardless of role; this only governs which
+  // pages a role sees once already a member of this specific project.
+  if (role === "owner" || role === "admin") return ALL_PAGES;
   // Only null/undefined means "use the role's default" -- a non-null but
   // EMPTY array is a deliberate "no pages at all" override (a manager can
   // uncheck every box in Team & Permissions), not the same as never having

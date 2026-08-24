@@ -243,10 +243,24 @@ export function StoryEditor({
               height too so it doesn't grow unboundedly with a project's full
               media library. Inside the Grid/Stories popup (hideBackLink) the
               modal itself is already space-constrained, so cap to a single
-              visible row there instead -- scrolls internally either way. */}
+              visible row there instead -- scrolls internally either way.
+              Mobile row height is an EXPLICIT --tile-row-h value, same fix
+              (and same reason) as Post editor's own AddFromLibrarySection
+              (post-editor.tsx): an implicit auto-rows height driven by each
+              tile's own aspect-ratio collapses to near-zero before a real
+              device's async image load resolves, which read as tiles
+              splitting into repeated horizontal strips. --tile-row-h has no
+              dependency on any child's content/load state, so that can't
+              recur. Values are this section's own 9:16 (not Post's 3:4)
+              tiles at the same shared Modal width (both editors' intercepted-
+              route modals use the identical modal.tsx, max-w-3xl/p-4 sm:p-6,
+              grid-cols-4/gap-2) -- same tile widths (~60/73/77/83px at
+              320/375/390/414px), scaled to 9:16 instead of 3:4. sm: reverts
+              to the original desktop values -- auto-rows-auto + sm:aspect-
+              [9/16] on the tile, max-h-36 on the container -- untouched. */}
           <div
-            className={`grid grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-6 ${
-              hideBackLink ? "max-h-36" : "max-h-[min(1000px,65vh)]"
+            className={`grid grid-cols-4 gap-2 overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:107px] min-[375px]:[--tile-row-h:130px] min-[390px]:[--tile-row-h:137px] min-[414px]:[--tile-row-h:148px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 sm:auto-rows-auto ${
+              hideBackLink ? "max-h-[calc(var(--tile-row-h)*4/3+0.5rem)] sm:max-h-36" : "max-h-[min(1000px,65vh)]"
             }`}
           >
             {availableMedia.map((item) => (
@@ -277,14 +291,14 @@ export function StoryEditor({
                     }
                   });
                 }}
-                className="aspect-[9/16] overflow-hidden rounded-none border border-border"
+                className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[9/16]"
               >
                 {item.url && item.mediaType === "image" && (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={item.url} alt="" loading="lazy" className="h-full w-full object-cover" />
                 )}
                 {item.url && item.mediaType === "video" && (
-                  <video src={item.url} className="h-full w-full object-cover" muted />
+                  <video src={item.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
                 )}
               </button>
             ))}

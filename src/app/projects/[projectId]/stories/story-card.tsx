@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useState, useTransition } from "react";
+import { memo, useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteStory, moveStoryToFolder } from "@/lib/actions/stories";
@@ -28,6 +28,7 @@ export const StoryCard = memo(function StoryCard({
   selectionMode = false,
   selected = false,
   onToggleSelect,
+  bulkSelectionMode = false,
   bulkSelected = false,
   onToggleBulkSelect,
   folders = [],
@@ -44,11 +45,15 @@ export const StoryCard = memo(function StoryCard({
   selectionMode?: boolean;
   selected?: boolean;
   onToggleSelect?: (storyId: string) => void;
-  // Separate, always-available multi-select for bulk Move/Delete (like Grid
-  // Media Library's corner circle) -- distinct from `selectionMode` above,
-  // which is the full-tile Share-for-Review picker. The two are mutually
-  // exclusive in the UI (see the render below) so they never fight over the
-  // same click.
+  // Separate multi-select for bulk Move/Delete -- distinct from
+  // `selectionMode` above, which is the full-tile Share-for-Review picker.
+  // The two are mutually exclusive in the UI (see the render below) so they
+  // never fight over the same click. Like `selectionMode`, this only ever
+  // shows its selection circle while its own explicit mode is active --
+  // never by default, and never just because of touch/hover (see
+  // bulkSelectionMode's own comment at its call site for why that used to
+  // be different).
+  bulkSelectionMode?: boolean;
   bulkSelected?: boolean;
   onToggleBulkSelect?: (storyId: string) => void;
   folders?: ContentFolderItem[];
@@ -141,6 +146,10 @@ export const StoryCard = memo(function StoryCard({
       onToggleSelect?.(storyId);
       return;
     }
+    if (bulkSelectionMode) {
+      onToggleBulkSelect?.(storyId);
+      return;
+    }
     if (files.length > 0) {
       setPreviewOpen(true);
     } else {
@@ -200,7 +209,7 @@ export const StoryCard = memo(function StoryCard({
           a full-size preview on click, not just a cursor change (same
           "View larger" intent as MediaFrame's zoom cursor in
           components/media-gallery.tsx). */}
-      {!selectionMode && thumbnailUrl && (
+      {!selectionMode && !bulkSelectionMode && thumbnailUrl && (
         <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all duration-150 group-hover:bg-black/20 group-hover:opacity-100">
           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm">
             <ZoomIcon className="h-4 w-4" />
@@ -225,7 +234,7 @@ export const StoryCard = memo(function StoryCard({
           title={name}
           onClick={handleOpen}
           className={`relative flex h-full w-full flex-col overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
-            selectionMode ? "cursor-pointer" : "cursor-zoom-in"
+            selectionMode || bulkSelectionMode ? "cursor-pointer" : "cursor-zoom-in"
           } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
         >
           <div className="relative min-h-0 flex-1 overflow-hidden">{coverContent}</div>
@@ -239,7 +248,7 @@ export const StoryCard = memo(function StoryCard({
           title={name}
           onClick={handleOpen}
           className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border text-left transition-colors duration-150 ${
-            selectionMode ? "cursor-pointer" : "cursor-zoom-in"
+            selectionMode || bulkSelectionMode ? "cursor-pointer" : "cursor-zoom-in"
           } ${thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"}`}
         >
           {coverContent}
@@ -278,10 +287,20 @@ export const StoryCard = memo(function StoryCard({
       )}
 
       {/* Bulk-select circle for Move/Delete-all-at-once -- exact top-left
-          corner, same spot/hover-reveal pattern as Grid Media Library's
-          MediaThumb (always visible on touch via pointer-coarse, hover-only
-          on desktop). Hidden during Share's selectionMode, which already
-          owns that corner as its own picker. */}
+          corner, same spot as Share's own selection circle. Desktop keeps
+          its exact original behavior, restored as-is: the button is always
+          present (not gated by any mode), invisible at rest, revealed by
+          group-hover, and forced visible once bulkSelected regardless of
+          hover -- pure CSS, no explicit "Select" step needed there.
+          Touch has no hover state to fall back on, which is what made this
+          circle effectively always-on on mobile before (a plain
+          pointer-coarse:opacity-100, unconditional) -- now that fallback
+          only activates once bulkSelectionMode is explicitly entered (the
+          Share/export menu's "Select Items" item, stories-board.tsx),
+          so mobile stays circle-free until asked for exactly like the
+          desktop-only behavior always intended, without losing desktop's
+          own hover/click interaction at all. Hidden during Share's own
+          selectionMode, which owns that corner as its own picker. */}
       {canManage && !selectionMode && onToggleBulkSelect && (
         <button
           type="button"
@@ -291,9 +310,9 @@ export const StoryCard = memo(function StoryCard({
             onToggleBulkSelect(storyId);
           }}
           title={bulkSelected ? "Deselect" : "Select"}
-          className={`absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 pointer-coarse:opacity-100 ${
-            bulkSelected ? "opacity-100" : "opacity-0"
-          }`}
+          className={`absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition-opacity duration-150 group-hover:opacity-100 ${
+            bulkSelectionMode ? "pointer-coarse:opacity-100" : ""
+          } ${bulkSelected ? "opacity-100" : "opacity-0"}`}
         >
           {bulkSelected ? (
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
@@ -442,6 +461,8 @@ function AssetPreviewModal({
   const [index, setIndex] = useState(initialIndex);
   const [downloading, setDownloading] = useState(false);
   const file = files[index];
+  const trackRef = useRef<HTMLDivElement>(null);
+  const settleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -452,6 +473,37 @@ function AssetPreviewModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose, files.length]);
+
+  // Keeps the scroll-snap track (the actual finger-swipe surface, below) in
+  // sync whenever `index` changes for a reason OTHER than the user's own
+  // swipe -- the Prev/Next arrows and the keyboard handler above both still
+  // just set `index`, same as before this track existed. Also runs once on
+  // mount, which is a harmless no-op scroll to the already-correct position.
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    el.scrollTo({ left: index * el.clientWidth, behavior: "smooth" });
+  }, [index]);
+
+  // The reverse direction: a real finger swipe moves scrollLeft natively
+  // (CSS scroll-snap, no JS involved in the gesture itself) and this is
+  // what notices where it landed and updates `index` to match, once the
+  // gesture has actually settled -- not on every scroll tick mid-drag,
+  // which would fight the in-progress gesture by immediately re-triggering
+  // the programmatic scrollTo effect above at a stale target.
+  function handleTrackScroll() {
+    if (settleTimeoutRef.current) clearTimeout(settleTimeoutRef.current);
+    settleTimeoutRef.current = setTimeout(() => {
+      const el = trackRef.current;
+      if (!el || el.clientWidth === 0) return;
+      const nearest = Math.min(Math.max(Math.round(el.scrollLeft / el.clientWidth), 0), files.length - 1);
+      setIndex((prev) => (prev === nearest ? prev : nearest));
+    }, 100);
+  }
+
+  useEffect(() => () => {
+    if (settleTimeoutRef.current) clearTimeout(settleTimeoutRef.current);
+  }, []);
 
   if (!file) return null;
 
@@ -513,7 +565,7 @@ function AssetPreviewModal({
         </svg>
       </button>
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center px-4 sm:px-16">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center">
         {files.length > 1 && (
           <>
             <button
@@ -539,38 +591,61 @@ function AssetPreviewModal({
           </>
         )}
 
-        {/* Keyed by index, not file.url -- the url is a signed URL that gets
-            a new token every time it's re-signed even though the underlying
-            file didn't change, so keying by it forced a full remount (video
-            restart/image flash) on every unrelated background revalidation,
-            not just on an actual Prev/Next navigation. index is stable for
-            "which file is this" across re-signs, and still changes exactly
-            when the user navigates to a different file. */}
-        {file.mediaType === "video" ? (
-          <video
-            key={index}
-            src={file.url}
-            controls
-            playsInline
-            autoPlay
-            className="max-h-[86dvh] max-w-[92vw] object-contain"
-          />
-        ) : file.mediaType === "pdf" ? (
-          // The browser's own native PDF viewer (same one a direct link to
-          // a .pdf opens in a new tab) -- no client-side decoding/rendering
-          // of our own, and the original file is what's embedded, never a
-          // rasterized substitute, so page 2+ and text selection/search
-          // still work exactly like opening the PDF directly would.
-          <embed
-            key={index}
-            src={file.url}
-            type="application/pdf"
-            className="h-[86dvh] w-[92vw] max-w-4xl rounded bg-white"
-          />
-        ) : (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img key={index} src={file.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
-        )}
+        {/* Native horizontal scroll-snap track, Instagram-carousel-style --
+            every file is a full-width slide sitting side by side; a finger
+            swipe is the browser's own touch-scroll (no custom gesture/touch
+            handlers of our own to fight or get wrong), and CSS scroll-snap
+            settles it cleanly on a slide boundary every time. The Prev/Next
+            arrows above and the keyboard handler still just set `index` --
+            the effect above translates that into a smooth programmatic
+            scroll here, so all three input methods (swipe, arrows, keyboard)
+            drive the exact same state. overscroll-x-contain keeps a swipe
+            that runs out of slides from handing off to whatever's behind
+            this fixed full-screen modal; this axis is independent of page
+            vertical scroll, which this modal doesn't use and doesn't touch. */}
+        <div
+          ref={trackRef}
+          onScroll={handleTrackScroll}
+          className="flex h-full w-full snap-x snap-mandatory overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {files.map((f, i) => (
+            // Keyed by position, not f.url -- the url is a signed URL that
+            // gets a new token every time it's re-signed even though the
+            // underlying file didn't change, so keying by it forced a full
+            // remount (video restart/image flash) on every unrelated
+            // background revalidation. Position is stable for "which file is
+            // this" across re-signs.
+            <div
+              key={i}
+              className="flex h-full w-full shrink-0 snap-center items-center justify-center px-4 sm:px-16"
+            >
+              {f.mediaType === "video" ? (
+                <video
+                  src={f.url}
+                  controls
+                  playsInline
+                  // Only the currently-active slide autoplays -- every file
+                  // is mounted at once now (scroll-snap needs every slide
+                  // present to swipe between), so an unconditional autoPlay
+                  // here would start every video in the item simultaneously.
+                  autoPlay={i === index}
+                  className="max-h-[86dvh] max-w-[92vw] object-contain"
+                />
+              ) : f.mediaType === "pdf" ? (
+                // The browser's own native PDF viewer (same one a direct
+                // link to a .pdf opens in a new tab) -- no client-side
+                // decoding/rendering of our own, and the original file is
+                // what's embedded, never a rasterized substitute, so page 2+
+                // and text selection/search still work exactly like opening
+                // the PDF directly would.
+                <embed src={f.url} type="application/pdf" className="h-[86dvh] w-[92vw] max-w-4xl rounded bg-white" />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={f.url} alt="" className="max-h-[86dvh] max-w-[92vw] object-contain" />
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="flex shrink-0 flex-col items-center gap-1 pb-6">

@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Toast } from "@/components/ui/toast";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import type { ShareLinkItem } from "@/lib/data/share-links";
 import type { StoryStatus, MediaType } from "@/types/database";
@@ -81,6 +82,7 @@ export function StoriesBoard({
   shareTableMissing: boolean;
 }) {
   const router = useRouter();
+  const isTouchDevice = useIsTouchDevice();
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
@@ -122,12 +124,13 @@ export function StoriesBoard({
     setSelectedStoryIds(new Set());
   }
 
-  // Bulk Move/Delete: an always-available corner circle per card (see
-  // StoryCard's bulkSelected/onToggleBulkSelect), same Grid Media Library
-  // pattern -- no explicit "enter selection mode" step, the bottom bar just
-  // appears once anything is checked. Kept as its own Set/handlers rather
-  // than reusing selectionMode's above, since that one is the full-tile
-  // Share-for-Review picker and the two are mutually exclusive in the UI.
+  // Bulk Move/Delete: explicit "Select" entry (Share/export menu's own
+  // "Select Items" item, same corner circle spot as Share's own
+  // selectionMode above) -- no circle shows on any card until this is
+  // true. Kept as its own boolean/Set/handlers rather than reusing
+  // selectionMode above, since that one is the full-tile Share-for-Review
+  // picker and the two are mutually exclusive in the UI.
+  const [bulkSelectionMode, setBulkSelectionMode] = useState(false);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMoveDialogOpen, setBulkMoveDialogOpen] = useState(false);
   const [, startBulkAction] = useTransition();
@@ -164,6 +167,7 @@ export function StoriesBoard({
   }, []);
 
   function handleCancelBulkSelection() {
+    setBulkSelectionMode(false);
     setBulkSelectedIds(new Set());
     setBulkMoveDialogOpen(false);
   }
@@ -366,8 +370,50 @@ export function StoriesBoard({
         </label>
         {/* Same top-right icon pairing as Grid's own "Add New Post" row
             (grid-board.tsx) -- share + "+" as compact icon buttons, not a
-            full-width text button, so the two content boards read the same. */}
-        <div className="flex shrink-0 items-center gap-1">
+            full-width text button, so the two content boards read the same.
+            justify-end: on mobile this row is a full-width flex item of the
+            parent's flex-col stack (unlike Grid's own row, which is always
+            a single flex-row with justify-between doing this for free), so
+            its own children default-align to the row's LEFT edge instead of
+            the right -- which put ShareMenuButton's trigger near x≈32 on a
+            narrow phone instead of the right edge, and since its dropdown
+            panel is right-0-anchored TO THAT TRIGGER (not the viewport), the
+            224px-wide panel rendered almost entirely off-screen to the left,
+            making every item in it (Share for Review/Select Items/Manage
+            Review Links) untappable on mobile. justify-end is a no-op on
+            desktop (sm:flex-row): there this div is already only as wide as
+            its own content, so redistributing space along its main axis has
+            nothing to do. */}
+        <div className="flex shrink-0 items-center justify-end gap-1">
+          {/* Touch-only, same isTouchDevice gate and Edit Grid/Done shape as
+              Grid's own reorder-mode toggle (grid-board.tsx) -- a directly
+              visible button, not a menu item a touch user has to already
+              suspect exists behind the Share icon before finding it. The
+              "Select Items" item inside ShareMenuButton's dropdown below is
+              left in place (desktop mouse users already know to look there,
+              and it's a second path into the exact same bulkSelectionMode,
+              never a second selection system) -- this button is purely an
+              additional, more discoverable entry point for touch. */}
+          {isTouchDevice && canManage && stories.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                if (bulkSelectionMode) {
+                  handleCancelBulkSelection();
+                } else {
+                  handleCancelSelection();
+                  setBulkSelectionMode(true);
+                }
+              }}
+              className={`rounded-full border px-3 py-1.5 text-xs tracking-wide uppercase transition-colors duration-150 ${
+                bulkSelectionMode
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-border text-foreground hover:border-foreground/40"
+              }`}
+            >
+              {bulkSelectionMode ? "Done" : "Select"}
+            </button>
+          )}
           {stories.length > 0 && (
             <ShareMenuButton
               projectId={projectId}
@@ -378,6 +424,14 @@ export function StoriesBoard({
                 handleCancelBulkSelection();
                 setSelectionMode(true);
               }}
+              onEnterBulkSelectionMode={
+                canManage
+                  ? () => {
+                      handleCancelSelection();
+                      setBulkSelectionMode(true);
+                    }
+                  : undefined
+              }
             />
           )}
           {/* Last in this cluster, not first -- its panel anchors via
@@ -478,6 +532,7 @@ export function StoriesBoard({
             selectionMode={selectionMode}
             selected={selectedStoryIds.has(story.id)}
             onToggleSelect={handleToggleSelect}
+            bulkSelectionMode={bulkSelectionMode}
             bulkSelected={bulkSelectedIds.has(story.id)}
             onToggleBulkSelect={handleToggleBulkSelect}
             folders={visibleFolders}
@@ -534,18 +589,31 @@ export function StoriesBoard({
         </div>
       )}
 
-      {bulkSelectedIds.size > 0 && (
+      {/* Shows if EITHER bulkSelectionMode is explicitly active (mobile's
+          "Select Items" entry, with nothing chosen yet) OR anything is
+          already selected (desktop's original hover+click-the-circle flow,
+          which never needed or used an explicit mode) -- restores the
+          exact original "the bar just appears once something's checked"
+          desktop behavior while still giving mobile's explicit entry point
+          an immediate, obvious way to exit. */}
+      {(bulkSelectionMode || bulkSelectedIds.size > 0) && (
         <div className="fixed inset-x-0 bottom-0 z-30 flex flex-wrap items-center justify-center gap-3 border-t border-border bg-background px-4 py-3 shadow-[0_-2px_10px_rgba(0,0,0,0.06)]">
           <span className="text-xs tracking-wide text-muted uppercase">{bulkSelectedIds.size} selected</span>
           <Button type="button" variant="secondary" radius="none" onClick={handleCancelBulkSelection}>
             Cancel
           </Button>
           {visibleFolders.length > 0 && (
-            <Button type="button" variant="secondary" radius="none" onClick={() => setBulkMoveDialogOpen(true)}>
+            <Button
+              type="button"
+              variant="secondary"
+              radius="none"
+              onClick={() => setBulkMoveDialogOpen(true)}
+              disabled={bulkSelectedIds.size === 0}
+            >
               Move to Folder
             </Button>
           )}
-          <Button type="button" variant="primary" radius="none" onClick={handleBulkDelete}>
+          <Button type="button" variant="primary" radius="none" onClick={handleBulkDelete} disabled={bulkSelectedIds.size === 0}>
             Delete
           </Button>
         </div>
@@ -798,18 +866,17 @@ function SortFilterMenu({
         <SortFilterIcon />
       </button>
       {open && (
-        // Anchored left on mobile, right from sm: up -- this toolbar's own
-        // row (the div this button sits in) is flex-col below sm: (each
-        // row left-aligned, full width) and only becomes a single
-        // right-trailing flex-row at sm: and above (see the parent
-        // toolbar's own className). A right-0-anchored panel on a trigger
-        // sitting near the LEFT edge of a narrow, wrapped row pulls the
-        // panel's own left edge past the viewport -- confirmed at 320px,
-        // where the panel visibly clipped regardless of which icon in the
-        // cluster it was. left-0 there instead keeps it fully on-screen;
-        // sm:right-0 restores the original anchor once the toolbar is a
-        // real right-trailing row with room to its left.
-        <div className="absolute left-0 top-8 z-20 w-48 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg sm:left-auto sm:right-0">
+        // right-0 at every width, same anchor as ShareMenuButton's own panel
+        // right next to this one -- the icon-cluster row this trigger sits
+        // in is justify-end (see the parent div's own comment), so this
+        // trigger sits at the row's RIGHT edge on mobile too, not the left.
+        // A now-stale left-0 mobile override here (from before the cluster
+        // was justify-end'd) anchored the panel's LEFT edge to a
+        // right-sitting trigger, pushing a 192px-wide panel off the RIGHT
+        // side of a 320-414px viewport instead -- confirmed live, same
+        // off-screen-panel bug class as ShareMenuButton's Round 3 fix, just
+        // the opposite direction now that the trigger itself moved.
+        <div className="absolute right-0 top-8 z-20 w-48 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
           {view === "main" ? (
             <>
               <p className="px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">Sort</p>

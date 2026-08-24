@@ -42,6 +42,7 @@ export function ShareMenuButton({
   tableMissing,
   exportLinks = [],
   onEnterSelectionMode,
+  onEnterBulkSelectionMode,
 }: {
   projectId: string;
   links: ShareLinkItem[];
@@ -49,6 +50,12 @@ export function ShareMenuButton({
   tableMissing: boolean;
   exportLinks?: { href: string; label: string; title?: string }[];
   onEnterSelectionMode: () => void;
+  // Optional -- only Content (stories-board.tsx) has a bulk Move/Delete
+  // picker to enter; Grid has no equivalent, so it simply never passes
+  // this and no "Select Items" entry appears there. Same
+  // enter-a-board-level-selection-mode shape as onEnterSelectionMode
+  // above, just for a different picker.
+  onEnterBulkSelectionMode?: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
@@ -88,6 +95,18 @@ export function ShareMenuButton({
           >
             Share for Review
           </button>
+          {onEnterBulkSelectionMode && (
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onEnterBulkSelectionMode();
+              }}
+              className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+            >
+              Select Items
+            </button>
+          )}
           {canManage && (
             <button
               type="button"
