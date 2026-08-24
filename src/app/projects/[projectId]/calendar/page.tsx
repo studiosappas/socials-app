@@ -13,7 +13,7 @@ import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-
 import { getProjectMemberOptions } from "@/lib/data/post-comments";
 import { mergeWorkspaceSettings } from "@/lib/account-settings";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import { hasPagePermission } from "@/lib/role-permissions";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { AccessRestricted } from "../access-restricted";
 
 export default async function CalendarPage({
@@ -123,7 +123,9 @@ export default async function CalendarPage({
     return <AccessRestricted />;
   }
 
-  const canManage = membership.role === "owner" || membership.role === "admin";
+  // Ordinary content-editing capability, not "genuinely privileged" -- see
+  // grid/page.tsx's identical comment.
+  const canManage = canEditContent(membership.role);
 
   const allPostIds = [
     ...(scheduledPosts ?? []).map((p) => p.id),

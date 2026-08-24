@@ -1,7 +1,7 @@
 ﻿import { createClient } from "@/lib/supabase/server";
 import { getShareLinksData } from "@/lib/data/share-links";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import { hasPagePermission } from "@/lib/role-permissions";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { StoriesBoard } from "./stories-board";
 import { AccessRestricted } from "../access-restricted";
 import type { MediaType } from "@/types/database";
@@ -29,7 +29,9 @@ export default async function StoriesPage({
     return <AccessRestricted />;
   }
 
-  const canManage = membership.role === "owner" || membership.role === "admin";
+  // Ordinary content-editing capability, not "genuinely privileged" -- see
+  // grid/page.tsx's identical comment.
+  const canManage = canEditContent(membership.role);
 
   const { data: stories } = await supabase
     .from("stories")

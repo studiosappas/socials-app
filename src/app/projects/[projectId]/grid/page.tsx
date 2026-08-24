@@ -2,7 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { getShareLinksData } from "@/lib/data/share-links";
 import { getCachedSignedUrl, getCachedSignedUrls } from "@/lib/signed-url-cache";
-import { hasPagePermission } from "@/lib/role-permissions";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { GridBoard, type GridBoardRow, type MediaFolder, type MediaLibraryItem } from "./grid-board";
 import { AccessRestricted } from "../access-restricted";
 
@@ -29,7 +29,10 @@ export default async function GridPage({
     return <AccessRestricted />;
   }
 
-  const canManage = membership.role === "owner" || membership.role === "admin";
+  // "Ordinary content editing" capability, not "genuinely privileged" --
+  // Member (editor) can use Grid normally, matching the RLS widening in
+  // supabase/fix_project_role_permission_presets.sql's Section 2.
+  const canManage = canEditContent(membership.role);
 
   const { data: project } = await supabase
     .from("projects")

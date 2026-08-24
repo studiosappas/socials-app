@@ -46,7 +46,9 @@ import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { GridCropOverlay, coverTransformStyle } from "../../grid/grid-crop-overlay";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
-import type { PostStatus, PostType, ReviewStatus } from "@/types/database";
+import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
+import { canSubmitClientReview } from "@/lib/role-permissions";
+import { submitClientPostReview } from "@/lib/actions/posts";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
 
 // Module-level constants (not object literals inline in JSX) so the same
@@ -108,6 +110,7 @@ export function PostEditor({
   links,
   mediaLibraryPromise,
   canManage,
+  role,
   currentUserId,
   members,
   customFonts = [],
@@ -125,6 +128,10 @@ export function PostEditor({
   // fields, asset carousel, links, save) never waits on it.
   mediaLibraryPromise: Promise<MediaLibraryItem[]>;
   canManage: boolean;
+  // Raw role, alongside canManage -- only consumed by PostMainForm, to
+  // offer Client their own narrow Approval Status control. Every other
+  // field/control in this editor keys off canManage exactly as before.
+  role: ProjectRole;
   currentUserId: string;
   members: ProjectMemberOption[];
   customFonts?: CustomFontFace[];
@@ -458,6 +465,7 @@ export function PostEditor({
         post={post}
         links={links}
         canManage={canManage}
+        role={role}
       />
 
       <ItemComments
@@ -1034,12 +1042,15 @@ function PostMainForm({
   post,
   links,
   canManage,
+  role,
 }: {
   projectId: string;
   post: PostRecord;
   links: PostLinkItem[];
   canManage: boolean;
+  role: ProjectRole;
 }) {
+  const isClient = canSubmitClientReview(role);
   // Adding/replacing/removing media auto-suggests the right type (see
   // lib/post-type.ts's syncPostType, which writes posts.post_type directly
   // and revalidates) -- this follows that fresh server value whenever it
@@ -1065,6 +1076,12 @@ function PostMainForm({
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>(post.review_status);
   const [scheduledDate, setScheduledDate] = useState(post.scheduled_date ?? "");
   const [scheduledTime, setScheduledTime] = useState(post.scheduled_time ?? "");
+  // Client's own optimistic view of review_status -- deliberately separate
+  // state from `reviewStatus` above (which is what the owner/admin/editor
+  // form save submits), since a client's review goes through a completely
+  // different, immediate-submit action, not the batched form save.
+  const [clientReviewStatus, setClientReviewStatus] = useState<ReviewStatus>(post.review_status);
+  const [clientReviewSaving, setClientReviewSaving] = useState(false);
   if (post !== prevPost) {
     setPrevPost(post);
     setCaption(post.caption);
@@ -1073,6 +1090,7 @@ function PostMainForm({
     setReviewStatus(post.review_status);
     setScheduledDate(post.scheduled_date ?? "");
     setScheduledTime(post.scheduled_time ?? "");
+    setClientReviewStatus(post.review_status);
   }
 
   const [addedToTodo, setAddedToTodo] = useState(false);
@@ -1082,6 +1100,21 @@ function PostMainForm({
   const [, startTransition] = useTransition();
   const [captionEl, setCaptionEl] = useState<HTMLTextAreaElement | null>(null);
   const { showError } = useToast();
+
+  function handleClientReview(status: "approved" | "changes_requested") {
+    if (clientReviewSaving) return;
+    const previous = clientReviewStatus;
+    setClientReviewStatus(status);
+    setClientReviewSaving(true);
+    startTransition(async () => {
+      const result = await submitClientPostReview(post.id, status);
+      setClientReviewSaving(false);
+      if (!result.success) {
+        setClientReviewStatus(previous);
+        showError(result.message ?? "Couldn't save your review. Please try again.");
+      }
+    });
+  }
 
   function handleAddToTodo() {
     setTodoError(undefined);
@@ -1212,21 +1245,58 @@ function PostMainForm({
           </label>
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Approval Status</span>
-            {/* Same column a client's review-link submission writes to
-                (set_post_review_status_by_token) -- this updates automatically
-                based on their latest review, and can also be changed manually
-                here, same as the workflow Status select next to it. */}
-            <select
-              name="review_status"
-              value={reviewStatus}
-              onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
-              disabled={!canManage}
-              className={fieldClass}
-            >
-              <option value="pending">Pending Review</option>
-              <option value="approved">Approved</option>
-              <option value="changes_requested">Needs Changes</option>
-            </select>
+            {isClient ? (
+              // Client's own client-safe path -- immediate-submit via
+              // set_post_review_status (see submitClientPostReview), never
+              // the batched form save below (which RLS wouldn't allow a
+              // client to reach anyway). No "Pending Review" option here on
+              // purpose -- that RPC only ever accepts approved/changes_requested,
+              // matching the anonymous token flow's own reviewer-facing subset.
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleClientReview("approved")}
+                  disabled={clientReviewSaving}
+                  className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 disabled:opacity-50 ${
+                    clientReviewStatus === "approved"
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border text-foreground hover:border-foreground/40"
+                  }`}
+                >
+                  Approved
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleClientReview("changes_requested")}
+                  disabled={clientReviewSaving}
+                  className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 disabled:opacity-50 ${
+                    clientReviewStatus === "changes_requested"
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border text-foreground hover:border-foreground/40"
+                  }`}
+                >
+                  Needs Changes
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Same column a client's review-link submission writes to
+                    (set_post_review_status_by_token) -- this updates automatically
+                    based on their latest review, and can also be changed manually
+                    here, same as the workflow Status select next to it. */}
+                <select
+                  name="review_status"
+                  value={reviewStatus}
+                  onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
+                  disabled={!canManage}
+                  className={fieldClass}
+                >
+                  <option value="pending">Pending Review</option>
+                  <option value="approved">Approved</option>
+                  <option value="changes_requested">Needs Changes</option>
+                </select>
+              </>
+            )}
           </label>
           <label className="flex flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>

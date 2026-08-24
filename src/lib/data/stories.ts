@@ -2,7 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import type { StoryStatus, MediaType, ReviewStatus } from "@/types/database";
+import { canEditContent } from "@/lib/role-permissions";
+import type { StoryStatus, MediaType, ProjectRole, ReviewStatus } from "@/types/database";
 
 export type StoryFrameItem = {
   frameId: string;
@@ -27,6 +28,9 @@ export type StoryPageData = {
   links: StoryLinkItem[];
   mediaLibrary: MediaLibraryItem[];
   canManage: boolean;
+  // The raw role, alongside the derived canManage -- see PostCoreData's
+  // identical field for why (Client's own narrow Approval Status control).
+  role: ProjectRole;
   currentUserId: string;
   members: ProjectMemberOption[];
 };
@@ -96,7 +100,8 @@ export async function getStoryPageData(
       ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
       : Promise.resolve({ data: [] }),
   ]);
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  const role: ProjectRole = membership?.role ?? "viewer";
+  const canManage = canEditContent(role);
   const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
@@ -147,5 +152,5 @@ export async function getStoryPageData(
 
   const links: StoryLinkItem[] = (storyLinks ?? []).map((l) => ({ id: l.id, url: l.url, label: l.label }));
 
-  return { story, frames: frameItems, links, mediaLibrary, canManage, currentUserId: user!.id, members };
+  return { story, frames: frameItems, links, mediaLibrary, canManage, role, currentUserId: user!.id, members };
 }

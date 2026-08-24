@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { getBrandMoodboard } from "@/lib/data/brand-moodboard";
-import { hasPagePermission } from "@/lib/role-permissions";
+import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { BriefBoard, type BriefTaskData } from "./brief-board";
 import { AccessRestricted } from "../access-restricted";
 
@@ -42,7 +42,9 @@ export default async function BriefPage({
     return <AccessRestricted />;
   }
 
-  const canManage = membership.role === "owner" || membership.role === "admin";
+  // Ordinary content-editing capability, not "genuinely privileged" -- see
+  // grid/page.tsx's identical comment.
+  const canManage = canEditContent(membership.role);
   const taskIds = (tasks ?? []).map((t) => t.id);
 
   // Fetched as flat, independent queries (rather than a nested embed) so a

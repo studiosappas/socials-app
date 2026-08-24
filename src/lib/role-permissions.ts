@@ -140,3 +140,32 @@ export function hasPagePermission(
 ): boolean {
   return getEffectivePermissions(role, customPermissions).includes(page);
 }
+
+// ACTION CAPABILITY, distinct from PAGE ACCESS above: whether this role can
+// perform ordinary day-to-day content edits (Grid/Calendar/Brief/Content/
+// Assets writes) once they've already reached one of those pages. Matches
+// exactly the roles the corresponding RLS policies now allow (see
+// supabase/fix_project_role_permission_presets.sql's Section 2) -- 'editor'
+// ("Member") joins 'owner'/'admin' here, but 'viewer' and legacy 'designer'
+// deliberately do NOT, and neither does 'client' (whose own, separate,
+// narrower capability is canSubmitClientReview below).
+//
+// This is the single source every content page's own `canManage` value now
+// computes from (grid/page.tsx, calendar/page.tsx, brief/page.tsx,
+// stories/page.tsx, assets/page.tsx, lib/data/posts.ts, lib/data/stories.ts)
+// -- deliberately NOT plugged into settings-access.ts's own canManage/isOwner,
+// which gate genuinely privileged operations (Team & Permissions, project
+// settings, Danger Zone) that stay owner/admin-only regardless of this.
+export function canEditContent(role: ProjectRole | null | undefined): boolean {
+  return role === "owner" || role === "admin" || role === "editor";
+}
+
+// Client's own narrow capability: submitting Approval Status through the
+// dedicated set_post_review_status/set_story_review_status DB functions
+// (already SECURITY DEFINER, already self-restricted to project_role =
+// 'client', already restricted to 'approved'/'changes_requested' -- this
+// helper doesn't grant anything by itself, it only decides whether the UI
+// shows the client-safe review control at all).
+export function canSubmitClientReview(role: ProjectRole | null | undefined): boolean {
+  return role === "client";
+}

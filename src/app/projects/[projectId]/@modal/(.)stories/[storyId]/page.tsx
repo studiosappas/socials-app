@@ -22,6 +22,7 @@ export default async function InterceptedStoryPage({
         links={data.links}
         mediaLibrary={data.mediaLibrary}
         canManage={data.canManage}
+        role={data.role}
         currentUserId={data.currentUserId}
         members={data.members}
         hideBackLink
