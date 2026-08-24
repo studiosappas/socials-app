@@ -92,7 +92,12 @@ export async function inviteMember(
   // log write different rows/tables, and the project-name read doesn't
   // depend on either.
   const [, , { data: project }] = await Promise.all([
-    permissions.length > 0
+    // Admin (owner isn't invitable at all, see INVITABLE_ROLES) never gets a
+    // custom_permissions write here -- getEffectivePermissions bypasses it
+    // for admin regardless, so persisting one would just be a stored value
+    // that silently does nothing; the invite form itself already hides this
+    // section for Admin, this is the matching server-side guard.
+    permissions.length > 0 && role !== "admin"
       ? supabase
           .from("project_members")
           .update({ custom_permissions: permissions })

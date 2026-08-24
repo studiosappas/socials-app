@@ -53,6 +53,12 @@ export function TeamPanel({
     undefined,
   );
   const [invitePermissions, setInvitePermissions] = useState<string[]>([]);
+  // Controlled (not just a defaultValue) so the Custom Permissions section
+  // below can hide itself the moment Admin is picked -- Owner/Admin always
+  // resolve to full access regardless of what's checked here (see
+  // getEffectivePermissions), so offering the checkboxes for Admin would be
+  // a control that visibly does nothing once saved.
+  const [inviteRole, setInviteRole] = useState<ProjectRole>("editor");
   const { showError } = useToast();
 
   function toggleInvitePermission(key: string) {
@@ -107,7 +113,12 @@ export function TeamPanel({
           <h2 className={labelClass}>Invite Collaborators and Define Exactly What They Can Access.</h2>
           <form action={inviteAction} className="flex flex-col gap-4">
             <div className="flex flex-col gap-2 sm:flex-row">
-              <select name="role" defaultValue="editor" className={`${fieldClass} sm:w-32`}>
+              <select
+                name="role"
+                value={inviteRole}
+                onChange={(e) => setInviteRole(e.target.value as ProjectRole)}
+                className={`${fieldClass} sm:w-32`}
+              >
                 {INVITABLE_ROLES.map((r) => (
                   <option key={r} value={r}>
                     {ROLE_LABEL[r]}
@@ -126,28 +137,30 @@ export function TeamPanel({
               </Button>
             </div>
 
-            <div className="flex flex-col gap-2">
-              <span className="text-sm font-semibold">Custom Permissions</span>
-              <p className="text-xs text-muted">
-                Leave unchecked to use {ROLE_LABEL.editor}&apos;s default access -- check any page to grant this
-                invite access only to those pages instead.
-              </p>
+            {inviteRole !== "admin" && (
               <div className="flex flex-col gap-2">
-                {PERMISSION_PAGES.map((page) => (
-                  <label key={page.key} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      name="permissions"
-                      value={page.key}
-                      checked={invitePermissions.includes(page.key)}
-                      onChange={() => toggleInvitePermission(page.key)}
-                      className="h-3.5 w-3.5 accent-foreground"
-                    />
-                    {page.label}
-                  </label>
-                ))}
+                <span className="text-sm font-semibold">Custom Permissions</span>
+                <p className="text-xs text-muted">
+                  Leave unchecked to use {ROLE_LABEL[inviteRole]}&apos;s default access -- check any page to grant
+                  this invite access only to those pages instead.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {PERMISSION_PAGES.map((page) => (
+                    <label key={page.key} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        name="permissions"
+                        value={page.key}
+                        checked={invitePermissions.includes(page.key)}
+                        onChange={() => toggleInvitePermission(page.key)}
+                        className="h-3.5 w-3.5 accent-foreground"
+                      />
+                      {page.label}
+                    </label>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             {inviteState?.message && <p className="text-xs text-error">{inviteState.message}</p>}
           </form>
@@ -240,7 +253,15 @@ function TeamMemberRow({
       try {
         await updateMemberRole(projectId, member.userId, role, applyPreset);
         if (!roleChanged) {
-          await updateMemberPermissions(projectId, member.userId, useCustomPermissions ? permissions : null);
+          // Admin (and owner, unreachable here since INVITABLE_ROLES excludes
+          // it from this row's own role select) always saves null regardless
+          // of the checkbox state -- getEffectivePermissions already bypasses
+          // custom_permissions for both, so this just keeps the stored row
+          // honest instead of leaving a value that quietly does nothing.
+          // Also naturally clears any pre-existing stale value the next time
+          // an admin's row is opened and saved, with no separate migration.
+          const nextPermissions = role === "admin" || role === "owner" ? null : useCustomPermissions ? permissions : null;
+          await updateMemberPermissions(projectId, member.userId, nextPermissions);
         }
       } catch (error) {
         console.error("Failed to save member edit:", error);
@@ -309,7 +330,14 @@ function TeamMemberRow({
           <span className="text-right">
             <span className="block text-xs tracking-wide text-foreground uppercase">{ROLE_LABEL[member.role]}</span>
             <span className="block text-[10px] text-muted">
-              {member.customPermissions ? "Custom permissions" : ROLE_DESCRIPTION[member.role]}
+              {/* Owner/admin never show "Custom permissions" here even if a
+                  stale value is still sitting in the row -- it can't
+                  actually restrict either role (getEffectivePermissions
+                  bypasses it), so the label would misrepresent their real,
+                  full access. */}
+              {member.customPermissions && member.role !== "owner" && member.role !== "admin"
+                ? "Custom permissions"
+                : ROLE_DESCRIPTION[member.role]}
             </span>
           </span>
           {canEditThisRow && (
@@ -375,30 +403,40 @@ function TeamMemberRow({
             <span className="text-xs text-muted">{ROLE_DESCRIPTION[role]}</span>
           </label>
 
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={useCustomPermissions}
-              onChange={(e) => setUseCustomPermissions(e.target.checked)}
-              className="h-3.5 w-3.5 accent-foreground"
-            />
-            Use custom permissions instead of {ROLE_LABEL[role]}&apos;s default access
-          </label>
+          {/* Admin (and owner, unreachable via this row's own select) always
+              gets full access regardless of custom_permissions -- see
+              getEffectivePermissions -- so this checkbox+list would be a
+              control that visibly does nothing once saved. Hidden rather
+              than shown-disabled, matching handleSaveEdit's own guard that
+              forces a null write for these two roles either way. */}
+          {role !== "admin" && role !== "owner" && (
+            <>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={useCustomPermissions}
+                  onChange={(e) => setUseCustomPermissions(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-foreground"
+                />
+                Use custom permissions instead of {ROLE_LABEL[role]}&apos;s default access
+              </label>
 
-          {useCustomPermissions && (
-            <div className="flex flex-col gap-2 pl-1">
-              {PERMISSION_PAGES.map((page) => (
-                <label key={page.key} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={permissions.includes(page.key)}
-                    onChange={() => togglePermission(page.key)}
-                    className="h-3.5 w-3.5 accent-foreground"
-                  />
-                  {page.label}
-                </label>
-              ))}
-            </div>
+              {useCustomPermissions && (
+                <div className="flex flex-col gap-2 pl-1">
+                  {PERMISSION_PAGES.map((page) => (
+                    <label key={page.key} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={permissions.includes(page.key)}
+                        onChange={() => togglePermission(page.key)}
+                        className="h-3.5 w-3.5 accent-foreground"
+                      />
+                      {page.label}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
           <div className="flex gap-2">
