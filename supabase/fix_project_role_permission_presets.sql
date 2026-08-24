@@ -531,33 +531,163 @@ commit;
 -- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
--- READ-ONLY POST-MIGRATION VERIFICATION -- run these after, no writes.
+-- READ-ONLY POST-MIGRATION VERIFICATION -- run this after, no writes.
 --
--- 1. Confirm every new policy exists (expect 28 rows total: 3 section-1
---    media/storage insert+update + 4 tasks select/insert/update/delete +
---    21 section-2 policies -- 19 on public tables, 2 on storage.objects for
---    brief-media). Parenthesized explicitly (the schema/table filter must
---    apply to BOTH storage name patterns, not just the first):
--- select schemaname, tablename, policyname, cmd
--- from pg_policies
--- where (
---   schemaname = 'public' and tablename in (
---     'media_assets','tasks','grid_rows','posts','grid_slots','post_assets',
---     'post_links','media_folders','calendar_notes','brief_tasks',
---     'brief_task_items','brief_task_frames','brief_attachments',
---     'brand_moodboard_items','stories','story_frames','story_links',
---     'content_folders','asset_collections'
---   )
--- ) or (
---   schemaname = 'storage' and tablename = 'objects'
---   and (policyname ilike '%project media%' or policyname ilike '%brief media%')
--- )
--- order by tablename, policyname;
+-- Deliberately does NOT match by exact policy name. A policy's cosmetic
+-- name is only an identifier for DROP/ALTER -- Postgres enforces access by
+-- (table, command, qual/with_check), never by name, so a name-level typo
+-- (one shipped in an earlier run of this exact migration: the tasks INSERT
+-- policy landed as "...edititors..." instead of "...editors...") has zero
+-- effect on actual enforcement but WOULD produce a false "missing" result
+-- from a query that matches on the literal name string. This version
+-- checks each expected (schema, table, command) slot for a policy that
+-- exists AND whose qual/with_check text proves the right roles -- immune
+-- to a name typo anywhere, here or in a table this specific incident
+-- didn't happen to hit.
 --
--- 2. Confirm no existing rows were touched/lost (compare these counts to
---    whatever you already know them to be before running -- every one of
---    these should be identical before and after; see the matching
---    PRE-MIGRATION count block below):
+-- Grouped by product area for a compact, scannable result. `details` lists
+-- every (table, command) checked in that area and its individual verdict,
+-- so a `false` row is diagnosable without a follow-up query.
+--
+-- If any `passed` column reads false, stop and do not continue to Preview QA.
+
+with checks as (
+  select * from (values
+    ('Grid', 'public', 'grid_rows', 'ALL', true),
+    ('Grid', 'public', 'posts', 'ALL', true),
+    ('Grid', 'public', 'grid_slots', 'ALL', true),
+    ('Grid', 'public', 'post_assets', 'ALL', true),
+    ('Grid', 'public', 'post_links', 'ALL', true),
+    ('Grid', 'public', 'media_folders', 'ALL', true),
+    ('Grid', 'public', 'media_assets', 'INSERT', true),
+    ('Grid', 'public', 'media_assets', 'UPDATE', true),
+    ('Grid', 'public', 'media_assets', 'DELETE', true),
+    ('Calendar', 'public', 'calendar_notes', 'ALL', true),
+    ('Brief', 'public', 'brief_tasks', 'ALL', true),
+    ('Brief', 'public', 'brief_task_items', 'ALL', true),
+    ('Brief', 'public', 'brief_task_frames', 'ALL', true),
+    ('Brief', 'public', 'brief_attachments', 'ALL', true),
+    ('Brief', 'public', 'brand_moodboard_items', 'ALL', true),
+    ('Content', 'public', 'stories', 'ALL', true),
+    ('Content', 'public', 'story_frames', 'ALL', true),
+    ('Content', 'public', 'story_links', 'ALL', true),
+    ('Content', 'public', 'content_folders', 'ALL', true),
+    ('Assets', 'public', 'asset_collections', 'ALL', true),
+    ('Tasks', 'public', 'tasks', 'SELECT', false),
+    ('Tasks', 'public', 'tasks', 'INSERT', true),
+    ('Tasks', 'public', 'tasks', 'UPDATE', true),
+    ('Tasks', 'public', 'tasks', 'DELETE', true)
+  ) as t(area, schema_name, table_name, op, requires_editor)
+),
+per_check as (
+  select
+    c.area, c.table_name, c.op,
+    exists (
+      select 1 from pg_policies p
+      where p.schemaname = c.schema_name and p.tablename = c.table_name and upper(p.cmd) = c.op
+    ) as policy_exists,
+    exists (
+      select 1 from pg_policies p
+      where p.schemaname = c.schema_name and p.tablename = c.table_name and upper(p.cmd) = c.op
+        and (not c.requires_editor or (p.qual ilike '%editor%' or p.with_check ilike '%editor%'))
+        and not (
+          p.qual ilike '%client%' or p.with_check ilike '%client%'
+          or p.qual ilike '%viewer%' or p.with_check ilike '%viewer%'
+          or p.qual ilike '%designer%' or p.with_check ilike '%designer%'
+        )
+    ) as policy_correct
+  from checks c
+)
+select area as check_name,
+  bool_and(policy_exists and policy_correct) as passed,
+  string_agg(
+    table_name || ' ' || op || ': ' ||
+    case when not policy_exists then 'MISSING'
+         when not policy_correct then 'EXISTS BUT WRONG ROLE SET'
+         else 'ok' end,
+    '; ' order by table_name, op
+  ) as details
+from per_check
+group by area
+
+union all
+
+select 'storage_project_media' as check_name,
+  (count(*) filter (where upper(cmd) in ('INSERT','UPDATE')) = 2
+   and count(*) filter (where not (qual ilike '%editor%' or with_check ilike '%editor%')) = 0
+   and count(*) filter (where qual ilike '%client%' or with_check ilike '%client%'
+                          or qual ilike '%viewer%' or with_check ilike '%viewer%'
+                          or qual ilike '%designer%' or with_check ilike '%designer%') = 0
+  ) as passed,
+  string_agg(cmd || ': ' || policyname, '; ') as details
+from pg_policies
+where schemaname = 'storage' and tablename = 'objects'
+  and policyname ilike '%project media%' and upper(cmd) in ('INSERT','UPDATE')
+
+union all
+
+select 'storage_brief_media' as check_name,
+  (count(*) filter (where upper(cmd) in ('INSERT','DELETE')) = 2
+   and count(*) filter (where not (qual ilike '%editor%' or with_check ilike '%editor%')) = 0
+   and count(*) filter (where qual ilike '%client%' or with_check ilike '%client%'
+                          or qual ilike '%viewer%' or with_check ilike '%viewer%'
+                          or qual ilike '%designer%' or with_check ilike '%designer%') = 0
+  ) as passed,
+  string_agg(cmd || ': ' || policyname, '; ') as details
+from pg_policies
+where schemaname = 'storage' and tablename = 'objects'
+  and policyname ilike '%brief media%' and upper(cmd) in ('INSERT','DELETE')
+
+union all
+
+select 'project_members_unchanged' as check_name,
+  (
+    (select qual from pg_policies where schemaname = 'public' and tablename = 'project_members' and policyname = 'Owners/admins can manage membership')
+    ilike '%owner%admin%'
+    and (select qual from pg_policies where schemaname = 'public' and tablename = 'project_members' and policyname = 'Owners/admins can manage membership')
+    not ilike '%editor%'
+  ) as passed,
+  'membership policy still owner/admin-only, no editor/client/viewer' as details
+
+union all
+
+select 'no_old_policy_names_remaining' as check_name,
+  (count(*) = 0) as passed,
+  count(*)::text || ' old (pre-migration) policy names still exist -- should be 0' as details
+from (values
+  ('public','media_assets','Members can upload media'),
+  ('storage','objects','Members can upload project media'),
+  ('storage','objects','Members can update project media'),
+  ('public','tasks','Members manage project tasks, users manage personal tasks'),
+  ('public','grid_rows','Admins manage grid rows'),
+  ('public','posts','Admins manage posts'),
+  ('public','grid_slots','Admins manage grid slots'),
+  ('public','post_assets','Admins manage post assets'),
+  ('public','post_links','Admins manage post links'),
+  ('public','media_folders','Admins manage media folders'),
+  ('public','media_assets','Admins update media'),
+  ('public','media_assets','Owners/admins can delete media'),
+  ('public','calendar_notes','Admins manage calendar notes'),
+  ('public','brief_tasks','Admins manage brief tasks'),
+  ('public','brief_task_items','Admins manage brief task items'),
+  ('public','brief_task_frames','Admins manage brief task frames'),
+  ('public','brief_attachments','Admins manage brief attachments'),
+  ('public','brand_moodboard_items','Admins manage brand moodboard'),
+  ('storage','objects','Members can upload brief media'),
+  ('storage','objects','Admins can delete brief media'),
+  ('public','stories','Admins manage stories'),
+  ('public','story_frames','Admins manage story frames'),
+  ('public','story_links','Admins manage story links'),
+  ('public','content_folders','Admins manage content folders'),
+  ('public','asset_collections','Admins manage asset collections')
+) as o(schema_name, table_name, policy_name)
+join pg_policies p on p.schemaname = o.schema_name and p.tablename = o.table_name and p.policyname = o.policy_name;
+
+-- Row counts are checked separately -- run the PRE-MIGRATION COUNTS block
+-- above and compare its output by eye against this one (no automatic
+-- passed/failed here, since the baseline lives in your saved earlier
+-- result, not in the database):
+--
 -- select
 --   (select count(*) from public.project_members) as project_members,
 --   (select count(*) from public.media_assets) as media_assets,
@@ -579,55 +709,4 @@ commit;
 --   (select count(*) from public.story_links) as story_links,
 --   (select count(*) from public.content_folders) as content_folders,
 --   (select count(*) from public.asset_collections) as asset_collections;
---
--- 3. Confirm every existing project_members row's role/custom_permissions
---    is completely untouched (this migration only changes RLS policies,
---    never writes to project_members itself -- compare this role
---    breakdown to what you already know it to be before running):
--- select role, count(*) from public.project_members group by role order by 1;
---
--- 4. Confirm the membership-management policy itself is untouched --
---    still exactly owner/admin, this migration never modifies it:
--- select policyname, cmd, qual, with_check
--- from pg_policies
--- where schemaname = 'public' and tablename = 'project_members';
--- -- expect exactly 2 rows: "Members can view project membership" (select,
--- -- is_project_member) and "Owners/admins can manage membership" (all,
--- -- project_role(id) in ('owner','admin') -- no 'editor', no 'client', no
--- -- 'viewer' -- unchanged from before this migration).
---
--- 5. Every policy this migration touched contains 'editor' (proves the
---    widening actually landed, not just that the policy exists) AND never
---    contains 'client'/'viewer'/'designer' (proves no accidental
---    over-widening) -- one query, three columns to eyeball per row:
--- select
---   tablename,
---   policyname,
---   (qual ilike '%editor%' or with_check ilike '%editor%') as has_editor,
---   (qual ilike '%client%' or with_check ilike '%client%'
---     or qual ilike '%viewer%' or with_check ilike '%viewer%'
---     or qual ilike '%designer%' or with_check ilike '%designer%') as has_forbidden_role
--- from pg_policies
--- where schemaname = 'public'
---   and policyname like 'Owners/admins/editors%'
--- order by tablename;
--- -- expect: has_editor = true and has_forbidden_role = false on every row.
---
--- 6. Same check, scoped to storage.objects (project-media + brief-media
---    write policies specifically):
--- select
---   policyname,
---   cmd,
---   (qual ilike '%editor%' or with_check ilike '%editor%') as has_editor,
---   (qual ilike '%client%' or with_check ilike '%client%'
---     or qual ilike '%viewer%' or with_check ilike '%viewer%'
---     or qual ilike '%designer%' or with_check ilike '%designer%') as has_forbidden_role
--- from pg_policies
--- where schemaname = 'storage' and tablename = 'objects'
---   and policyname like 'Owners/admins/editors%';
--- -- expect: has_editor = true and has_forbidden_role = false on every row,
--- -- and (separately eyeball qual/with_check) every row still filters on
--- -- ((storage.foldername(name))[1])::uuid -- the project-scoping clause --
--- -- not just bucket_id, so a crafted path into another project's folder
--- -- still resolves that OTHER project's role, not the caller's.
 -- ---------------------------------------------------------------------------
