@@ -549,6 +549,25 @@ commit;
 -- every (table, command) checked in that area and its individual verdict,
 -- so a `false` row is diagnosable without a follow-up query.
 --
+-- Every qual/with_check inspection below is coalesce()'d to '' before any
+-- ilike check. Reason: a policy only ever populates ONE of qual/with_check
+-- unless it's UPDATE or ALL -- INSERT policies leave qual NULL (no USING
+-- clause is possible on INSERT), DELETE policies leave with_check NULL (no
+-- WITH CHECK clause is possible on DELETE). An earlier version of this
+-- query did `qual ilike '%client%' or with_check ilike '%client%' or ...`
+-- directly on the raw (nullable) columns: for a NULL column, `ilike`
+-- returns SQL NULL (not false), and `NULL or false` is NULL, not false --
+-- so the whole forbidden-role OR-chain silently evaluated to NULL instead
+-- of a clean false whenever the correct, expected clause was missing (by
+-- design) on a single-clause policy. `NOT NULL` is NULL, and NULL inside
+-- an `exists (... where ...)` excludes the row -- so this produced a false
+-- "EXISTS BUT WRONG ROLE SET" on media_assets DELETE and tasks
+-- INSERT/DELETE even though those policies were 100% correct (confirmed
+-- against a live, unfiltered read of both tables' actual qual/with_check
+-- text). Wrapping every column in `coalesce(x, '')` first guarantees the
+-- ilike comparisons are always true/false, never NULL, so the OR-chain and
+-- the exists() around it can never silently drop a correct policy.
+--
 -- If any `passed` column reads false, stop and do not continue to Preview QA.
 
 with checks as (
@@ -589,12 +608,13 @@ per_check as (
     exists (
       select 1 from pg_policies p
       where p.schemaname = c.schema_name and p.tablename = c.table_name and upper(p.cmd) = c.op
-        and (not c.requires_editor or (p.qual ilike '%editor%' or p.with_check ilike '%editor%'))
-        and not (
-          p.qual ilike '%client%' or p.with_check ilike '%client%'
-          or p.qual ilike '%viewer%' or p.with_check ilike '%viewer%'
-          or p.qual ilike '%designer%' or p.with_check ilike '%designer%'
+        and (
+          not c.requires_editor
+          or (coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '')) ilike '%editor%'
         )
+        and (coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '')) not ilike '%client%'
+        and (coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '')) not ilike '%viewer%'
+        and (coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '')) not ilike '%designer%'
     ) as policy_correct
   from checks c
 )
@@ -614,10 +634,10 @@ union all
 
 select 'storage_project_media' as check_name,
   (count(*) filter (where upper(cmd) in ('INSERT','UPDATE')) = 2
-   and count(*) filter (where not (qual ilike '%editor%' or with_check ilike '%editor%')) = 0
-   and count(*) filter (where qual ilike '%client%' or with_check ilike '%client%'
-                          or qual ilike '%viewer%' or with_check ilike '%viewer%'
-                          or qual ilike '%designer%' or with_check ilike '%designer%') = 0
+   and count(*) filter (where (coalesce(qual,'') || ' ' || coalesce(with_check,'')) not ilike '%editor%') = 0
+   and count(*) filter (where (coalesce(qual,'') || ' ' || coalesce(with_check,'')) ilike '%client%'
+                          or (coalesce(qual,'') || ' ' || coalesce(with_check,'')) ilike '%viewer%'
+                          or (coalesce(qual,'') || ' ' || coalesce(with_check,'')) ilike '%designer%') = 0
   ) as passed,
   string_agg(cmd || ': ' || policyname, '; ') as details
 from pg_policies
@@ -628,10 +648,10 @@ union all
 
 select 'storage_brief_media' as check_name,
   (count(*) filter (where upper(cmd) in ('INSERT','DELETE')) = 2
-   and count(*) filter (where not (qual ilike '%editor%' or with_check ilike '%editor%')) = 0
-   and count(*) filter (where qual ilike '%client%' or with_check ilike '%client%'
-                          or qual ilike '%viewer%' or with_check ilike '%viewer%'
-                          or qual ilike '%designer%' or with_check ilike '%designer%') = 0
+   and count(*) filter (where (coalesce(qual,'') || ' ' || coalesce(with_check,'')) not ilike '%editor%') = 0
+   and count(*) filter (where (coalesce(qual,'') || ' ' || coalesce(with_check,'')) ilike '%client%'
+                          or (coalesce(qual,'') || ' ' || coalesce(with_check,'')) ilike '%viewer%'
+                          or (coalesce(qual,'') || ' ' || coalesce(with_check,'')) ilike '%designer%') = 0
   ) as passed,
   string_agg(cmd || ': ' || policyname, '; ') as details
 from pg_policies
@@ -642,10 +662,16 @@ union all
 
 select 'project_members_unchanged' as check_name,
   (
-    (select qual from pg_policies where schemaname = 'public' and tablename = 'project_members' and policyname = 'Owners/admins can manage membership')
-    ilike '%owner%admin%'
-    and (select qual from pg_policies where schemaname = 'public' and tablename = 'project_members' and policyname = 'Owners/admins can manage membership')
-    not ilike '%editor%'
+    (
+      select coalesce(qual, '') || ' ' || coalesce(with_check, '')
+      from pg_policies
+      where schemaname = 'public' and tablename = 'project_members' and policyname = 'Owners/admins can manage membership'
+    ) ilike '%owner%admin%'
+    and (
+      select coalesce(qual, '') || ' ' || coalesce(with_check, '')
+      from pg_policies
+      where schemaname = 'public' and tablename = 'project_members' and policyname = 'Owners/admins can manage membership'
+    ) not ilike '%editor%'
   ) as passed,
   'membership policy still owner/admin-only, no editor/client/viewer' as details
 
