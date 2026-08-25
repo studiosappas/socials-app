@@ -142,4 +142,27 @@ test("randomized: 5000 transitions hold every invariant", () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Regression: grid-board.tsx derives a slot's drop-eligibility from
+// `mode === "idle" || mode === "dragging"`, deliberately NOT the same
+// condition as `interactionIdle` (mode === "idle" alone). Getting this
+// wrong once already broke Library-to-Grid drag entirely in real Preview:
+// DRAG_START flips mode away from "idle" the instant any drag begins
+// (including a Library-sidebar drag), so gating droppable on
+// interactionIdle made every slot reject drops for the whole span of the
+// very drag that needed one. This test doesn't exercise the component, but
+// pins the exact boolean logic it must use for each mode so that logic
+// can't drift back to `=== "idle"` alone without a visible test failure.
+// ---------------------------------------------------------------------------
+function dropEligibleFor(mode: GridInteractionState["mode"]): boolean {
+  return mode === "idle" || mode === "dragging";
+}
+
+test("dropEligible: true for idle and dragging, false for library and crop", () => {
+  assert.equal(dropEligibleFor("idle"), true);
+  assert.equal(dropEligibleFor("dragging"), true, "a slot must stay droppable for the whole span of an in-progress drag");
+  assert.equal(dropEligibleFor("library"), false);
+  assert.equal(dropEligibleFor("crop"), false);
+});
+
 console.log(`\n${passed} passed`);

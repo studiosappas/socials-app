@@ -902,6 +902,19 @@ export function GridBoard({
                 requestOpenCrop={requestOpenCrop}
                 requestCloseCrop={requestCloseCrop}
                 interactionIdle={interaction.mode === "idle"}
+                // Deliberately a DIFFERENT condition from interactionIdle,
+                // for a real bug found this round: dnd-kit's own
+                // `disabled.droppable` had been gated on interactionIdle
+                // too, which is backwards -- handleDragStart dispatches
+                // DRAG_START the instant ANY drag begins (including
+                // dragging an asset in from the Library sidebar), which
+                // flips interaction.mode away from "idle" immediately, so
+                // every Grid slot became a NON-droppable target for the
+                // full duration of the very drag that needs somewhere to
+                // drop. Slots must stay droppable exactly while a drag is
+                // in progress -- only Library/Crop being open should
+                // disable dropping.
+                dropEligible={interaction.mode === "idle" || interaction.mode === "dragging"}
                 selectionMode={selectionMode}
                 selectedPostIds={selectedPostIds}
                 onToggleSelectPost={handleToggleSelectPost}
@@ -1025,6 +1038,7 @@ function GridRow({
   requestOpenCrop,
   requestCloseCrop,
   interactionIdle,
+  dropEligible,
   selectionMode,
   selectedPostIds,
   onToggleSelectPost,
@@ -1052,6 +1066,11 @@ function GridRow({
   requestOpenCrop: (slotId: string) => void;
   requestCloseCrop: () => void;
   interactionIdle: boolean;
+  // See GridBoard's own comment on why this is NOT the same condition as
+  // interactionIdle -- a slot must stay a valid drop target for the whole
+  // duration of a drag that's already in progress (mode === "dragging"),
+  // only Library/Crop being open should turn dropping off.
+  dropEligible: boolean;
   selectionMode: boolean;
   selectedPostIds: Set<string>;
   onToggleSelectPost: (postId: string) => void;
@@ -1083,6 +1102,7 @@ function GridRow({
           requestOpenCrop={requestOpenCrop}
           requestCloseCrop={requestCloseCrop}
           interactionIdle={interactionIdle}
+          dropEligible={dropEligible}
           selectionMode={selectionMode}
           selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
           onToggleSelectPost={onToggleSelectPost}
@@ -1116,6 +1136,7 @@ const GridSlot = memo(function GridSlot({
   requestOpenCrop,
   requestCloseCrop,
   interactionIdle,
+  dropEligible,
   selectionMode,
   selected,
   onToggleSelectPost,
@@ -1144,13 +1165,18 @@ const GridSlot = memo(function GridSlot({
   requestOpenCrop: (slotId: string) => void;
   requestCloseCrop: () => void;
   // True only while the Grid's interaction mode is fully idle -- i.e.
-  // neither Library nor any slot's Crop is open. Gates drag/drop
-  // eligibility board-wide (not just this tile's own cropOpen), since a
-  // drag starting anywhere while another tile's Crop is open is exactly
-  // the "DRAGGING + CROP must never overlap" case the interaction reducer
-  // exists to prevent -- dnd-kit's own sensor-level disabling is the
-  // enforcement mechanism, this is just what feeds it.
+  // neither Library nor any slot's Crop is open, AND no drag is currently
+  // in progress. Gates whether this tile can be PICKED UP to START a new
+  // drag/be clicked to enter Crop/Library.
   interactionIdle: boolean;
+  // True while idle OR while a drag is already in progress -- what
+  // actually gates whether this slot can RECEIVE a drop. See GridBoard's
+  // own comment for the real bug this distinction fixes: gating droppable
+  // on interactionIdle alone made every slot reject drops for the entire
+  // duration of the very drag that needed one, since starting ANY drag
+  // (including from the Library sidebar) flips the mode away from "idle"
+  // immediately.
+  dropEligible: boolean;
   selectionMode: boolean;
   selected: boolean;
   onToggleSelectPost: (postId: string) => void;
@@ -1178,7 +1204,7 @@ const GridSlot = memo(function GridSlot({
       // overlay's own pointer handling on the exact same pointer sequence.
       disabled: {
         draggable: !slot.postId || !canManage || selectionMode || !dragEnabled || !interactionIdle,
-        droppable: !canManage || selectionMode || !dragEnabled || !interactionIdle,
+        droppable: !canManage || selectionMode || !dragEnabled || !dropEligible,
       },
       // No transition (verified against @dnd-kit/sortable's own source,
       // useSortable's getTransition()): passing a transition here makes
@@ -1334,7 +1360,28 @@ const GridSlot = memo(function GridSlot({
     };
   }, []);
 
-  function handleClick() {
+  // BUG FOUND AND FIXED THIS ROUND: this used to schedule a fresh
+  // setTimeout on every `click` unconditionally, overwriting
+  // clickTimerRef.current WITHOUT clearing the previous timer first. A
+  // real double-click fires TWO `click` events before `dblclick` (browsers
+  // dispatch click1, click2, THEN dblclick) -- so click #1 scheduled timer
+  // A, click #2 overwrote the ref with a brand-new timer B (leaking A,
+  // still pending), and handleDoubleClick below only ever clears whatever
+  // clickTimerRef.current CURRENTLY holds (B) when it fires -- leaving A to
+  // fire on its own 400ms later and call router.push regardless. That's
+  // the exact, confirmed mechanism behind "double-click still opens Post
+  // Editor" in real Preview: not a race, a straightforward leaked timer.
+  //
+  // Fixed using the browser's own click-sequence count (MouseEvent.detail:
+  // 1 for a genuine first click, 2+ for a click that's part of a
+  // multi-click sequence, using the OS's own double-click timing --
+  // strictly more reliable than re-deriving it by hand) instead of a
+  // second, independent timer-based guess: a click that isn't the first in
+  // its sequence never schedules anything at all, so there is only ever
+  // ONE pending single-click intent for this tile to begin with, and
+  // handleDoubleClick's own clear is guaranteed to be clearing THE
+  // (singular) pending timer, not a stale one.
+  function handleClick(e: React.MouseEvent) {
     if (!slot.postId) return;
     if (selectionMode) {
       onToggleSelectPost(slot.postId);
@@ -1343,6 +1390,11 @@ const GridSlot = memo(function GridSlot({
     // While actively rearranging, a stray tap shouldn't navigate away or
     // open crop mode -- the only thing this mode does is let you drag.
     if (reorderMode) return;
+    // Click #2 (and beyond) of a multi-click sequence -- onDoubleClick
+    // owns this gesture instead. Not scheduling anything here is what
+    // makes the ONE-pending-intent guarantee hold structurally rather than
+    // by careful bookkeeping.
+    if (e.detail > 1) return;
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
       // No real Post Editor route exists for a fake demo project -- a plain
