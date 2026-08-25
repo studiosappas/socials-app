@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -31,8 +31,8 @@ import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { deleteMedia, uploadMedia } from "@/lib/actions/grid";
-import { generatePosterFromVideoUrl, uploadFilesWithPosters } from "@/lib/video-poster";
+import { deleteMedia, uploadMedia, type UploadMediaState } from "@/lib/actions/grid";
+import { generatePosterFromVideoUrl, uploadFilesConcurrently, type ConcurrentUploadOutcome } from "@/lib/video-poster";
 import { ShareMenuButton } from "../share-menu";
 import { createShareLink } from "@/lib/actions/share-links";
 import type { ShareLinkItem } from "@/lib/data/share-links";
@@ -41,6 +41,11 @@ import { useToast } from "@/lib/hooks/use-toast";
 import type { MediaType, Platform } from "@/types/database";
 
 const DOUBLE_CLICK_WINDOW_MS = 220;
+// Same value and same reasoning as media-library.tsx's own
+// UPLOAD_CONCURRENCY -- this dialog is the touch/mobile equivalent upload
+// entry point, not a separate upload pipeline, so it stays in sync with the
+// sidebar's own concurrency choice rather than picking its own number.
+const UPLOAD_CONCURRENCY = 3;
 
 export function UndoIcon({ redo = false }: { redo?: boolean }) {
   return (
@@ -122,6 +127,17 @@ export type MediaLibraryItem = {
   // drag/select/assign on this -- the preview shows immediately, but the
   // asset isn't usable until the upload genuinely lands.
   pending?: boolean;
+  // Stable React key across the temp-id -> real-id transition. `id` itself
+  // is reassigned in place on reconciliation (the whole point -- see
+  // pending's own comment), which would otherwise change this item's own
+  // React `key` mid-upload and force an unmount/remount of its tile (losing
+  // any in-progress hover/drag state, and contributing to visible
+  // flicker/instability during a batch). Set once, at optimistic-placeholder
+  // creation time, to the same tempId that never changes for this item's
+  // whole lifetime; a persisted-from-the-start item (server-rendered, never
+  // went through an optimistic phase) has no need for one and falls back to
+  // its own (equally stable) real id.
+  clientKey?: string;
 };
 export type MediaFolder = { id: string; name: string };
 export type GridCoverTransform = { scale: number; x: number; y: number };
@@ -1516,15 +1532,14 @@ function MediaPickerDialog({
   onSelect: (item: MediaLibraryItem) => void;
   demoMode?: boolean;
 }) {
-  const [state, action, pending] = useActionState(uploadMedia.bind(null, projectId), undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const { showError } = useToast();
   const [, startDeleteTransition] = useTransition();
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs (uploadFilesWithPosters rejects it client-side) -- shown
-  // alongside state?.message, which only ever covers the DB-side half of
-  // the upload now that the file itself uploads direct to Storage.
+  // Surfaces both a too-large/direct-upload-failed file and a business-logic
+  // failure returned BY uploadMedia -- handleUploadResult below is now the
+  // one place both land, since uploadMedia is called directly rather than
+  // through useActionState (see uploadFilesConcurrently's own comment).
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Same optimistic overlay as media-library.tsx's sidebar library -- see
@@ -1554,56 +1569,80 @@ function MediaPickerDialog({
     if (pendingMutations === 0) setOverrideItems(null);
   }
   const effectiveItems = overrideItems ?? items;
+  // See media-library.tsx's identical itemsRef for why handleUploadResult
+  // (an async callback, not a render) needs this instead of closing over
+  // effectiveItems directly.
+  const itemsRef = useRef(effectiveItems);
+  useEffect(() => {
+    itemsRef.current = effectiveItems;
+  }, [effectiveItems]);
 
   useEffect(() => {
     for (const url of pendingBlobUrlsRef.current) URL.revokeObjectURL(url);
     pendingBlobUrlsRef.current = new Set();
   }, [items]);
 
-  // See media-library.tsx's identical effect for the full reasoning --
-  // state.clientTempId (set below, at dispatch) identifies which
-  // optimistic placeholder a resolved upload belongs to, so it can be
-  // reconciled in place instead of clearing the whole override.
-  useEffect(() => {
-    if (state?.message) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setOverrideItems(null);
-      showError(state.message);
-      setPendingMutations(0);
-      advanceUploadBatch();
+  // See media-library.tsx's identical handleUploadResult for the full
+  // reasoning -- called directly by uploadFilesConcurrently's onResult as
+  // each file's own pipeline resolves, not a useEffect watching a shared
+  // useActionState `state` (that was the actual root cause of the batch
+  // appearing frozen then dumping in bulk -- see uploadFilesConcurrently's
+  // own comment for the isolated reproduction).
+  function handleUploadResult(outcome: ConcurrentUploadOutcome<UploadMediaState>) {
+    endMutation();
+    advanceUploadBatch();
+
+    function failThisFile(message: string) {
+      setUploadError(message);
+      showError(message);
+      const failed = itemsRef.current.find((i) => i.id === outcome.tempId);
+      if (failed?.url && pendingBlobUrlsRef.current.has(failed.url)) {
+        pendingBlobUrlsRef.current.delete(failed.url);
+        URL.revokeObjectURL(failed.url);
+      }
+      setOverrideItems((current) => (current ?? itemsRef.current).filter((i) => i.id !== outcome.tempId));
+    }
+
+    if (outcome.status === "error") {
+      failThisFile(outcome.message);
       return;
     }
-    if (state?.id && state.clientTempId) {
-      endMutation();
-      advanceUploadBatch();
-      const tempId = state.clientTempId;
-      const realId = state.id;
-      const realStoragePath = state.storagePath;
-      const realPosterStoragePath = state.posterStoragePath ?? null;
-      const matched = effectiveItems.find((i) => i.id === tempId);
-      const oldBlobUrl = matched?.url;
-      const newUrl = state.displayUrl ?? matched?.url;
-      setOverrideItems((current) =>
-        (current ?? effectiveItems).map((i) =>
-          i.id === tempId
-            ? {
-                ...i,
-                id: realId,
-                url: newUrl ?? i.url,
-                storagePath: realStoragePath,
-                posterStoragePath: realPosterStoragePath,
-                pending: false,
-              }
-            : i,
-        ),
-      );
-      if (state.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
-        pendingBlobUrlsRef.current.delete(oldBlobUrl);
-        URL.revokeObjectURL(oldBlobUrl);
-      }
+    if (outcome.result?.message) {
+      failThisFile(outcome.result.message);
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
+    const result = outcome.result;
+    if (!result?.id) {
+      failThisFile("Upload didn't complete. Please try again.");
+      return;
+    }
+
+    const tempId = outcome.tempId;
+    const realId = result.id;
+    const realStoragePath = result.storagePath;
+    const realPosterStoragePath = result.posterStoragePath ?? null;
+    const matched = itemsRef.current.find((i) => i.id === tempId);
+    const oldBlobUrl = matched?.url;
+    const newUrl = result.displayUrl ?? matched?.url;
+    setOverrideItems((current) =>
+      (current ?? itemsRef.current).map((i) =>
+        i.id === tempId
+          ? {
+              ...i,
+              id: realId,
+              url: newUrl ?? i.url,
+              storagePath: realStoragePath,
+              posterStoragePath: realPosterStoragePath,
+              pending: false,
+            }
+          : i,
+      ),
+    );
+    if (result.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
+      pendingBlobUrlsRef.current.delete(oldBlobUrl);
+      URL.revokeObjectURL(oldBlobUrl);
+    }
+  }
 
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
@@ -1627,7 +1666,7 @@ function MediaPickerDialog({
     <Dialog open={open} onClose={onClose} title="Choose from library" radius="none">
       <div className="flex flex-col gap-4">
         {!demoMode && (
-          <form ref={formRef} action={action} key={items.length}>
+          <form ref={formRef}>
             <input
               ref={fileInputRef}
               type="file"
@@ -1645,15 +1684,18 @@ function MediaPickerDialog({
                 const optimistic = files.map((file) => {
                   const url = URL.createObjectURL(file);
                   pendingBlobUrlsRef.current.add(url);
+                  const tempId = `optimistic-${crypto.randomUUID()}`;
                   return {
                     file,
+                    tempId,
                     item: {
-                      id: `optimistic-${crypto.randomUUID()}`,
+                      id: tempId,
+                      clientKey: tempId,
                       url,
                       mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
-                      // Shown immediately, but not selectable until the
-                      // reconciliation effect below clears this once
-                      // uploadMedia's insert actually resolves.
+                      // Shown immediately, but not selectable until
+                      // handleUploadResult clears this once uploadMedia's
+                      // insert actually resolves.
                       pending: true,
                     } satisfies MediaLibraryItem,
                   };
@@ -1665,27 +1707,12 @@ function MediaPickerDialog({
                   done: current?.done ?? 0,
                 }));
 
-                uploadFilesWithPosters(
+                uploadFilesConcurrently(
                   projectId,
-                  (formData) => {
-                    const fileName = formData.get("fileName");
-                    const match = optimistic.find((o) => o.file.name === fileName);
-                    if (match) formData.set("clientTempId", match.item.id);
-                    action(formData);
-                  },
-                  files,
-                  (fileName, message) => {
-                    setUploadError(message);
-                    const failed = optimistic.find((o) => o.file.name === fileName);
-                    if (!failed) return;
-                    endMutation();
-                    advanceUploadBatch();
-                    pendingBlobUrlsRef.current.delete(failed.item.url!);
-                    URL.revokeObjectURL(failed.item.url!);
-                    setOverrideItems((current) =>
-                      (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
-                    );
-                  },
+                  optimistic.map((o) => ({ file: o.file, tempId: o.tempId })),
+                  (formData) => uploadMedia(projectId, undefined, formData),
+                  handleUploadResult,
+                  UPLOAD_CONCURRENCY,
                 );
               }}
             />
@@ -1694,14 +1721,12 @@ function MediaPickerDialog({
               variant="primary"
               radius="none"
               onClick={() => fileInputRef.current?.click()}
-              disabled={pending}
+              disabled={uploadBatch !== null}
               className="w-full py-3 text-xs tracking-wide uppercase"
             >
-              {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : pending ? "Uploading..." : "Upload New Asset"}
+              {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : "Upload New Asset"}
             </Button>
-            {(uploadError || state?.message) && (
-              <p className="mt-2 text-xs text-error">{uploadError || state?.message}</p>
-            )}
+            {uploadError && <p className="mt-2 text-xs text-error">{uploadError}</p>}
           </form>
         )}
 
@@ -1724,7 +1749,7 @@ function MediaPickerDialog({
             columns, gap-2, minus the Dialog's own padding). */}
         <div className="grid max-h-[min(1400px,70vh)] grid-cols-3 gap-2 [--tile-row-h:155px] auto-rows-[var(--tile-row-h)] overflow-y-auto">
           {effectiveItems.map((item) => (
-            <div key={item.id} className="relative min-w-0">
+            <div key={item.clientKey ?? item.id} className="relative min-w-0">
               <button
                 type="button"
                 onClick={() => onSelect(item)}

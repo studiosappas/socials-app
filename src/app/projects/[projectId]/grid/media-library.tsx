@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useDraggable } from "@dnd-kit/core";
 import {
@@ -10,8 +10,19 @@ import {
   moveMediaToFolder,
   restoreMediaAsset,
   uploadMedia,
+  type UploadMediaState,
 } from "@/lib/actions/grid";
-import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { uploadFilesConcurrently, type ConcurrentUploadOutcome } from "@/lib/video-poster";
+
+// How many files upload in parallel during a batch. Not chosen arbitrarily --
+// see the branch report for the concurrency=1/2/3/4 comparison this is based
+// on (client-side decode/memory cost measured directly; server/Storage
+// concurrency behavior could not be measured live in this environment, see
+// the report's own disclosed limitation on that point). 1 (strictly
+// sequential) is what caused one slow file to stall the entire remaining
+// batch; unbounded parallel risks the same simultaneous-decode pressure the
+// thin-strip fix already had to account for. 3 balances both.
+const UPLOAD_CONCURRENCY = 3;
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/lib/hooks/use-toast";
@@ -96,21 +107,23 @@ export function MediaLibrary({
 }) {
   const router = useRouter();
   const { showError } = useToast();
-  const [state, action, pending] = useActionState(
-    uploadMedia.bind(null, projectId),
-    undefined,
-  );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs -- see grid-board.tsx's identical picker-dialog pattern.
+  // Surfaces both a too-large/direct-upload-failed file (rejected before the
+  // server action ever runs) and a business-logic failure returned BY the
+  // server action (e.g. the DB insert failed) -- handleUploadResult below is
+  // now the one place both land, since uploadMedia is called directly rather
+  // than through useActionState (see the concurrency comment on
+  // uploadFilesConcurrently for why).
   const [uploadError, setUploadError] = useState<string | null>(null);
-  // "Uploading 17 / 40" -- a batch is asynchronous per-file (see
-  // uploadFilesWithPosters' own sequential-per-file loop), so `pending`
-  // alone (true for the whole duration) gave no sense of progress on a
-  // large selection. Reset to a fresh count on every new file selection;
-  // "done" advances on both success AND failure (a file that fails is still
-  // no longer in flight), one increment per file resolved.
+  // "Uploading 17 / 40" -- a batch resolves file-by-file, independently (see
+  // uploadFilesConcurrently), so a bare "Uploading..." gave no sense of
+  // progress on a large selection. Reset to a fresh count on every new file
+  // selection; "done" advances on both success AND failure (a file that
+  // fails is still no longer in flight), one increment per file resolved --
+  // and, being driven by a direct per-file callback now rather than a
+  // shared useActionState `state` value, genuinely advances one file at a
+  // time instead of only becoming observable in a batch at the very end.
   const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
   // One file resolved (success or failure) -- clears the counter entirely
   // once every file in the running total has, so the button reverts to its
@@ -141,10 +154,10 @@ export function MediaLibrary({
   // declaration-before-use ordering.
   const suppressAutoTrackRef = useRef(false);
   // Same pending-mutation guard as grid-board.tsx's own overrideRows (see
-  // its comment) -- a batch upload dispatches many uploadMedia calls in
-  // quick succession (see video-poster.ts), each independently pending
-  // between "optimistic placeholder shown" and "reconciled with its real
-  // id" -- a fresh `items` prop (e.g. from an unrelated folder move's
+  // its comment) -- a batch upload has many uploads genuinely in flight at
+  // once now (see UPLOAD_CONCURRENCY), each independently pending between
+  // "optimistic placeholder shown" and "reconciled with its real id" -- a
+  // fresh `items` prop (e.g. from an unrelated folder move's
   // router.refresh()) landing while ANY of them is still in flight must not
   // wipe out placeholders that haven't been reconciled yet.
   const [pendingMutations, setPendingMutations] = useState(0);
@@ -167,6 +180,16 @@ export function MediaLibrary({
     if (pendingMutations === 0) setOverrideItems(null);
   }
   const effectiveItems = overrideItems ?? items;
+  // Mirrors effectiveItems for handleUploadResult below to read from --
+  // handleUploadResult runs from an async callback (uploadFilesConcurrently's
+  // onResult, well outside React's render cycle), not from a render, so it
+  // can't safely close over `effectiveItems` from whatever render created it
+  // (stale by the time a slow upload actually resolves). Updated every
+  // render, always current by the time any async callback reads it.
+  const itemsRef = useRef(effectiveItems);
+  useEffect(() => {
+    itemsRef.current = effectiveItems;
+  }, [effectiveItems]);
 
   // Backstop only -- the reconciliation effect below is what actually
   // revokes each blob URL, individually, the moment its own upload resolves
@@ -180,117 +203,132 @@ export function MediaLibrary({
     pendingBlobUrlsRef.current = new Set();
   }, [items]);
 
-  // uploadFilesWithPosters' onError only covers a rejected file never
-  // reaching the server (too large, direct-upload failed); a failure INSIDE
-  // uploadMedia itself (the DB insert) only ever surfaces here, as this
-  // action-state's own message -- without this, that specific failure mode
-  // would leave the optimistic blob-URL thumbnail stuck looking like a
-  // successful upload that was actually never persisted. Can't tell exactly
-  // which in-flight file failed (uploadFilesWithPosters dispatches multiple
-  // files as separate fire-and-forget action calls sharing one action-state),
-  // so this drops back to the real server list entirely rather than risk
-  // leaving a fake entry behind.
-  //
-  // On success, state.clientTempId identifies exactly which optimistic
-  // placeholder this particular resolved call belongs to (see the
-  // clientTempId injection in the upload handler below) -- reconciled in
-  // place (swap in the real id/storagePath, keep the already-showing blob
-  // URL) rather than clearing the whole override, which would otherwise
-  // flash every OTHER still-in-flight optimistic upload back to nothing
-  // for a beat.
-  useEffect(() => {
-    if (state?.message) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setOverrideItems(null);
-      showError(state.message);
-      advanceUploadBatch();
-      // Whichever specific placeholder this failure belonged to can't be
-      // identified from a bare message alone (see this branch's own comment
-      // above) -- dropping back to the real items list, uncondtionally,
-      // makes any further tracking of it moot, so just clear the whole
-      // pending count rather than try to decrement by exactly one.
-      setPendingMutations(0);
+  // The one place every upload settles now, called directly by
+  // uploadFilesConcurrently's onResult -- not a useEffect watching a shared
+  // `state` value (that WAS the root cause: React serializes repeated
+  // dispatches of the same useActionState instance, so a 30-file batch
+  // behaved as one long chain no matter how fast the underlying uploads
+  // actually were -- see uploadFilesConcurrently's own comment for the
+  // isolated reproduction). Each file's own result lands here independently,
+  // as soon as ITS OWN pipeline resolves -- genuinely progressive, and safe
+  // under real concurrency: reads the current list via itemsRef (never a
+  // stale closure) and writes via a functional setOverrideItems updater
+  // (never lost under two files resolving in the same tick).
+  function handleUploadResult(outcome: ConcurrentUploadOutcome<UploadMediaState>) {
+    endMutation();
+    advanceUploadBatch();
+
+    function failThisFile(message: string) {
+      setUploadError(message);
+      showError(message);
+      const failed = itemsRef.current.find((i) => i.id === outcome.tempId);
+      if (failed?.url && pendingBlobUrlsRef.current.has(failed.url)) {
+        pendingBlobUrlsRef.current.delete(failed.url);
+        URL.revokeObjectURL(failed.url);
+      }
+      setOverrideItems((current) => (current ?? itemsRef.current).filter((i) => i.id !== outcome.tempId));
+    }
+
+    if (outcome.status === "error") {
+      failThisFile(outcome.message);
       return;
     }
-    if (state?.id && state.clientTempId) {
-      endMutation();
-      advanceUploadBatch();
-      const tempId = state.clientTempId;
-      const realId = state.id;
-      const realStoragePath = state.storagePath;
-      const realPosterStoragePath = state.posterStoragePath ?? null;
-      const matched = effectiveItems.find((i) => i.id === tempId);
-      if (matched) {
-        // Swap off the optimistic blob URL (backing the full-resolution
-        // original file, decoded and held in memory for as long as it's
-        // rendered) onto the real, cheap signed thumbnail URL the action
-        // just computed -- without this, a reconciled item kept showing its
-        // blob URL indefinitely (there was no other display URL known
-        // client-side), so every upload in a session left its full-res
-        // decode pinned in memory until an actual page reload. Falls back
-        // to keeping the blob URL only if displayUrl genuinely couldn't be
-        // signed (never revoke a URL that's still the only thing rendered).
-        const oldBlobUrl = matched.url;
-        const newUrl = state.displayUrl ?? matched.url;
-        setOverrideItems((current) =>
-          (current ?? effectiveItems).map((i) =>
-            i.id === tempId
-              ? {
-                  ...i,
-                  id: realId,
-                  url: newUrl,
-                  storagePath: realStoragePath,
-                  posterStoragePath: realPosterStoragePath,
-                  pending: false,
-                }
-              : i,
-          ),
-        );
-        if (state.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
-          pendingBlobUrlsRef.current.delete(oldBlobUrl);
-          URL.revokeObjectURL(oldBlobUrl);
-        }
-        // The generic items-diffing effect below can't see this reconciled
-        // item (it only ever watches the real server `items` prop, which
-        // this never touches -- see grid.ts's own no-revalidation comment),
-        // so this is the one place a fresh upload gets its own undo command.
-        if (!demoMode && realStoragePath) {
-          const mediaType = matched.mediaType;
-          const current = { id: realId };
-          pushCommand({
-            label: "Add media",
-            undo: async () => {
-              beginMutation();
-              try {
-                suppressAutoTrackRef.current = true;
-                await deleteMedia(projectId, current.id);
-                router.refresh();
-              } finally {
-                endMutation();
-              }
-            },
-            redo: async () => {
-              beginMutation();
-              try {
-                suppressAutoTrackRef.current = true;
-                const result = await restoreMediaAsset(projectId, {
-                  storagePath: realStoragePath,
-                  mediaType,
-                  posterStoragePath: realPosterStoragePath,
-                });
-                if ("message" in result) throw new Error(result.message);
-                current.id = result.id;
-                router.refresh();
-              } finally {
-                endMutation();
-              }
-            },
-          });
-        }
-      }
+    if (outcome.result?.message) {
+      failThisFile(outcome.result.message);
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
+
+    const result = outcome.result;
+    // UploadMediaState's own type allows `undefined` (its shape doing
+    // double duty as useActionState's initial-state type elsewhere) --
+    // uploadMedia itself never actually resolves to it, but a missing id
+    // here would mean nothing usable came back at all, so fail closed
+    // exactly like a real error would rather than silently no-op.
+    if (!result?.id) {
+      failThisFile("Upload didn't complete. Please try again.");
+      return;
+    }
+    const tempId = outcome.tempId;
+    const realId = result.id;
+    const realStoragePath = result.storagePath;
+    const realPosterStoragePath = result.posterStoragePath ?? null;
+    const matched = itemsRef.current.find((i) => i.id === tempId);
+    if (!matched) return;
+
+    // Swap off the optimistic blob URL (backing the full-resolution
+    // original file, decoded and held in memory for as long as it's
+    // rendered) onto the real, cheap signed thumbnail URL the action just
+    // computed -- without this, a reconciled item kept showing its blob URL
+    // indefinitely (there was no other display URL known client-side), so
+    // every upload in a session left its full-res decode pinned in memory
+    // until an actual page reload. Falls back to keeping the blob URL only
+    // if displayUrl genuinely couldn't be signed (never revoke a URL that's
+    // still the only thing rendered).
+    const oldBlobUrl = matched.url;
+    const newUrl = result.displayUrl ?? matched.url;
+    if (result.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
+      pendingBlobUrlsRef.current.delete(oldBlobUrl);
+      URL.revokeObjectURL(oldBlobUrl);
+    }
+    // In place, by id, at this item's existing array position -- NOT
+    // removed-and-reappended -- so a tile never jumps position or the whole
+    // grid reflows as files finish in whatever order they happen to
+    // complete. `clientKey` (set at optimistic-placeholder creation, never
+    // reassigned) keeps this item's React key stable across this exact
+    // id change too, so it never remounts either.
+    setOverrideItems((current) =>
+      (current ?? itemsRef.current).map((i) =>
+        i.id === tempId
+          ? {
+              ...i,
+              id: realId,
+              url: newUrl,
+              storagePath: realStoragePath,
+              posterStoragePath: realPosterStoragePath,
+              pending: false,
+            }
+          : i,
+      ),
+    );
+
+    // The generic items-diffing effect below can't see this reconciled item
+    // (it only ever watches the real server `items` prop, which this never
+    // touches -- see grid.ts's own no-revalidation comment), so this is the
+    // one place a fresh upload gets its own undo command.
+    if (!demoMode && realStoragePath) {
+      const mediaType = matched.mediaType;
+      const currentRef = { id: realId };
+      pushCommand({
+        label: "Add media",
+        undo: async () => {
+          beginMutation();
+          try {
+            suppressAutoTrackRef.current = true;
+            await deleteMedia(projectId, currentRef.id);
+            router.refresh();
+          } finally {
+            endMutation();
+          }
+        },
+        redo: async () => {
+          beginMutation();
+          try {
+            suppressAutoTrackRef.current = true;
+            const restored = await restoreMediaAsset(projectId, {
+              storagePath: realStoragePath,
+              mediaType,
+              posterStoragePath: realPosterStoragePath,
+            });
+            if ("message" in restored) throw new Error(restored.message);
+            currentRef.id = restored.id;
+            router.refresh();
+          } finally {
+            endMutation();
+          }
+        },
+      });
+    }
+  }
 
   // null = root view (folder tiles + unfoldered assets). Non-null = browsing
   // one folder's assets, with a "back" affordance to return to root.
@@ -438,7 +476,7 @@ export function MediaLibrary({
   return (
     <div className="flex flex-col gap-3">
       {!demoMode && (
-        <form ref={formRef} action={action} className="flex flex-col gap-2" key={items.length}>
+        <form ref={formRef} className="flex flex-col gap-2">
           <input
             ref={fileInputRef}
             type="file"
@@ -454,32 +492,35 @@ export function MediaLibrary({
               if (files.length === 0) return;
 
               // Instant thumbnail from the file the browser already has in
-              // memory -- no network round trip needed to show it. The
-              // item's own id doubles as the correlation token
-              // (clientTempId, injected below) that lets the effect above
-              // match this exact placeholder to its real, persisted
-              // counterpart once uploadMedia resolves -- no page refresh
-              // needed to reconcile it.
+              // memory -- no network round trip needed to show it. tempId
+              // doubles as both the correlation token handleUploadResult
+              // matches its eventual result against, AND (via clientKey) the
+              // React key that stays stable across the temp -> real id swap.
               const optimistic = files.map((file) => {
                 const url = URL.createObjectURL(file);
                 pendingBlobUrlsRef.current.add(url);
+                const tempId = `optimistic-${crypto.randomUUID()}`;
                 return {
                   file,
+                  tempId,
                   item: {
-                    id: `optimistic-${crypto.randomUUID()}`,
+                    id: tempId,
+                    clientKey: tempId,
                     url,
                     mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
                     // Shown immediately, but not draggable/selectable until
-                    // the reconciliation effect below clears this once
-                    // uploadMedia's insert actually resolves.
+                    // handleUploadResult clears this once uploadMedia's
+                    // insert actually resolves.
                     pending: true,
                   } satisfies MediaLibraryItem,
                 };
               });
+              // Placeholders keep this exact selection order and each is
+              // replaced IN PLACE at its own position on completion (see
+              // handleUploadResult) -- never removed-and-reappended, so
+              // finishing in a different order than selected (expected and
+              // normal with concurrency > 1) never reshuffles the grid.
               setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
-              // One begin per file -- each resolves independently (its own
-              // endMutation() call, in the reconciliation effect above or
-              // the onError callback just below), not as a single batch.
               for (let i = 0; i < optimistic.length; i++) beginMutation();
               // Adds to any already-in-progress batch rather than replacing
               // it -- selecting more files while an earlier batch is still
@@ -490,30 +531,12 @@ export function MediaLibrary({
                 done: current?.done ?? 0,
               }));
 
-              uploadFilesWithPosters(
+              uploadFilesConcurrently(
                 projectId,
-                (formData) => {
-                  // uploadFilesWithPosters sets fileName on every call --
-                  // used only to find which optimistic placeholder this
-                  // particular FormData belongs to before dispatching.
-                  const fileName = formData.get("fileName");
-                  const match = optimistic.find((o) => o.file.name === fileName);
-                  if (match) formData.set("clientTempId", match.item.id);
-                  action(formData);
-                },
-                files,
-                (fileName, message) => {
-                  setUploadError(message);
-                  const failed = optimistic.find((o) => o.file.name === fileName);
-                  if (!failed) return;
-                  endMutation();
-                  advanceUploadBatch();
-                  pendingBlobUrlsRef.current.delete(failed.item.url!);
-                  URL.revokeObjectURL(failed.item.url!);
-                  setOverrideItems((current) =>
-                    (current ?? effectiveItems).filter((i) => i.id !== failed.item.id),
-                  );
-                },
+                optimistic.map((o) => ({ file: o.file, tempId: o.tempId })),
+                (formData) => uploadMedia(projectId, undefined, formData),
+                handleUploadResult,
+                UPLOAD_CONCURRENCY,
               );
             }}
           />
@@ -522,14 +545,12 @@ export function MediaLibrary({
             variant="primary"
             radius="none"
             onClick={() => fileInputRef.current?.click()}
-            disabled={pending}
+            disabled={uploadBatch !== null}
             className="w-full py-3 text-xs tracking-wide uppercase"
           >
-            {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : pending ? "Uploading..." : "Upload Assets"}
+            {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : "Upload Assets"}
           </Button>
-          {(uploadError || state?.message) && (
-            <p className="text-xs text-error">{uploadError || state?.message}</p>
-          )}
+          {uploadError && <p className="text-xs text-error">{uploadError}</p>}
         </form>
       )}
 
@@ -586,7 +607,7 @@ export function MediaLibrary({
           ))}
         {visibleItems.map((item) => (
           <MediaThumb
-            key={item.id}
+            key={item.clientKey ?? item.id}
             item={item}
             selected={selectedIds.has(item.id)}
             onToggleSelect={() => toggleSelected(item.id)}

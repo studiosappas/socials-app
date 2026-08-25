@@ -206,3 +206,104 @@ export async function uploadFilesWithPosters(
     startTransition(() => action(formData));
   }
 }
+
+// Grid-only counterpart to uploadFilesWithPosters above -- NOT a drop-in
+// replacement, and Post Editor/Content keep using the original unchanged.
+//
+// Root cause this exists to fix (confirmed via an isolated, minimal
+// reproduction, not assumption): every file dispatched through
+// uploadFilesWithPosters shares ONE useActionState hook instance (the
+// caller's own `action`). React serializes repeated dispatches of the SAME
+// useActionState instance -- call #2's action body does not even START
+// until call #1 has fully RESOLVED, regardless of how quickly the
+// surrounding loop fires them or how fast the network actually is. A
+// 30-file batch therefore behaves as ONE long chain no matter how the
+// per-file upload work itself is scheduled, which is exactly the "stuck at
+// 0/30 for a long time, then a bulk catch-up" symptom -- not a server-load
+// or network-speed issue, a React dispatch-queueing one.
+//
+// Fixed by calling the server action DIRECTLY (`dispatch` below, a plain
+// async function, never a useActionState-bound one) instead of through any
+// shared hook instance, so each file's full pipeline -- direct-to-Storage
+// upload, thumbnail generation, thumbnail upload, then the actual
+// DB-insert server action call -- is a genuinely independent async chain.
+// Bounded by `concurrency` simultaneous in-flight files (a worker-pool: N
+// workers each pull the next unclaimed file and run its whole pipeline
+// before pulling another) rather than either the old one-at-a-time
+// sequential loop or unbounded 30-way parallel -- see the branch report for
+// the concurrency measurements behind the default.
+export type ConcurrentUploadOutcome<TResult> =
+  | { status: "success"; tempId: string; fileName: string; result: TResult }
+  | { status: "error"; tempId: string; fileName: string; message: string };
+
+export async function uploadFilesConcurrently<TResult>(
+  projectId: string,
+  files: { file: File; tempId: string }[],
+  dispatch: (formData: FormData) => Promise<TResult>,
+  onResult: (outcome: ConcurrentUploadOutcome<TResult>) => void,
+  concurrency = 3,
+): Promise<void> {
+  let nextIndex = 0;
+
+  async function worker() {
+    for (;;) {
+      const i = nextIndex;
+      nextIndex += 1;
+      if (i >= files.length) return;
+      const { file, tempId } = files[i];
+
+      const sizeCheck = validateUploadSize(file);
+      if (!sizeCheck.ok) {
+        onResult({ status: "error", tempId, fileName: file.name, message: sizeCheck.message });
+        continue;
+      }
+
+      const mediaType = file.type.startsWith("video/") ? "video" : file.type === "application/pdf" ? "pdf" : "image";
+      const storagePath = newStoragePath(projectId, file.name);
+      const uploaded = await uploadFileDirect("project-media", storagePath, file);
+      if ("error" in uploaded) {
+        onResult({ status: "error", tempId, fileName: file.name, message: uploaded.error });
+        continue;
+      }
+
+      const formData = new FormData();
+      formData.set("storagePath", uploaded.path);
+      formData.set("mediaType", mediaType);
+      formData.set("fileName", file.name);
+      formData.set("clientTempId", tempId);
+      if (mediaType === "video") {
+        const poster = await generateVideoPosterBlob(file);
+        if (poster) formData.set("poster", new File([poster], "poster.jpg", { type: "image/jpeg" }));
+      } else if (mediaType === "pdf") {
+        const cover = await generatePdfCoverBlob(file);
+        if (cover) formData.set("poster", new File([cover], "poster.jpg", { type: "image/jpeg" }));
+      } else {
+        const thumbBlob = await generateImageThumbnailBlob(file);
+        if (thumbBlob) {
+          const thumbPath = newStoragePath(projectId, "thumb.jpg");
+          const thumbUploaded = await uploadFileDirect(
+            "project-media",
+            thumbPath,
+            new File([thumbBlob], "thumb.jpg", { type: "image/jpeg" }),
+          );
+          if (!("error" in thumbUploaded)) formData.set("thumbnailStoragePath", thumbUploaded.path);
+        }
+      }
+
+      try {
+        const result = await dispatch(formData);
+        onResult({ status: "success", tempId, fileName: file.name, result });
+      } catch (error) {
+        onResult({
+          status: "error",
+          tempId,
+          fileName: file.name,
+          message: error instanceof Error ? error.message : "Upload failed.",
+        });
+      }
+    }
+  }
+
+  const workerCount = Math.min(concurrency, files.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
