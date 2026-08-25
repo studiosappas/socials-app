@@ -57,7 +57,17 @@ import {
 // definitions now live (next to the state machine that produces them).
 export type { GridBoardRow, GridBoardSlot, GridCoverTransform };
 
-const DOUBLE_CLICK_WINDOW_MS = 220;
+// GridSlot's single-click Post Editor navigation is deferred by this long,
+// giving a following native `dblclick` (the actual double-click arbiter --
+// see GridSlot's own handleClick/handleDoubleClick comment) a chance to
+// cancel it first. This is no longer trying to itself measure "was that a
+// double-click" the way it used to -- it only needs to comfortably outlast
+// a real double-click gesture's own two-click span, which live testing
+// showed the previous 220ms value did NOT reliably do (WebKit alone showed
+// >200ms between two ordinary clicks even at a brisk pace). 400ms is
+// comfortably inside typical OS double-click intervals without making a
+// genuine single click feel laggy.
+const DOUBLE_CLICK_WINDOW_MS = 400;
 // Same value and same reasoning as media-library.tsx's own
 // UPLOAD_CONCURRENCY -- this dialog is the touch/mobile equivalent upload
 // entry point, not a separate upload pipeline, so it stays in sync with the
@@ -1050,6 +1060,10 @@ const GridSlot = memo(function GridSlot({
 }) {
   const router = useRouter();
   const { showError } = useToast();
+  // Declared before useSortable below -- its own `disabled` config reads
+  // this to withhold drag/drop eligibility while this tile's crop editor
+  // is open (see that config's own comment).
+  const [cropMode, setCropMode] = useState(false);
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
     useSortable({
       id: slot.id,
@@ -1060,9 +1074,14 @@ const GridSlot = memo(function GridSlot({
       // fights with the tap-to-select interaction. And disabled on touch
       // until "Edit Grid" mode is on (dragEnabled), so an ordinary scroll
       // touch is never mistaken for a drag pickup.
+      // Also disabled while this tile's own crop editor is open -- a
+      // pointerdown starting a grid drag while the crop overlay is active
+      // was a real, live-confirmed contributor to the "stuck crop" report:
+      // dnd-kit's own drag-activation tracking competing with the crop
+      // overlay's own pointer handling on the exact same pointer sequence.
       disabled: {
-        draggable: !slot.postId || !canManage || selectionMode || !dragEnabled,
-        droppable: !canManage || selectionMode || !dragEnabled,
+        draggable: !slot.postId || !canManage || selectionMode || !dragEnabled || cropMode,
+        droppable: !canManage || selectionMode || !dragEnabled || cropMode,
       },
       // No transition (verified against @dnd-kit/sortable's own source,
       // useSortable's getTransition()): passing a transition here makes
@@ -1086,7 +1105,6 @@ const GridSlot = memo(function GridSlot({
     transition,
   };
 
-  const [cropMode, setCropMode] = useState(false);
   const [contentMenuOpen, setContentMenuOpen] = useState(false);
   // Gated on reorderMode -- same reasoning as handleClick's own reorderMode
   // guard below ("the only thing this mode does is let you drag"). Without
@@ -1176,12 +1194,28 @@ const GridSlot = memo(function GridSlot({
     router.prefetch(`/projects/${projectId}/posts/${slot.postId}`);
   }, [slot.postId, projectId, demoMode, router]);
 
-  // dnd-kit's PointerSensor listens on this same element, and its pointerdown
-  // handling suppresses the browser's native "dblclick" synthesis -- so
-  // single-vs-double click is disambiguated manually here (via elapsed time
-  // between "click" events) rather than relying on onDoubleClick.
+  // Native onClick + onDoubleClick, deliberately NOT the manual
+  // Date.now()-comparison timer this used to be. That timer's own claim
+  // ("dnd-kit suppresses native dblclick synthesis") was wrong -- verified
+  // live: a real double-click fires a genuine native `dblclick` event on
+  // this exact element, with dnd-kit's PointerSensor listeners attached,
+  // in both Chromium and WebKit. The manual version failed for a different,
+  // real reason: it compared elapsed time against DOUBLE_CLICK_WINDOW_MS
+  // using the SAME constant it used to delay single-click navigation, so a
+  // double-click gesture any slower than that window (confirmed live: 220ms
+  // was already too tight for two scripted clicks in Chromium, and WebKit's
+  // own event dispatch overhead alone routinely exceeded it even at "fast"
+  // intervals) raced its own single-click timer -- the first click's
+  // navigation had frequently ALREADY FIRED by the time the second click
+  // was even processed, and the second click then got scheduled as its own
+  // brand-new single-click timer instead of recognized as part of a double.
+  // This reproduced exactly "double-click frequently does nothing" /
+  // "inconsistent." The browser's own dblclick recognition uses the OS's
+  // actual double-click timing, not a hardcoded guess, so it's used as the
+  // sole arbiter now; clickTimerRef's only remaining job is a short grace
+  // window that gives a following native dblclick a chance to cancel the
+  // deferred single-click navigation before it fires.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastClickAtRef = useRef(0);
 
   function handleClick() {
     if (!slot.postId) return;
@@ -1192,25 +1226,6 @@ const GridSlot = memo(function GridSlot({
     // While actively rearranging, a stray tap shouldn't navigate away or
     // open crop mode -- the only thing this mode does is let you drag.
     if (reorderMode) return;
-    const now = Date.now();
-    const isDoubleClick = now - lastClickAtRef.current < DOUBLE_CLICK_WINDOW_MS;
-    lastClickAtRef.current = now;
-
-    if (isDoubleClick) {
-      if (clickTimerRef.current) {
-        clearTimeout(clickTimerRef.current);
-        clickTimerRef.current = null;
-      }
-      // Narrower than isSlotFilled(slot) deliberately -- GridCropOverlay
-      // needs an actual image to overlay on top of (imageUrl={slot.
-      // thumbnailUrl}), which a video with no poster yet doesn't have, so
-      // double-clicking one is a safe no-op rather than opening an overlay
-      // with nothing to show. Still never falls through to the Library --
-      // this whole function already returned early above if !slot.postId.
-      if (canManage && slot.thumbnailUrl) setCropMode(true);
-      return;
-    }
-
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
       // No real Post Editor route exists for a fake demo project -- a plain
@@ -1219,6 +1234,22 @@ const GridSlot = memo(function GridSlot({
       if (demoMode) return;
       router.push(`/projects/${projectId}/posts/${slot.postId}`);
     }, DOUBLE_CLICK_WINDOW_MS);
+  }
+
+  function handleDoubleClick() {
+    if (!slot.postId) return;
+    if (selectionMode || reorderMode) return;
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+    // Narrower than isSlotFilled(slot) deliberately -- GridCropOverlay
+    // needs an actual image to overlay on top of (imageUrl={slot.
+    // thumbnailUrl}), which a video with no poster yet doesn't have, so
+    // double-clicking one is a safe no-op rather than opening an overlay
+    // with nothing to show. Still never falls through to the Library --
+    // this whole function already returned early above if !slot.postId.
+    if (canManage && slot.thumbnailUrl) setCropMode(true);
   }
 
   // useCallback below (not plain functions) -- these are passed as props
@@ -1232,6 +1263,11 @@ const GridSlot = memo(function GridSlot({
       if (!slot.postId) return;
       const postId = slot.postId;
       const previousTransform = slot.coverTransform;
+      // Exits the editor immediately, synchronously, regardless of what
+      // happens next -- Confirm must never leave the UI locked waiting on
+      // the server (see mutateSlot's own async call below, which this does
+      // not wait for). On failure, showError/requestIdleRefresh still fire,
+      // but the user is never trapped in the crop overlay because of it.
       setCropMode(false);
       mutateSlot(slot.id, { ...slot, coverTransform: next }, async () => {
         // The crop itself is applied optimistically either way -- demoMode
@@ -1265,6 +1301,9 @@ const GridSlot = memo(function GridSlot({
     [slot, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh],
   );
 
+  // Purely local -- discards the editor's in-progress transform and exits.
+  // Never awaits a server call, so a slow/failed backend can never trap the
+  // user in the crop overlay via this path.
   const handleCancelCrop = useCallback(() => setCropMode(false), []);
 
   const handleEditContent = useCallback(() => {
@@ -1333,8 +1372,9 @@ const GridSlot = memo(function GridSlot({
       // placeMediaInSlot's own still-pending write in ways narrower to
       // reason about than just leaving it non-draggable for that one brief
       // window. Doesn't reintroduce the Library bug below -- that was
-      // about CLICK routing, not drag eligibility.
-      {...(slot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
+      // about CLICK routing, not drag eligibility. Also withheld while
+      // cropMode is true -- see useSortable's own disabled config comment.
+      {...(slot.postId && canManage && dragEnabled && !cropMode ? { ...attributes, ...listeners } : {})}
       role={filled || canManage ? "button" : undefined}
       tabIndex={filled || canManage ? 0 : undefined}
       // THE fix: routes on `filled` (isSlotFilled -- the same content-based
@@ -1350,6 +1390,7 @@ const GridSlot = memo(function GridSlot({
       // instead of reopening the picker, and a genuinely empty tile is
       // completely unaffected.
       onClick={filled ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
+      onDoubleClick={filled ? handleDoubleClick : undefined}
       // select-none + -webkit-touch-callout:none -- iOS Safari's own
       // long-press-on-an-image gesture (its "Save Photo/Copy/Share" system
       // callout) is a well-known conflict with a custom long-press-to-drag
@@ -1358,7 +1399,7 @@ const GridSlot = memo(function GridSlot({
       // compete with dnd-kit's own long-press activation, regardless of
       // which element inside the tile the touch happens to land on.
       className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
-        slot.postId && canManage && dragEnabled
+        slot.postId && canManage && dragEnabled && !cropMode
           ? "cursor-grab touch-none"
           : filled || canManage
             ? "cursor-pointer"
@@ -1556,7 +1597,13 @@ const GridSlotBody = memo(function GridSlotBody({
           {slot.assetCount}
         </span>
       )}
-      {canManage && (
+      {/* Hidden while cropMode is active, not just visually covered by the
+          crop overlay's own z-20 -- live-confirmed (elementFromPoint at
+          this button's own coordinates) that it sat directly underneath
+          the overlay, unreachable, while still looking present in the DOM.
+          The crop editor now has its own explicit Cancel/Save, so this
+          menu has nothing to add during a crop session anyway. */}
+      {canManage && !cropMode && (
         <div ref={contentMenuRef} className="absolute right-1 top-1 z-10">
           <button
             type="button"

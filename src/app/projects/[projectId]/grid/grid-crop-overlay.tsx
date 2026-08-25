@@ -209,6 +209,46 @@ export function GridCropOverlay({
           onPointerUp={handleCornerPointerUp}
         />
       ))}
+      {/* Explicit, visible Confirm/Cancel -- double-click-to-save and
+          click-outside-to-save/Escape-to-cancel all still work (kept for
+          anyone used to that gesture), but neither was ever a DISCOVERABLE
+          way to exit this editor, and this tile's own kebab menu -- the one
+          other control someone might reach for -- sits directly underneath
+          this overlay's z-20 (confirmed live: elementFromPoint at the
+          kebab's own coordinates returns this overlay's pan image while
+          cropping, not the button). A real user with no visible way out
+          reads as "stuck" regardless of what the invisible gestures
+          technically do. stopPropagation on pointerdown here isn't
+          strictly needed (dnd-kit's listeners are already withheld from the
+          tile for the whole time this overlay is mounted -- see GridSlot's
+          own {...attributes,...listeners} gate), but costs nothing and
+          keeps this component correct even if used somewhere without that
+          guarantee. */}
+      <div
+        className="absolute inset-x-0 bottom-2 z-10 flex items-center justify-center gap-2"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onCancel();
+          }}
+          className="rounded-none border border-background/40 bg-background/90 px-3 py-1.5 text-xs tracking-wide text-foreground uppercase shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:bg-background"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            commit();
+          }}
+          className="rounded-none border border-foreground bg-foreground px-3 py-1.5 text-xs tracking-wide text-background uppercase shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:opacity-90"
+        >
+          Save
+        </button>
+      </div>
     </div>
   );
 }
