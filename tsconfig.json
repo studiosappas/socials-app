@@ -32,6 +32,7 @@
   ],
   "exclude": [
     "node_modules",
-    "src/app/projects/[projectId]/grid/grid-reducer.test.ts"
+    "src/app/projects/[projectId]/grid/grid-reducer.test.ts",
+    "src/app/projects/[projectId]/grid/grid-interaction.test.ts"
   ]
 }

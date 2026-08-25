@@ -31,8 +31,7 @@ import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { deleteMedia, uploadMedia, type UploadMediaState } from "@/lib/actions/grid";
-import { generatePosterFromVideoUrl, uploadFilesConcurrently, type ConcurrentUploadOutcome } from "@/lib/video-poster";
+import { generatePosterFromVideoUrl } from "@/lib/video-poster";
 import { ShareMenuButton } from "../share-menu";
 import { createShareLink } from "@/lib/actions/share-links";
 import type { ShareLinkItem } from "@/lib/data/share-links";
@@ -49,6 +48,9 @@ import {
   type GridBoardSlot,
   type GridCoverTransform,
 } from "./grid-reducer";
+import { gridInteractionReducer, initialGridInteractionState } from "./grid-interaction";
+import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
+import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -68,11 +70,9 @@ export type { GridBoardRow, GridBoardSlot, GridCoverTransform };
 // comfortably inside typical OS double-click intervals without making a
 // genuine single click feel laggy.
 const DOUBLE_CLICK_WINDOW_MS = 400;
-// Same value and same reasoning as media-library.tsx's own
-// UPLOAD_CONCURRENCY -- this dialog is the touch/mobile equivalent upload
-// entry point, not a separate upload pipeline, so it stays in sync with the
-// sidebar's own concurrency choice rather than picking its own number.
-const UPLOAD_CONCURRENCY = 3;
+// Upload concurrency now lives in use-library-items.ts, the one shared
+// owner of Library item data for both this dialog and the sidebar
+// MediaLibrary -- no longer a separate constant here to keep in sync.
 
 export function UndoIcon({ redo = false }: { redo?: boolean }) {
   return (
@@ -236,11 +236,43 @@ export function GridBoard({
   const { showError } = useToast();
   const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
   const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
-  // Mobile has no room to keep the media library visible alongside the grid
-  // (and dragging between two things that can't both be on-screen doesn't
-  // work), so tapping an empty slot opens this picker instead -- the
-  // touch-friendly equivalent of dragging from the sidebar.
-  const [pickerSlotId, setPickerSlotId] = useState<string | null>(null);
+  // The single authoritative owner of "what interaction mode is the Grid in
+  // right now" -- see grid-interaction.ts for the full reasoning. Replaces
+  // this component's own standalone `pickerSlotId` state and GridSlot's own
+  // local `cropMode` boolean: both are now just reads of THIS state
+  // (`interaction.mode === "library"` / `=== "crop"`), so Library and Crop
+  // can no longer be simultaneously true by construction -- the reducer
+  // itself rejects a second mode-opening action while one is already
+  // active, rather than every call site needing to independently agree not
+  // to do that.
+  const [interaction, dispatchInteraction] = useReducer(gridInteractionReducer, initialGridInteractionState);
+  const pickerSlotId = interaction.mode === "library" ? interaction.pickerTargetSlotId : null;
+  const setPickerSlotId = useCallback((slotId: string | null) => {
+    if (slotId === null) {
+      logGridInteraction("close_library", {});
+      dispatchInteraction({ type: "CLOSE_LIBRARY" });
+    } else {
+      logGridInteraction("open_library", { slotId });
+      dispatchInteraction({ type: "OPEN_LIBRARY", slotId });
+    }
+  }, []);
+  // Per-slot booleans (not the raw `interaction` object) are what GridSlot
+  // actually receives -- see requestOpenCrop/requestCloseCrop below. A
+  // primitive `cropOpen: boolean` prop, computed once per slot right where
+  // rows are mapped to <GridRow>, is what lets GridSlot's memo() correctly
+  // skip re-rendering every OTHER slot when only one tile's crop state
+  // changes (memo compares props by value for primitives, so 29 unchanged
+  // `false`s and one changed `true` re-renders exactly one tile) -- passing
+  // the whole `interaction` object instead would change reference on every
+  // transition and defeat that memo for the entire board.
+  const requestOpenCrop = useCallback((slotId: string) => {
+    logGridInteraction("open_crop", { slotId });
+    dispatchInteraction({ type: "OPEN_CROP", slotId });
+  }, []);
+  const requestCloseCrop = useCallback(() => {
+    logGridInteraction("close_crop", {});
+    dispatchInteraction({ type: "CLOSE_CROP" });
+  }, []);
 
   // Touch devices get an explicit "Edit Grid" mode instead of always-on
   // drag -- a bare touch-action:none on every tile (needed so dnd-kit can
@@ -265,6 +297,15 @@ export function GridBoard({
 
   const { push: pushCommand, undo, redo, canUndo, canRedo, isBusy: undoRedoBusy } = useUndoStack();
   useUndoRedoShortcuts(undo, redo);
+
+  // ONE Library item-data owner, shared by both surfaces that show it (the
+  // sidebar MediaLibrary and the touch MediaPickerDialog below) -- see
+  // use-library-items.ts's own comment for why this consolidation was
+  // required this round, not left as a documented smell: both surfaces are
+  // mounted simultaneously regardless of viewport, and an upload made
+  // through one was invisible to the other until an unrelated refresh
+  // happened to land.
+  const libraryController = useLibraryItems(projectId, mediaLibrary, pushCommand, demoMode);
 
   // Share for Review: selecting posts happens inline on the grid itself
   // (same multi-select-circle pattern as Media Library) instead of in a
@@ -328,6 +369,7 @@ export function GridBoard({
   const [prevRowsProp, setPrevRowsProp] = useState(rows);
   if (rows !== prevRowsProp) {
     setPrevRowsProp(rows);
+    logGridDataEvent("server_snapshot_received", { rowCount: rows.length });
     dispatch({ type: "SERVER_ROWS_RECEIVED", rows });
   }
   const effectiveRows = deriveRows(gridState);
@@ -371,14 +413,17 @@ export function GridBoard({
   const mutateSlot = useCallback(
     async (slotId: string, optimisticValue: GridBoardSlot, run: () => Promise<Partial<GridBoardSlot> | void>) => {
       const opId = newOpId();
+      logGridDataEvent("slot_begin", { opId, slotId });
       dispatch({ type: "SLOT_BEGIN", opId, slotId, value: optimisticValue });
       opBegin();
       try {
         const patch = await run();
+        logGridDataEvent("slot_commit", { opId, slotId });
         dispatch({ type: "SLOT_COMMIT", opId, slotId, patch: patch ?? undefined });
         return true;
       } catch (error) {
         console.error("Grid slot mutation failed:", error);
+        logGridDataEvent("slot_fail", { opId, slotId });
         dispatch({ type: "SLOT_FAIL", opId, slotId });
         return false;
       } finally {
@@ -390,14 +435,18 @@ export function GridBoard({
   const mutateSlots = useCallback(
     async (changes: { slotId: string; value: GridBoardSlot }[], run: () => Promise<void>) => {
       const opId = newOpId();
+      const slotIds = changes.map((c) => c.slotId);
+      logGridDataEvent("slots_begin", { opId, slotIds });
       for (const c of changes) dispatch({ type: "SLOT_BEGIN", opId, slotId: c.slotId, value: c.value });
       opBegin();
       try {
         await run();
+        logGridDataEvent("slots_commit", { opId, slotIds });
         for (const c of changes) dispatch({ type: "SLOT_COMMIT", opId, slotId: c.slotId });
         return true;
       } catch (error) {
         console.error("Grid multi-slot mutation failed:", error);
+        logGridDataEvent("slots_fail", { opId, slotIds });
         for (const c of changes) dispatch({ type: "SLOT_FAIL", opId, slotId: c.slotId });
         return false;
       } finally {
@@ -409,6 +458,7 @@ export function GridBoard({
   const mutateAddRow = useCallback(
     async (tempRow: GridBoardRow, run: () => Promise<{ rowId: string; slotIds: string[] }>) => {
       const opId = newOpId();
+      logGridDataEvent("row_add_begin", { opId, tempRowId: tempRow.id });
       dispatch({
         type: "ROW_ADD_BEGIN",
         opId,
@@ -419,10 +469,12 @@ export function GridBoard({
       opBegin();
       try {
         const { rowId, slotIds } = await run();
+        logGridDataEvent("row_add_commit", { opId, tempRowId: tempRow.id, realRowId: rowId });
         dispatch({ type: "ROW_ADD_COMMIT", opId, tempRowId: tempRow.id, realRowId: rowId, realSlotIds: slotIds });
         return true;
       } catch (error) {
         console.error("Failed to add row:", error);
+        logGridDataEvent("row_add_fail", { opId, tempRowId: tempRow.id });
         dispatch({ type: "ROW_ADD_FAIL", opId, tempRowId: tempRow.id });
         return false;
       } finally {
@@ -434,14 +486,17 @@ export function GridBoard({
   const mutateRemoveRow = useCallback(
     async (rowId: string, run: () => Promise<void>) => {
       const opId = newOpId();
+      logGridDataEvent("row_remove_begin", { opId, rowId });
       dispatch({ type: "ROW_REMOVE_BEGIN", opId, rowId });
       opBegin();
       try {
         await run();
+        logGridDataEvent("row_remove_commit", { opId, rowId });
         dispatch({ type: "ROW_REMOVE_COMMIT", opId, rowId });
         return true;
       } catch (error) {
         console.error("Failed to remove row:", error);
+        logGridDataEvent("row_remove_fail", { opId, rowId });
         dispatch({ type: "ROW_REMOVE_FAIL", opId, rowId });
         return false;
       } finally {
@@ -462,6 +517,8 @@ export function GridBoard({
   const flatSlotIds = flatSlots.map((slot) => slot.id);
 
   function handleDragStart(event: DragStartEvent) {
+    logGridInteraction("drag_start", { activeId: event.active.id });
+    dispatchInteraction({ type: "DRAG_START" });
     const data = event.active.data.current;
     if (data?.type === "slot") {
       setActiveSlot((data.slot as GridBoardSlot | undefined) ?? null);
@@ -471,6 +528,8 @@ export function GridBoard({
   }
 
   function handleDragEnd(event: DragEndEvent) {
+    logGridInteraction("drag_end", { activeId: event.active.id, overId: event.over?.id ?? null });
+    dispatchInteraction({ type: "DRAG_END" });
     setActiveMedia(null);
     setActiveSlot(null);
     const { active, over } = event;
@@ -733,6 +792,8 @@ export function GridBoard({
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
       onDragCancel={() => {
+        logGridInteraction("drag_cancel", {});
+        dispatchInteraction({ type: "DRAG_END" });
         setActiveMedia(null);
         setActiveSlot(null);
       }}
@@ -837,6 +898,10 @@ export function GridBoard({
                 mutateSlot={mutateSlot}
                 mutateRemoveRow={mutateRemoveRow}
                 requestIdleRefresh={requestIdleRefresh}
+                cropTargetSlotId={interaction.mode === "crop" ? interaction.cropTargetSlotId : null}
+                requestOpenCrop={requestOpenCrop}
+                requestCloseCrop={requestCloseCrop}
+                interactionIdle={interaction.mode === "idle"}
                 selectionMode={selectionMode}
                 selectedPostIds={selectedPostIds}
                 onToggleSelectPost={handleToggleSelectPost}
@@ -864,6 +929,7 @@ export function GridBoard({
               folders={mediaFolders}
               pushCommand={pushCommand}
               demoMode={demoMode}
+              sharedLibrary={libraryController}
             />
           </div>
         )}
@@ -871,10 +937,9 @@ export function GridBoard({
 
       {canManage && (
         <MediaPickerDialog
-          projectId={projectId}
           open={pickerSlotId !== null}
           onClose={() => setPickerSlotId(null)}
-          items={mediaLibrary}
+          library={libraryController}
           onSelect={handlePickMedia}
           demoMode={demoMode}
         />
@@ -956,6 +1021,10 @@ function GridRow({
   mutateSlot,
   mutateRemoveRow,
   requestIdleRefresh,
+  cropTargetSlotId,
+  requestOpenCrop,
+  requestCloseCrop,
+  interactionIdle,
   selectionMode,
   selectedPostIds,
   onToggleSelectPost,
@@ -975,6 +1044,14 @@ function GridRow({
   ) => Promise<boolean>;
   mutateRemoveRow: (rowId: string, run: () => Promise<void>) => Promise<boolean>;
   requestIdleRefresh: () => void;
+  // GridBoard's own interaction reducer, narrowed to exactly what each
+  // slot needs to know -- see GridBoard's own comment on why this is a
+  // per-slot primitive boolean (computed here, per slot, below) rather
+  // than the whole interaction object.
+  cropTargetSlotId: string | null;
+  requestOpenCrop: (slotId: string) => void;
+  requestCloseCrop: () => void;
+  interactionIdle: boolean;
   selectionMode: boolean;
   selectedPostIds: Set<string>;
   onToggleSelectPost: (postId: string) => void;
@@ -1002,6 +1079,10 @@ function GridRow({
           mutateSlot={mutateSlot}
           mutateRemoveRow={mutateRemoveRow}
           requestIdleRefresh={requestIdleRefresh}
+          cropOpen={cropTargetSlotId === slot.id}
+          requestOpenCrop={requestOpenCrop}
+          requestCloseCrop={requestCloseCrop}
+          interactionIdle={interactionIdle}
           selectionMode={selectionMode}
           selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
           onToggleSelectPost={onToggleSelectPost}
@@ -1031,6 +1112,10 @@ const GridSlot = memo(function GridSlot({
   mutateSlot,
   mutateRemoveRow,
   requestIdleRefresh,
+  cropOpen,
+  requestOpenCrop,
+  requestCloseCrop,
+  interactionIdle,
   selectionMode,
   selected,
   onToggleSelectPost,
@@ -1051,6 +1136,21 @@ const GridSlot = memo(function GridSlot({
   ) => Promise<boolean>;
   mutateRemoveRow: (rowId: string, run: () => Promise<void>) => Promise<boolean>;
   requestIdleRefresh: () => void;
+  // Is THIS slot's crop editor open -- GridBoard's interaction reducer,
+  // narrowed to a single primitive so memo() below still only re-renders
+  // the one tile whose value actually changed (see GridBoard's own comment
+  // on why the whole interaction object is never passed down directly).
+  cropOpen: boolean;
+  requestOpenCrop: (slotId: string) => void;
+  requestCloseCrop: () => void;
+  // True only while the Grid's interaction mode is fully idle -- i.e.
+  // neither Library nor any slot's Crop is open. Gates drag/drop
+  // eligibility board-wide (not just this tile's own cropOpen), since a
+  // drag starting anywhere while another tile's Crop is open is exactly
+  // the "DRAGGING + CROP must never overlap" case the interaction reducer
+  // exists to prevent -- dnd-kit's own sensor-level disabling is the
+  // enforcement mechanism, this is just what feeds it.
+  interactionIdle: boolean;
   selectionMode: boolean;
   selected: boolean;
   onToggleSelectPost: (postId: string) => void;
@@ -1060,10 +1160,6 @@ const GridSlot = memo(function GridSlot({
 }) {
   const router = useRouter();
   const { showError } = useToast();
-  // Declared before useSortable below -- its own `disabled` config reads
-  // this to withhold drag/drop eligibility while this tile's crop editor
-  // is open (see that config's own comment).
-  const [cropMode, setCropMode] = useState(false);
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
     useSortable({
       id: slot.id,
@@ -1074,14 +1170,15 @@ const GridSlot = memo(function GridSlot({
       // fights with the tap-to-select interaction. And disabled on touch
       // until "Edit Grid" mode is on (dragEnabled), so an ordinary scroll
       // touch is never mistaken for a drag pickup.
-      // Also disabled while this tile's own crop editor is open -- a
-      // pointerdown starting a grid drag while the crop overlay is active
-      // was a real, live-confirmed contributor to the "stuck crop" report:
+      // Also disabled whenever the Grid's interaction mode isn't idle (some
+      // slot's Crop is open, or Library is open) -- a pointerdown starting
+      // a grid drag while the crop overlay is active was a real, live-
+      // confirmed contributor to an earlier round's "stuck crop" report:
       // dnd-kit's own drag-activation tracking competing with the crop
       // overlay's own pointer handling on the exact same pointer sequence.
       disabled: {
-        draggable: !slot.postId || !canManage || selectionMode || !dragEnabled || cropMode,
-        droppable: !canManage || selectionMode || !dragEnabled || cropMode,
+        draggable: !slot.postId || !canManage || selectionMode || !dragEnabled || !interactionIdle,
+        droppable: !canManage || selectionMode || !dragEnabled || !interactionIdle,
       },
       // No transition (verified against @dnd-kit/sortable's own source,
       // useSortable's getTransition()): passing a transition here makes
@@ -1133,7 +1230,7 @@ const GridSlot = memo(function GridSlot({
     setPrevReorderMode(reorderMode);
     if (reorderMode) {
       setContentMenuOpen(false);
-      setCropMode(false);
+      if (cropOpen) requestCloseCrop();
     }
   }
 
@@ -1216,6 +1313,26 @@ const GridSlot = memo(function GridSlot({
   // window that gives a following native dblclick a chance to cancel the
   // deferred single-click navigation before it fires.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cleared on: a following dblclick (handleDoubleClick, below), this same
+  // slot's own drag activating (isDragging flipping true -- a real drag
+  // gesture beginning must preempt a pending single-click intent, not race
+  // it to fire mid-drag), reorder mode toggling on, and component removal
+  // (a row/slot can be removed via Undo or another mutation while this
+  // timer is still ticking). Never needs clearing "on Library open" or "on
+  // Crop open elsewhere" -- Library only ever opens via the empty-slot
+  // click path, which never runs this timer at all, and another slot's
+  // Crop opening has no bearing on THIS slot's own pending intent.
+  useEffect(() => {
+    if (isDragging && clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+  }, [isDragging]);
+  useEffect(() => {
+    return () => {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    };
+  }, []);
 
   function handleClick() {
     if (!slot.postId) return;
@@ -1249,7 +1366,11 @@ const GridSlot = memo(function GridSlot({
     // double-clicking one is a safe no-op rather than opening an overlay
     // with nothing to show. Still never falls through to the Library --
     // this whole function already returned early above if !slot.postId.
-    if (canManage && slot.thumbnailUrl) setCropMode(true);
+    // Routed through the shared interaction reducer (requestOpenCrop), not
+    // local state -- its own OPEN_CROP guard is what makes "Library can
+    // never also be open right now" true by construction rather than by
+    // this component happening to agree.
+    if (canManage && slot.thumbnailUrl) requestOpenCrop(slot.id);
   }
 
   // useCallback below (not plain functions) -- these are passed as props
@@ -1268,7 +1389,7 @@ const GridSlot = memo(function GridSlot({
       // the server (see mutateSlot's own async call below, which this does
       // not wait for). On failure, showError/requestIdleRefresh still fire,
       // but the user is never trapped in the crop overlay because of it.
-      setCropMode(false);
+      requestCloseCrop();
       mutateSlot(slot.id, { ...slot, coverTransform: next }, async () => {
         // The crop itself is applied optimistically either way -- demoMode
         // just skips persisting it, same reasoning as every mutation here.
@@ -1298,13 +1419,14 @@ const GridSlot = memo(function GridSlot({
         });
       });
     },
-    [slot, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh],
+    [slot, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh, requestCloseCrop],
   );
 
-  // Purely local -- discards the editor's in-progress transform and exits.
-  // Never awaits a server call, so a slow/failed backend can never trap the
-  // user in the crop overlay via this path.
-  const handleCancelCrop = useCallback(() => setCropMode(false), []);
+  // Purely local intent, dispatched to the shared reducer -- discards the
+  // editor's in-progress transform and exits. Never awaits a server call,
+  // so a slow/failed backend can never trap the user in the crop overlay
+  // via this path.
+  const handleCancelCrop = useCallback(() => requestCloseCrop(), [requestCloseCrop]);
 
   const handleEditContent = useCallback(() => {
     setContentMenuOpen(false);
@@ -1314,8 +1436,8 @@ const GridSlot = memo(function GridSlot({
 
   const handleOpenCropFromMenu = useCallback(() => {
     setContentMenuOpen(false);
-    setCropMode(true);
-  }, []);
+    requestOpenCrop(slot.id);
+  }, [requestOpenCrop, slot.id]);
 
   const handleDeletePost = useCallback(() => {
     if (!slot.postId) return;
@@ -1372,9 +1494,10 @@ const GridSlot = memo(function GridSlot({
       // placeMediaInSlot's own still-pending write in ways narrower to
       // reason about than just leaving it non-draggable for that one brief
       // window. Doesn't reintroduce the Library bug below -- that was
-      // about CLICK routing, not drag eligibility. Also withheld while
-      // cropMode is true -- see useSortable's own disabled config comment.
-      {...(slot.postId && canManage && dragEnabled && !cropMode ? { ...attributes, ...listeners } : {})}
+      // about CLICK routing, not drag eligibility. Also withheld whenever
+      // interaction mode isn't idle -- see useSortable's own disabled
+      // config comment.
+      {...(slot.postId && canManage && dragEnabled && interactionIdle ? { ...attributes, ...listeners } : {})}
       role={filled || canManage ? "button" : undefined}
       tabIndex={filled || canManage ? 0 : undefined}
       // THE fix: routes on `filled` (isSlotFilled -- the same content-based
@@ -1399,7 +1522,7 @@ const GridSlot = memo(function GridSlot({
       // compete with dnd-kit's own long-press activation, regardless of
       // which element inside the tile the touch happens to land on.
       className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
-        slot.postId && canManage && dragEnabled && !cropMode
+        slot.postId && canManage && dragEnabled && interactionIdle
           ? "cursor-grab touch-none"
           : filled || canManage
             ? "cursor-pointer"
@@ -1421,7 +1544,7 @@ const GridSlot = memo(function GridSlot({
         selectionMode={selectionMode}
         selected={selected}
         demoMode={demoMode}
-        cropMode={cropMode}
+        cropMode={cropOpen}
         contentMenuOpen={contentMenuOpen}
         contentMenuRef={contentMenuRef}
         onToggleMenu={handleToggleMenu}
@@ -1677,158 +1800,37 @@ const GridSlotBody = memo(function GridSlotBody({
 // library onto a slot -- tap an empty slot to open this, tap a thumbnail to
 // place it. Also carries its own upload entry point, since the desktop
 // sidebar (where uploading normally happens) is hidden below `lg`.
+//
+// Purely presentational now -- `library` is GridBoard's own single
+// useLibraryItems() instance, the SAME one the sidebar MediaLibrary renders
+// (see grid-board.tsx's own comment on why: these two surfaces used to each
+// carry an independent copy of the same conceptual item data, which could
+// -- and did, this was reachable, not just theoretical -- go stale relative
+// to each other, since both are mounted simultaneously on every viewport
+// and uploads no longer trigger any revalidation to naturally resync them).
 function MediaPickerDialog({
-  projectId,
   open,
   onClose,
-  items,
+  library,
   onSelect,
   demoMode = false,
 }: {
-  projectId: string;
   open: boolean;
   onClose: () => void;
-  items: MediaLibraryItem[];
+  library: LibraryItemsController;
   onSelect: (item: MediaLibraryItem) => void;
   demoMode?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
-  const { showError } = useToast();
   const [, startDeleteTransition] = useTransition();
-  // Surfaces both a too-large/direct-upload-failed file and a business-logic
-  // failure returned BY uploadMedia -- handleUploadResult below is now the
-  // one place both land, since uploadMedia is called directly rather than
-  // through useActionState (see uploadFilesConcurrently's own comment).
-  const [uploadError, setUploadError] = useState<string | null>(null);
-
-  // Same optimistic overlay as media-library.tsx's sidebar library -- see
-  // its comments for the full reasoning (instant blob-URL preview on
-  // upload, instant removal on delete; upload reconciles its placeholder
-  // directly from uploadMedia's own return value, delete needs no further
-  // reconciliation -- neither action revalidates this route anymore), now
-  // including its same pending-mutation guard and immediate blob-URL swap.
-  const [prevItems, setPrevItems] = useState(items);
-  const [overrideItems, setOverrideItems] = useState<MediaLibraryItem[] | null>(null);
-  const pendingBlobUrlsRef = useRef<Set<string>>(new Set());
-  const [pendingMutations, setPendingMutations] = useState(0);
-  const beginMutation = useCallback(() => setPendingMutations((n) => n + 1), []);
-  const endMutation = useCallback(() => setPendingMutations((n) => Math.max(0, n - 1)), []);
-  const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
-  function advanceUploadBatch() {
-    setUploadBatch((current) => {
-      if (!current) return null;
-      const done = current.done + 1;
-      return done >= current.total ? null : { total: current.total, done };
-    });
-  }
-  // See GridBoard's own overrideRows guard for why prevItems must advance
-  // unconditionally here while only the actual apply is pendingMutations-gated.
-  if (items !== prevItems) {
-    setPrevItems(items);
-    if (pendingMutations === 0) setOverrideItems(null);
-  }
-  const effectiveItems = overrideItems ?? items;
-  // See media-library.tsx's identical itemsRef for why handleUploadResult
-  // (an async callback, not a render) needs this instead of closing over
-  // effectiveItems directly.
-  const itemsRef = useRef(effectiveItems);
-  useEffect(() => {
-    itemsRef.current = effectiveItems;
-  }, [effectiveItems]);
-
-  useEffect(() => {
-    for (const url of pendingBlobUrlsRef.current) URL.revokeObjectURL(url);
-    pendingBlobUrlsRef.current = new Set();
-  }, [items]);
-
-  // See media-library.tsx's identical handleUploadResult for the full
-  // reasoning -- called directly by uploadFilesConcurrently's onResult as
-  // each file's own pipeline resolves, not a useEffect watching a shared
-  // useActionState `state` (that was the actual root cause of the batch
-  // appearing frozen then dumping in bulk -- see uploadFilesConcurrently's
-  // own comment for the isolated reproduction).
-  function handleUploadResult(outcome: ConcurrentUploadOutcome<UploadMediaState>) {
-    endMutation();
-    advanceUploadBatch();
-
-    function failThisFile(message: string) {
-      setUploadError(message);
-      showError(message);
-      const failed = itemsRef.current.find((i) => i.id === outcome.tempId);
-      if (failed?.url && pendingBlobUrlsRef.current.has(failed.url)) {
-        pendingBlobUrlsRef.current.delete(failed.url);
-        URL.revokeObjectURL(failed.url);
-      }
-      setOverrideItems((current) => (current ?? itemsRef.current).filter((i) => i.id !== outcome.tempId));
-    }
-
-    if (outcome.status === "error") {
-      failThisFile(outcome.message);
-      return;
-    }
-    if (outcome.result?.message) {
-      failThisFile(outcome.result.message);
-      return;
-    }
-    const result = outcome.result;
-    if (!result?.id) {
-      failThisFile("Upload didn't complete. Please try again.");
-      return;
-    }
-
-    const tempId = outcome.tempId;
-    const realId = result.id;
-    const realStoragePath = result.storagePath;
-    const realPosterStoragePath = result.posterStoragePath ?? null;
-    const matched = itemsRef.current.find((i) => i.id === tempId);
-    const oldBlobUrl = matched?.url;
-    const newUrl = result.displayUrl ?? matched?.url;
-    setOverrideItems((current) =>
-      (current ?? itemsRef.current).map((i) =>
-        i.id === tempId
-          ? {
-              ...i,
-              id: realId,
-              url: newUrl ?? i.url,
-              storagePath: realStoragePath,
-              posterStoragePath: realPosterStoragePath,
-              pending: false,
-            }
-          : i,
-      ),
-    );
-    if (result.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
-      pendingBlobUrlsRef.current.delete(oldBlobUrl);
-      URL.revokeObjectURL(oldBlobUrl);
-    }
-  }
+  const { effectiveItems, uploadError, uploadBatch, uploadFiles, deleteItem } = library;
 
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
     if (!confirm("Delete this asset? This removes it from any post or story using it.")) return;
-    const removedItem = effectiveItems.find((item) => item.id === mediaAssetId) ?? null;
-    setOverrideItems(effectiveItems.filter((item) => item.id !== mediaAssetId));
-    beginMutation();
     startDeleteTransition(async () => {
-      try {
-        await deleteMedia(projectId, mediaAssetId);
-      } catch (error) {
-        console.error("Failed to delete media:", error);
-        // Narrow: restore only the one item THIS call removed, not a
-        // blanket null -- a concurrent in-flight upload's own optimistic
-        // placeholder must not be discarded by an unrelated delete's
-        // failure (Invariant 2 -- see grid-reducer.ts's own comment on the
-        // same class of bug in the rows/slots domain).
-        setOverrideItems((current) => {
-          const cur = current ?? itemsRef.current;
-          if (!removedItem || cur.some((i) => i.id === removedItem.id)) return cur;
-          return [...cur, removedItem];
-        });
-        showError("Couldn't delete this asset. Please try again.");
-      } finally {
-        endMutation();
-      }
+      await deleteItem(mediaAssetId);
     });
   }
 
@@ -1848,42 +1850,7 @@ function MediaPickerDialog({
               onChange={(e) => {
                 const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
-                setUploadError(null);
-                if (files.length === 0) return;
-
-                const optimistic = files.map((file) => {
-                  const url = URL.createObjectURL(file);
-                  pendingBlobUrlsRef.current.add(url);
-                  const tempId = `optimistic-${crypto.randomUUID()}`;
-                  return {
-                    file,
-                    tempId,
-                    item: {
-                      id: tempId,
-                      clientKey: tempId,
-                      url,
-                      mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
-                      // Shown immediately, but not selectable until
-                      // handleUploadResult clears this once uploadMedia's
-                      // insert actually resolves.
-                      pending: true,
-                    } satisfies MediaLibraryItem,
-                  };
-                });
-                setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
-                for (let i = 0; i < optimistic.length; i++) beginMutation();
-                setUploadBatch((current) => ({
-                  total: (current?.total ?? 0) + optimistic.length,
-                  done: current?.done ?? 0,
-                }));
-
-                uploadFilesConcurrently(
-                  projectId,
-                  optimistic.map((o) => ({ file: o.file, tempId: o.tempId })),
-                  (formData) => uploadMedia(projectId, undefined, formData),
-                  handleUploadResult,
-                  UPLOAD_CONCURRENCY,
-                );
+                uploadFiles(files);
               }}
             />
             <Button
