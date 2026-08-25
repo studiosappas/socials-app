@@ -15,6 +15,7 @@ import {
   deriveRows,
   newOpId,
   hasPendingWork,
+  isSlotFilled,
   type GridState,
   type GridBoardRow,
   type GridBoardSlot,
@@ -339,6 +340,59 @@ test("Scenario 5: 200 randomized adversarial sequences hold every invariant", ()
     while (settleQueue.length > 0) settleQueue.shift()!();
     assert.equal(hasPendingWork(state), false, `seed=${seed}: nothing should still be pending after full drain`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// isSlotFilled regression: the exact bug this round fixed. A slot mid-
+// assignment (thumbnailUrl set by assignMediaToSlot's optimistic value,
+// postId not yet returned by placeMediaInSlot) must classify as FILLED --
+// grid-board.tsx's outer click handler routes on this, not on postId, and
+// this is what stops the pending window from reopening the Library picker.
+// ---------------------------------------------------------------------------
+test("isSlotFilled: truly empty slot is not filled", () => {
+  assert.equal(isSlotFilled(makeSlot("s1", null)), false);
+});
+
+test("isSlotFilled: a normal persisted slot (postId + thumbnail) is filled", () => {
+  const slot = { ...makeSlot("s1", "post-1"), thumbnailUrl: "https://example.com/a.jpg" };
+  assert.equal(isSlotFilled(slot), true);
+});
+
+test("isSlotFilled: assignMediaToSlot's exact optimistic shape (thumbnail set, postId still null) is filled", () => {
+  // Mirrors grid-board.tsx's assignMediaToSlot optimisticValue exactly:
+  // postId is inherited from beforeSlot (null, if the slot started empty)
+  // and is NOT set until placeMediaInSlot's server round-trip returns one.
+  const pendingAssignSlot: GridBoardSlot = {
+    id: "s1",
+    postId: null,
+    thumbnailUrl: "https://example.com/newly-picked.jpg",
+    coverMediaType: "image",
+    coverMediaAssetId: "media-a",
+    coverOriginalUrl: null,
+    assetCount: 1,
+    coverTransform: null,
+    scheduledDate: null,
+  };
+  assert.equal(
+    isSlotFilled(pendingAssignSlot),
+    true,
+    "a slot showing its just-picked image must be FILLED even before postId lands -- this is what stops a click from reopening the Library during that window",
+  );
+});
+
+test("isSlotFilled: a video with no poster yet is filled (not empty)", () => {
+  const slot: GridBoardSlot = {
+    id: "s1",
+    postId: "post-1",
+    thumbnailUrl: null,
+    coverMediaType: "video",
+    coverMediaAssetId: "media-v",
+    coverOriginalUrl: "https://example.com/v.mp4",
+    assetCount: 1,
+    coverTransform: null,
+    scheduledDate: null,
+  };
+  assert.equal(isSlotFilled(slot), true);
 });
 
 console.log(`\n${passed} passed`);

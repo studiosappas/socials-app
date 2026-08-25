@@ -44,6 +44,7 @@ import {
   initGridState,
   deriveRows,
   newOpId,
+  isSlotFilled,
   type GridBoardRow,
   type GridBoardSlot,
   type GridCoverTransform,
@@ -1200,6 +1201,12 @@ const GridSlot = memo(function GridSlot({
         clearTimeout(clickTimerRef.current);
         clickTimerRef.current = null;
       }
+      // Narrower than isSlotFilled(slot) deliberately -- GridCropOverlay
+      // needs an actual image to overlay on top of (imageUrl={slot.
+      // thumbnailUrl}), which a video with no poster yet doesn't have, so
+      // double-clicking one is a safe no-op rather than opening an overlay
+      // with nothing to show. Still never falls through to the Library --
+      // this whole function already returned early above if !slot.postId.
       if (canManage && slot.thumbnailUrl) setCropMode(true);
       return;
     }
@@ -1313,14 +1320,36 @@ const GridSlot = memo(function GridSlot({
     });
   }, [mutateRemoveRow, projectId, rowId, showError, requestIdleRefresh]);
 
+  const filled = isSlotFilled(slot);
+
   return (
     <div
       ref={setNodeRef}
       style={style}
+      // Deliberately still gated on the real, persisted slot.postId, NOT
+      // `filled` -- picking a tile up to reorder it while its own
+      // assignment is still mid-flight (content visible, post not yet
+      // created server-side) would race dnd-kit's reorder against
+      // placeMediaInSlot's own still-pending write in ways narrower to
+      // reason about than just leaving it non-draggable for that one brief
+      // window. Doesn't reintroduce the Library bug below -- that was
+      // about CLICK routing, not drag eligibility.
       {...(slot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
-      role={slot.postId || canManage ? "button" : undefined}
-      tabIndex={slot.postId || canManage ? 0 : undefined}
-      onClick={slot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
+      role={filled || canManage ? "button" : undefined}
+      tabIndex={filled || canManage ? 0 : undefined}
+      // THE fix: routes on `filled` (isSlotFilled -- the same content-based
+      // truth GridSlotBody below renders from), not `slot.postId`. Before
+      // this, a slot showing its just-picked image but still waiting on
+      // placeMediaInSlot's server round-trip (postId not yet assigned) fell
+      // into the `else` branch here and reopened the Library picker on
+      // every click -- the exact, confirmed cause of "clicking an
+      // already-filled image opens the Library." handleClick itself already
+      // no-ops safely when slot.postId isn't there yet (see its own
+      // `if (!slot.postId) return`), so routing here by `filled` alone is
+      // sufficient: a pending-assignment tile's clicks become a safe no-op
+      // instead of reopening the picker, and a genuinely empty tile is
+      // completely unaffected.
+      onClick={filled ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
       // select-none + -webkit-touch-callout:none -- iOS Safari's own
       // long-press-on-an-image gesture (its "Save Photo/Copy/Share" system
       // callout) is a well-known conflict with a custom long-press-to-drag
@@ -1331,11 +1360,11 @@ const GridSlot = memo(function GridSlot({
       className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
         slot.postId && canManage && dragEnabled
           ? "cursor-grab touch-none"
-          : slot.postId || canManage
+          : filled || canManage
             ? "cursor-pointer"
             : ""
       } ${
-        slot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
+        filled ? "border-border hover:border-foreground/30" : "border-dashed border-border"
       } ${
         isDragging ? "opacity-30" : ""
       } ${
@@ -1419,6 +1448,15 @@ const GridSlotBody = memo(function GridSlotBody({
           it only ever clips the image -- the ⋮ menu below is a sibling, not
           a descendant, so it can render outside the tile's own bounds
           instead of being cropped by it. */}
+      {/* The two conditions below (thumbnailUrl / coverMediaType==="video")
+          are exactly isSlotFilled's own definition (grid-reducer.ts) --
+          spelled out here rather than called as a function only because
+          this branch needs three outcomes (image / video-without-poster /
+          truly empty), not isSlotFilled's single boolean. GridSlot's outer
+          wrapper uses the real isSlotFilled(slot) call for its click
+          routing -- keeping both reads of the same two fields is what
+          guarantees a tile's visual state and its click behavior can never
+          disagree (see the outer wrapper's own comment). */}
       <div className={`absolute inset-0 flex items-center justify-center ${cropMode ? "" : "overflow-hidden"}`}>
         {slot.thumbnailUrl ? (
           // Always a static <img>, even when the cover is a video -- this is

@@ -52,6 +52,30 @@ export type GridBoardSlot = {
 
 export type GridBoardRow = { id: string; slots: GridBoardSlot[]; clientKey?: string };
 
+// THE canonical "is this slot empty or does it have content" answer -- used
+// for BOTH what gets rendered (an image/video badge vs. the empty "+ Empty"
+// placeholder) AND what a click on it does (open the Library picker vs.
+// route to the Post Editor / Crop). Deliberately NOT based on `postId`:
+// assignMediaToSlot's own optimistic value sets `thumbnailUrl`/
+// `coverMediaAssetId` the instant a click/drop happens, but can't know the
+// real `postId` until placeMediaInSlot's server round-trip returns one (a
+// brand-new post is only created there). A slot going through that pending
+// window was visually showing the newly picked image while `postId` was
+// still null -- and grid-board.tsx's outer click handler used to route
+// click/dblclick based on `slot.postId` being falsy, meaning EVERY click on
+// that visually-filled tile reopened the Library picker for as long as the
+// assignment was in flight. This is the exact, confirmed cause of "single-
+// and double-clicking an already-filled image can open the Library" -- not
+// inferred, found by reading assignMediaToSlot's own optimistic value
+// against the click router it feeds. Fixed at the root by giving "filled"
+// one single, content-based definition instead of relying on `postId`
+// (which answers a related but different question: "does a persisted post
+// exist yet"), and using that same definition everywhere a filled/empty
+// decision is made.
+export function isSlotFilled(slot: GridBoardSlot): boolean {
+  return slot.thumbnailUrl !== null || slot.coverMediaType === "video";
+}
+
 type SlotState = {
   value: GridBoardSlot;
   pendingOpId: string | null;
