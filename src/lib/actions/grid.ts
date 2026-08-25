@@ -39,7 +39,22 @@ export type UploadMediaState =
     }
   | undefined;
 
-export async function addGridRow(projectId: string) {
+// Returns the real row id + its 3 real slot ids (in position order) so the
+// caller can reconcile its optimistic placeholder in place -- see
+// grid-board.tsx's handleAddRow. Not revalidating /grid (its own currently-
+// mounted route) -- a real, confirmed reason, not just the usual "the
+// optimistic state already covers it" convention this file's other
+// mutations follow: repeated Add Row clicks each triggering their own
+// revalidatePath of the SAME currently-mounted route were found (via an
+// isolated, minimal reproduction -- a bare form action + revalidatePath,
+// no upload/canvas work involved at all) to have their visible effects
+// batched by Next.js/React and only committed once every pending one
+// finishes, not progressively -- exactly the reported "nothing happens,
+// then N rows appear at once" symptom. Dropping this call removes the
+// mechanism entirely rather than trying to out-race it.
+export async function addGridRow(
+  projectId: string,
+): Promise<{ rowId: string; slotIds: string[] }> {
   const supabase = await createClient();
 
   // New rows always land at the very top (lowest position sorts first, see
@@ -67,15 +82,17 @@ export async function addGridRow(projectId: string) {
     throw new Error(error?.message ?? "Failed to add row.");
   }
 
-  const { error: slotsError } = await supabase
+  const { data: slots, error: slotsError } = await supabase
     .from("grid_slots")
-    .insert([0, 1, 2].map((position) => ({ row_id: row.id, position })));
+    .insert([0, 1, 2].map((position) => ({ row_id: row.id, position })))
+    .select("id, position")
+    .order("position");
 
-  if (slotsError) {
-    throw new Error(slotsError.message);
+  if (slotsError || !slots) {
+    throw new Error(slotsError?.message ?? "Failed to add row.");
   }
 
-  revalidatePath(`/projects/${projectId}/grid`);
+  return { rowId: row.id, slotIds: slots.map((s) => s.id) };
 }
 
 // Not revalidating /grid (its own route, only caller) -- GridRow already

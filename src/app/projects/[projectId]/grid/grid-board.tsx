@@ -151,8 +151,13 @@ export type GridBoardSlot = {
   assetCount: number;
   coverTransform: GridCoverTransform | null;
   scheduledDate: string | null;
+  // Stable React key across an optimistic Add Row's temp id -> real id
+  // reconciliation -- same reasoning and same fix as MediaLibraryItem's own
+  // clientKey (see its comment). Only ever differs from `id` for a slot
+  // that started life as part of an optimistic row.
+  clientKey?: string;
 };
-export type GridBoardRow = { id: string; slots: GridBoardSlot[] };
+export type GridBoardRow = { id: string; slots: GridBoardSlot[]; clientKey?: string };
 
 export function GridBoard({
   projectId,
@@ -337,6 +342,12 @@ export function GridBoard({
     if (pendingMutations === 0) setOverrideRows(null);
   }
   const effectiveRows = overrideRows ?? rows;
+  // Add Row's own in-flight flag -- separate from pendingMutations (which
+  // only gates whether a fresh `rows` prop may clear overrideRows). This one
+  // disables the button itself, so a burst of clicks while the first add is
+  // still in flight can't queue up invisible work that all lands at once --
+  // see handleAddRow's comment for the full story.
+  const [addRowPending, setAddRowPending] = useState(false);
 
   const flatSlots = effectiveRows.flatMap((row) => row.slots);
   const flatSlotIds = flatSlots.map((slot) => slot.id);
@@ -621,6 +632,61 @@ export function GridBoard({
     });
   }
 
+  // Genuinely optimistic Add Row: the new row (and its 3 empty slots) is
+  // applied to overrideRows synchronously, before the server call even
+  // starts, so the click has visible effect immediately -- no dependence on
+  // addGridRow's round-trip. This directly fixes the "click does nothing,
+  // then N rows appear at once" report: that was caused by addGridRow's
+  // now-removed revalidatePath call on this same route batching every
+  // pending call's visible effect into one delayed commit (confirmed via an
+  // isolated repro outside this file; see the comment on addGridRow itself).
+  // addRowPending disables the button for the duration of this one add --
+  // the deliberate alternative to letting clicks queue invisibly and burst
+  // later, per the interaction contract: first click must give immediate
+  // feedback, and further clicks are prevented, not silently swallowed.
+  function handleAddRow() {
+    if (addRowPending) return;
+    const tempRowId = `optimistic-${crypto.randomUUID()}`;
+    const tempSlots: GridBoardSlot[] = [0, 1, 2].map(() => {
+      const tempSlotId = `optimistic-${crypto.randomUUID()}`;
+      return {
+        id: tempSlotId,
+        clientKey: tempSlotId,
+        postId: null,
+        thumbnailUrl: null,
+        coverMediaType: null,
+        coverMediaAssetId: null,
+        coverOriginalUrl: null,
+        assetCount: 0,
+        coverTransform: null,
+        scheduledDate: null,
+      };
+    });
+    const tempRow: GridBoardRow = { id: tempRowId, clientKey: tempRowId, slots: tempSlots };
+    setOverrideRows([tempRow, ...effectiveRows]);
+    setAddRowPending(true);
+    beginMutation();
+    startTransition(async () => {
+      try {
+        const { rowId, slotIds } = await addGridRow(projectId);
+        setOverrideRows((current) =>
+          (current ?? effectiveRows).map((row) =>
+            row.id === tempRowId
+              ? { ...row, id: rowId, slots: row.slots.map((slot, i) => ({ ...slot, id: slotIds[i] ?? slot.id })) }
+              : row,
+          ),
+        );
+      } catch (error) {
+        console.error("Failed to add row:", error);
+        setOverrideRows((current) => (current ?? effectiveRows).filter((row) => row.id !== tempRowId));
+        showError("Couldn't add a new row. Please try again.");
+      } finally {
+        setAddRowPending(false);
+        endMutation();
+      }
+    });
+  }
+
   function handlePickMedia(item: MediaLibraryItem) {
     if (!pickerSlotId) return;
     assignMediaToSlot(pickerSlotId, item.id, item);
@@ -715,22 +781,22 @@ export function GridBoard({
                     ]}
                   />
                 )}
-                <form action={addGridRow.bind(null, projectId)}>
-                  <button
-                    type="submit"
-                    title="Add New Post"
-                    className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
-                  >
-                    <PlusIcon />
-                  </button>
-                </form>
+                <button
+                  type="button"
+                  onClick={handleAddRow}
+                  disabled={addRowPending}
+                  title="Add New Post"
+                  className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+                >
+                  <PlusIcon />
+                </button>
               </div>
             </div>
           )}
           <SortableContext items={flatSlotIds} strategy={rectSortingStrategy}>
             {effectiveRows.map((row) => (
               <GridRow
-                key={row.id}
+                key={row.clientKey ?? row.id}
                 row={row}
                 projectId={projectId}
                 canManage={canManage}
@@ -887,7 +953,7 @@ function GridRow({
     <div className="grid grid-cols-3" style={{ gap: "2px" }}>
       {row.slots.map((slot) => (
         <GridSlot
-          key={slot.id}
+          key={slot.clientKey ?? slot.id}
           slot={slot}
           rowId={row.id}
           projectId={projectId}
