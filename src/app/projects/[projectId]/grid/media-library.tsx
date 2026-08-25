@@ -360,6 +360,7 @@ export function MediaLibrary({
     if (ids.length === 0) return;
     if (!confirm(`Delete ${ids.length} selected asset${ids.length === 1 ? "" : "s"}? Any already used in a post or story will be archived (removed from the library, kept in place there) instead of deleted.`)) return;
     const idSet = new Set(ids);
+    const removedItems = effectiveItems.filter((item) => idSet.has(item.id));
     setOverrideItems(effectiveItems.filter((item) => !idSet.has(item.id)));
     setSelectedIds(new Set());
     // No router.refresh() on success -- the optimistic removal above is
@@ -372,7 +373,16 @@ export function MediaLibrary({
         await bulkDeleteMedia(projectId, ids);
       } catch (error) {
         console.error("Failed to delete media:", error);
-        setOverrideItems(null);
+        // Narrow: restore only the ids THIS call removed, not a blanket
+        // null -- a concurrent in-flight upload's own optimistic
+        // placeholder must not be discarded by an unrelated bulk-delete's
+        // failure (Invariant 2 -- see grid-reducer.ts's own comment on the
+        // same class of bug in the Grid rows/slots domain).
+        setOverrideItems((current) => {
+          const cur = current ?? itemsRef.current;
+          const stillMissing = removedItems.filter((item) => !cur.some((c) => c.id === item.id));
+          return stillMissing.length === 0 ? cur : [...cur, ...stillMissing];
+        });
         showError("Couldn't delete those assets. Please try again.");
       } finally {
         endMutation();

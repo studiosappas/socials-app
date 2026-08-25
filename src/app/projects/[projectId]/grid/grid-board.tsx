@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { memo, useCallback, useEffect, useReducer, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -39,6 +39,22 @@ import type { ShareLinkItem } from "@/lib/data/share-links";
 import { Toast } from "@/components/ui/toast";
 import { useToast } from "@/lib/hooks/use-toast";
 import type { MediaType, Platform } from "@/types/database";
+import {
+  gridReducer,
+  initGridState,
+  deriveRows,
+  newOpId,
+  type GridBoardRow,
+  type GridBoardSlot,
+  type GridCoverTransform,
+} from "./grid-reducer";
+// Re-exported so every existing external import (post-editor.tsx, grid/
+// page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
+// components/media-gallery.tsx, lib/landing/demo-create.ts,
+// grid-crop-overlay.tsx) keeps working unchanged -- grid-board.tsx is still
+// the public surface for these types, grid-reducer.ts is just where their
+// definitions now live (next to the state machine that produces them).
+export type { GridBoardRow, GridBoardSlot, GridCoverTransform };
 
 const DOUBLE_CLICK_WINDOW_MS = 220;
 // Same value and same reasoning as media-library.tsx's own
@@ -140,24 +156,12 @@ export type MediaLibraryItem = {
   clientKey?: string;
 };
 export type MediaFolder = { id: string; name: string };
-export type GridCoverTransform = { scale: number; x: number; y: number };
-export type GridBoardSlot = {
-  id: string;
-  postId: string | null;
-  thumbnailUrl: string | null;
-  coverMediaType: "image" | "video" | null;
-  coverMediaAssetId: string | null;
-  coverOriginalUrl: string | null;
-  assetCount: number;
-  coverTransform: GridCoverTransform | null;
-  scheduledDate: string | null;
-  // Stable React key across an optimistic Add Row's temp id -> real id
-  // reconciliation -- same reasoning and same fix as MediaLibraryItem's own
-  // clientKey (see its comment). Only ever differs from `id` for a slot
-  // that started life as part of an optimistic row.
-  clientKey?: string;
-};
-export type GridBoardRow = { id: string; slots: GridBoardSlot[]; clientKey?: string };
+// GridCoverTransform/GridBoardSlot/GridBoardRow now live in grid-reducer.ts
+// (re-exported here isn't needed -- every other file that wants them
+// imports from grid-reducer directly) since that's the file that owns their
+// runtime shape via the reducer; keeping the type definitions next to the
+// state machine that actually produces/consumes them avoids the two ever
+// drifting apart.
 
 export function GridBoard({
   projectId,
@@ -218,7 +222,6 @@ export function GridBoard({
   demoMode?: boolean;
 }) {
   const router = useRouter();
-  const [, startTransition] = useTransition();
   const { showError } = useToast();
   const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
   const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
@@ -301,52 +304,147 @@ export function GridBoard({
     });
   }
 
-  // Optimistic override so a slot reorder renders immediately instead of
-  // waiting for the server round-trip + router.refresh() to land — otherwise
-  // the grid visibly snaps back to the old order for a beat after drop.
-  const [prevRows, setPrevRows] = useState(rows);
-  const [overrideRows, setOverrideRows] = useState<GridBoardRow[] | null>(null);
-  // How many mutations (reorder, assign, crop-adjacent refreshes, etc.) are
-  // currently between "applied optimistically" and "confirmed or rolled
-  // back" -- incremented in beginMutation/decremented in endMutation, called
-  // around every async server round-trip below. A fresh `rows` prop is only
-  // trusted to fully replace overrideRows while this is 0: a prop change
-  // landing while something is still in flight (e.g. a video-assign's own
-  // router.refresh(), or any future revalidation elsewhere on this route)
-  // must never silently discard a newer, not-yet-confirmed optimistic edit —
-  // that's the exact "stale response overwrites newer state" failure mode
-  // this guards against. Once nothing is pending, the incoming prop is
-  // trusted again immediately, same as before this existed. Plain state
-  // (not a ref) deliberately -- the reset-on-prop-change check just below
-  // reads it during render, and reading a ref's .current during render
-  // isn't safe under React's own rules (a render can be discarded/retried).
-  const [pendingMutations, setPendingMutations] = useState(0);
-  const beginMutation = useCallback(() => {
-    setPendingMutations((n) => n + 1);
-  }, []);
-  const endMutation = useCallback(() => {
-    setPendingMutations((n) => Math.max(0, n - 1));
-  }, []);
-  // prevRows always advances the instant a new `rows` reference is SEEN,
-  // whether or not it's actually applied -- only the decision to apply it
-  // (clear overrideRows) is gated on pendingMutations. Getting this backwards
-  // (gating BOTH together, so prevRows only advances once nothing is
-  // pending) was a real bug caught by this branch's own race-condition
-  // test: a stale prop arriving while a mutation was still in flight would
-  // correctly get deferred, but then get wrongly APPLIED the instant that
-  // unrelated mutation's own endMutation() happened to fire -- because
-  // prevRows had never advanced past it, so it still looked "new" at that
-  // point, even though a fresher local edit had happened in the meantime.
-  if (rows !== prevRows) {
-    setPrevRows(rows);
-    if (pendingMutations === 0) setOverrideRows(null);
+  // Single authoritative owner of rows/slots -- see grid-reducer.ts for the
+  // full reasoning. Replaces the earlier overrideRows/prevRows/
+  // pendingMutations trio (and GridSlot's own duplicate overrideTransform/
+  // overridePatch/pendingSlotMutations): every mutation below now goes
+  // through mutateSlot/mutateSlots/mutateAddRow/mutateRemoveRow, which
+  // dispatch narrow BEGIN/COMMIT/FAIL actions scoped to exactly the
+  // slot(s)/row it names, instead of any one mutation's failure ever being
+  // able to null out (or a stale prop ever being able to blindly replace)
+  // every OTHER slot's own not-yet-refreshed state.
+  const [gridState, dispatch] = useReducer(gridReducer, rows, initGridState);
+  const [prevRowsProp, setPrevRowsProp] = useState(rows);
+  if (rows !== prevRowsProp) {
+    setPrevRowsProp(rows);
+    dispatch({ type: "SERVER_ROWS_RECEIVED", rows });
   }
-  const effectiveRows = overrideRows ?? rows;
-  // Add Row's own in-flight flag -- separate from pendingMutations (which
-  // only gates whether a fresh `rows` prop may clear overrideRows). This one
-  // disables the button itself, so a burst of clicks while the first add is
-  // still in flight can't queue up invisible work that all lands at once --
-  // see handleAddRow's comment for the full story.
+  const effectiveRows = deriveRows(gridState);
+
+  // Pure, synchronous, ref-based (never stale mid-callback the way a value
+  // captured from React state would be) -- tracks how many Grid mutations
+  // are currently between BEGIN and COMMIT/FAIL, for exactly one purpose:
+  // deferring router.refresh() until it's genuinely safe. Firing a refresh
+  // while something is still pending risks the server's read landing before
+  // that pending write's own commit reaches the database, which would make
+  // the refreshed snapshot legitimately stale for that one entity -- see
+  // grid-reducer.ts's own comment on hasPendingWork for the full race this
+  // closes. requestIdleRefresh is the ONLY sanctioned way anything in this
+  // file triggers a Grid resync; nothing below calls router.refresh() on
+  // its own anymore.
+  const pendingOpsRef = useRef(0);
+  const deferredRefreshRef = useRef(false);
+  const requestIdleRefresh = useCallback(() => {
+    if (pendingOpsRef.current === 0) router.refresh();
+    else deferredRefreshRef.current = true;
+  }, [router]);
+  const opBegin = useCallback(() => {
+    pendingOpsRef.current += 1;
+  }, []);
+  const opEnd = useCallback(() => {
+    pendingOpsRef.current = Math.max(0, pendingOpsRef.current - 1);
+    if (pendingOpsRef.current === 0 && deferredRefreshRef.current) {
+      deferredRefreshRef.current = false;
+      router.refresh();
+    }
+  }, [router]);
+
+  // The four mutation primitives every Grid write goes through -- see each
+  // action's own comment in grid-reducer.ts for what BEGIN/COMMIT/FAIL mean
+  // for it. `run` throwing is the only thing that triggers a FAIL/rollback;
+  // callers decide what to tell the user and whether to request a resync,
+  // since the right message differs per action (this file previously had
+  // that same shape duplicated ad hoc at every call site -- these just give
+  // it one place to live, matching "no mutation should invent its own
+  // whole-state restore semantics").
+  const mutateSlot = useCallback(
+    async (slotId: string, optimisticValue: GridBoardSlot, run: () => Promise<Partial<GridBoardSlot> | void>) => {
+      const opId = newOpId();
+      dispatch({ type: "SLOT_BEGIN", opId, slotId, value: optimisticValue });
+      opBegin();
+      try {
+        const patch = await run();
+        dispatch({ type: "SLOT_COMMIT", opId, slotId, patch: patch ?? undefined });
+        return true;
+      } catch (error) {
+        console.error("Grid slot mutation failed:", error);
+        dispatch({ type: "SLOT_FAIL", opId, slotId });
+        return false;
+      } finally {
+        opEnd();
+      }
+    },
+    [opBegin, opEnd],
+  );
+  const mutateSlots = useCallback(
+    async (changes: { slotId: string; value: GridBoardSlot }[], run: () => Promise<void>) => {
+      const opId = newOpId();
+      for (const c of changes) dispatch({ type: "SLOT_BEGIN", opId, slotId: c.slotId, value: c.value });
+      opBegin();
+      try {
+        await run();
+        for (const c of changes) dispatch({ type: "SLOT_COMMIT", opId, slotId: c.slotId });
+        return true;
+      } catch (error) {
+        console.error("Grid multi-slot mutation failed:", error);
+        for (const c of changes) dispatch({ type: "SLOT_FAIL", opId, slotId: c.slotId });
+        return false;
+      } finally {
+        opEnd();
+      }
+    },
+    [opBegin, opEnd],
+  );
+  const mutateAddRow = useCallback(
+    async (tempRow: GridBoardRow, run: () => Promise<{ rowId: string; slotIds: string[] }>) => {
+      const opId = newOpId();
+      dispatch({
+        type: "ROW_ADD_BEGIN",
+        opId,
+        tempRowId: tempRow.id,
+        clientKey: tempRow.clientKey ?? tempRow.id,
+        tempSlots: tempRow.slots,
+      });
+      opBegin();
+      try {
+        const { rowId, slotIds } = await run();
+        dispatch({ type: "ROW_ADD_COMMIT", opId, tempRowId: tempRow.id, realRowId: rowId, realSlotIds: slotIds });
+        return true;
+      } catch (error) {
+        console.error("Failed to add row:", error);
+        dispatch({ type: "ROW_ADD_FAIL", opId, tempRowId: tempRow.id });
+        return false;
+      } finally {
+        opEnd();
+      }
+    },
+    [opBegin, opEnd],
+  );
+  const mutateRemoveRow = useCallback(
+    async (rowId: string, run: () => Promise<void>) => {
+      const opId = newOpId();
+      dispatch({ type: "ROW_REMOVE_BEGIN", opId, rowId });
+      opBegin();
+      try {
+        await run();
+        dispatch({ type: "ROW_REMOVE_COMMIT", opId, rowId });
+        return true;
+      } catch (error) {
+        console.error("Failed to remove row:", error);
+        dispatch({ type: "ROW_REMOVE_FAIL", opId, rowId });
+        return false;
+      } finally {
+        opEnd();
+      }
+    },
+    [opBegin, opEnd],
+  );
+
+  // Add Row's own in-flight flag -- separate from the generic pending-op
+  // tracking above (that one's ref-based and deliberately invisible to
+  // render). This one disables the button itself, so a burst of clicks
+  // while the first add is still in flight can't queue up invisible work
+  // that all lands at once -- see handleAddRow's comment for the full story.
   const [addRowPending, setAddRowPending] = useState(false);
 
   const flatSlots = effectiveRows.flatMap((row) => row.slots);
@@ -402,22 +500,17 @@ export function GridBoard({
           });
         }
       }
-      const beforeRows = effectiveRows;
-      const afterRows = effectiveRows.map((row) => ({
-        ...row,
-        slots: row.slots.map((slot) => {
-          // postIdBySlotId is exhaustive (built from every flatSlotId), so
-          // a missing entry never happens in practice -- but critically,
-          // `.get()` can legitimately return null (this slot is now
-          // empty), which `??` would wrongly treat as "not found" and
-          // fall back to the slot's old postId, leaving the source slot
-          // showing its old content after a move. Using `.has()` keeps
-          // that null as the real, intended value.
-          if (!postIdBySlotId.has(slot.id)) return slot;
-          const newPostId = postIdBySlotId.get(slot.id)!;
-          if (newPostId === slot.postId) return slot;
-          const info = newPostId ? postInfoByPostId.get(newPostId) : undefined;
-          return {
+      // Only the slots that actually changed -- mutateSlots (see its own
+      // comment) only ever touches exactly these, never the rest of the
+      // board, so an unrelated slot's own in-flight edit elsewhere can never
+      // be discarded by this move's own success or failure (Invariant 2).
+      const changedSlots: { slotId: string; value: GridBoardSlot }[] = updates.map(({ slotId }) => {
+        const slot = flatSlots.find((s) => s.id === slotId)!;
+        const newPostId = postIdBySlotId.get(slotId)!;
+        const info = newPostId ? postInfoByPostId.get(newPostId) : undefined;
+        return {
+          slotId,
+          value: {
             ...slot,
             postId: newPostId,
             thumbnailUrl: info?.thumbnailUrl ?? null,
@@ -428,61 +521,47 @@ export function GridBoard({
             // this is what makes "the image looks exactly the same after
             // being moved" true from the very first frame of the move.
             coverTransform: info?.coverTransform ?? null,
-          };
-        }),
+          },
+        };
+      });
+      // Each changed slot's own pre-move value -- undo's narrow inverse.
+      // NOT a snapshot of the whole board (see grid-reducer.ts's own
+      // Invariant 7 comment): undo/redo below only ever re-applies this
+      // exact list of slot values, never anything else on the board, so a
+      // 4-second-old undo entry can never rewind an unrelated newer edit.
+      const inverseSlots = updates.map(({ slotId }) => ({
+        slotId,
+        value: flatSlots[flatSlotIds.indexOf(slotId)],
       }));
-      setOverrideRows(afterRows);
-      // The visual reorder above is real and final either way -- everything
-      // past this point is persistence + undo/redo, which demoMode skips
-      // entirely (nothing real to persist against a fake project).
-      if (demoMode) return;
-
-      // Lossless round-trip: the inverse mapping is just each changed
-      // slot's OLD postId at the same index, so undo/redo can replay either
-      // direction exactly via the same RPC used for the original move.
       const inverseUpdates = updates.map(({ slotId }) => ({
         slotId,
         postId: oldPostIds[flatSlotIds.indexOf(slotId)],
       }));
 
-      async function applyReorder(rowsSnapshot: GridBoardRow[], serverUpdates: typeof updates) {
-        setOverrideRows(rowsSnapshot);
-        beginMutation();
-        try {
+      async function applyReorder(
+        changes: typeof changedSlots,
+        serverUpdates: typeof updates,
+      ) {
+        const ok = await mutateSlots(changes, async () => {
+          // The visual reorder is real and final either way -- demoMode
+          // just skips persistence, same reasoning as every other mutation
+          // in this file.
+          if (demoMode) return;
           await reorderGridPosts(serverUpdates);
-        } catch (error) {
-          console.error("Failed to save grid reorder:", error);
-          setOverrideRows(null);
-          showError("Couldn't undo/redo that move. Please try again.");
-          router.refresh();
-        } finally {
-          endMutation();
+        });
+        if (!ok) {
+          showError("Couldn't save that move. Please try again.");
+          requestIdleRefresh();
         }
       }
 
+      applyReorder(changedSlots, updates);
+      if (demoMode) return;
+
       pushCommand({
         label: "Move post",
-        undo: () => applyReorder(beforeRows, inverseUpdates),
-        redo: () => applyReorder(afterRows, updates),
-      });
-
-      // The optimistic state above already reflects the final order and the
-      // write below is durable, so a router.refresh() on success would only
-      // cause a redundant flash -- the next real navigation picks up fresh
-      // data. On failure, resync with the server instead of leaving an
-      // optimistic state that was never actually persisted.
-      beginMutation();
-      startTransition(async () => {
-        try {
-          await reorderGridPosts(updates);
-        } catch (error) {
-          console.error("Failed to save grid reorder:", error);
-          setOverrideRows(null);
-          showError("Couldn't save that move. Please try again.");
-          router.refresh();
-        } finally {
-          endMutation();
-        }
+        undo: () => applyReorder(inverseSlots, inverseUpdates),
+        redo: () => applyReorder(changedSlots, updates),
       });
       return;
     }
@@ -494,156 +573,115 @@ export function GridBoard({
     assignMediaToSlot(slotId, mediaAssetId, mediaItem);
   }
 
-  // Applies the same optimistic shape used by the original assign, reused
-  // by both the live drop and this command's own redo.
-  function applyAssignOptimistic(slotId: string, mediaAssetId: string, mediaItem: MediaLibraryItem | undefined) {
-    setOverrideRows((current) =>
-      (current ?? effectiveRows).map((row) => ({
-        ...row,
-        slots: row.slots.map((slot) =>
-          slot.id === slotId
-            ? {
-                ...slot,
-                // A dropped video's own URL points at the raw video file,
-                // not a poster -- can't show that in an <img>, so leave the
-                // thumbnail empty (falls back to the "Video" placeholder)
-                // until the real poster comes back from the next refresh.
-                thumbnailUrl: mediaItem?.mediaType === "video" ? null : (mediaItem?.url ?? slot.thumbnailUrl),
-                // Narrowed, not just `mediaItem?.mediaType ?? slot.coverMediaType`
-                // -- MediaLibraryItem.mediaType is the app-wide MediaType (now
-                // including "pdf"), but Grid's own Media Library query excludes
-                // PDFs entirely (see grid/page.tsx), so a Grid cover can never
-                // actually be one; this keeps that guarantee explicit in the
-                // type instead of casting past it.
-                coverMediaType:
-                  mediaItem?.mediaType === "video" || mediaItem?.mediaType === "image"
-                    ? mediaItem.mediaType
-                    : slot.coverMediaType,
-                coverMediaAssetId: mediaAssetId,
-                // Dropping media onto a slot always replaces its cover --
-                // never appends into a carousel -- so the count resets to 1
-                // and any crop from whatever was previously here doesn't apply.
-                assetCount: 1,
-                coverTransform: null,
-              }
-            : slot,
-        ),
-      })),
-    );
-  }
-
   // Shared by drag-and-drop (desktop/pointer) and the tap-to-pick dialog
   // (mobile/touch) -- both end up assigning the same media item to the same
   // slot, just via a different input gesture.
   function assignMediaToSlot(slotId: string, mediaAssetId: string, mediaItem: MediaLibraryItem | undefined) {
-    // Snapshot the pre-mutation slot so this action becomes undoable -- this
-    // is what "undo" restores. Only the single cover asset/crop is
-    // preserved (matching placeMediaInSlot's own always-single-asset-replace
-    // behavior); if the slot previously held a multi-asset carousel, undo
-    // brings back just its cover, not the other carousel assets.
-    const beforeSlot = effectiveRows.flatMap((row) => row.slots).find((s) => s.id === slotId) ?? null;
+    const beforeSlot = flatSlots.find((s) => s.id === slotId) ?? null;
+    if (!beforeSlot) return;
 
-    applyAssignOptimistic(slotId, mediaAssetId, mediaItem);
-    // The visual assignment above is real and final either way -- demoMode
-    // skips persistence + undo/redo, same reasoning as the reorder branch.
-    if (demoMode) return;
+    const optimisticValue: GridBoardSlot = {
+      ...beforeSlot,
+      // A dropped video's own URL points at the raw video file, not a
+      // poster -- can't show that in an <img>, so leave the thumbnail empty
+      // (falls back to the "Video" placeholder) until requestIdleRefresh
+      // below brings back the real poster.
+      thumbnailUrl: mediaItem?.mediaType === "video" ? null : (mediaItem?.url ?? beforeSlot.thumbnailUrl),
+      // Narrowed, not just `mediaItem?.mediaType ?? slot.coverMediaType` --
+      // MediaLibraryItem.mediaType is the app-wide MediaType (now including
+      // "pdf"), but Grid's own Media Library query excludes PDFs entirely
+      // (see grid/page.tsx), so a Grid cover can never actually be one.
+      coverMediaType:
+        mediaItem?.mediaType === "video" || mediaItem?.mediaType === "image"
+          ? mediaItem.mediaType
+          : beforeSlot.coverMediaType,
+      coverMediaAssetId: mediaAssetId,
+      // Dropping media onto a slot always replaces its cover -- never
+      // appends into a carousel -- so the count resets to 1 and any crop
+      // from whatever was previously here doesn't apply.
+      assetCount: 1,
+      coverTransform: null,
+    };
 
-    beginMutation();
-    startTransition(async () => {
-      try {
-        const result = await placeMediaInSlot(projectId, slotId, mediaAssetId);
-        if (result?.postId) {
-          setOverrideRows((current) =>
-            (current ?? []).map((row) => ({
-              ...row,
-              slots: row.slots.map((slot) =>
-                slot.id === slotId ? { ...slot, postId: result.postId } : slot,
-              ),
-            })),
-          );
-        }
+    // Mutable, not a const captured once -- each undo/redo cycle after the
+    // first needs to read/write whatever post id is CURRENTLY assigned to
+    // this slot (undo deletes it, redo recreates it under a brand-new id).
+    // Same idiom already used for this exact reason in media-library.tsx's
+    // own "Add media" undo/redo (see its currentRef comment) -- fixes a
+    // latent bug the old code had here: it captured `createdPostId` as a
+    // plain const from the FIRST assign only, so a second undo (after an
+    // intervening redo re-created the post under a new id) would have tried
+    // to delete the wrong, already-gone id.
+    const assignedPostId = { id: null as string | null };
 
-        if (beforeSlot) {
-          const createdPostId = result?.postId ?? null;
-          pushCommand({
-            label: "Replace media",
-            undo: async () => {
-              beginMutation();
-              try {
-                if (!beforeSlot.postId) {
-                  // Slot was empty before -- undo just removes the post this
-                  // assignment created.
-                  if (createdPostId) await deletePost(projectId, createdPostId);
-                } else if (beforeSlot.coverMediaAssetId) {
-                  // Slot already had a post -- restore its previous cover
-                  // asset and crop onto that same post.
-                  await placeMediaInSlot(projectId, slotId, beforeSlot.coverMediaAssetId);
-                  await updatePostCoverTransform(projectId, beforeSlot.postId, beforeSlot.coverTransform);
-                }
-                setOverrideRows((current) =>
-                  (current ?? []).map((row) => ({
-                    ...row,
-                    slots: row.slots.map((slot) => (slot.id === slotId ? { ...beforeSlot } : slot)),
-                  })),
-                );
-                router.refresh();
-              } finally {
-                endMutation();
-              }
-            },
-            redo: async () => {
-              beginMutation();
-              try {
-                applyAssignOptimistic(slotId, mediaAssetId, mediaItem);
-                const redoResult = await placeMediaInSlot(projectId, slotId, mediaAssetId);
-                if (redoResult?.postId) {
-                  setOverrideRows((current) =>
-                    (current ?? []).map((row) => ({
-                      ...row,
-                      slots: row.slots.map((slot) =>
-                        slot.id === slotId ? { ...slot, postId: redoResult.postId } : slot,
-                      ),
-                    })),
-                  );
-                }
-                if (mediaItem?.mediaType === "video") router.refresh();
-              } finally {
-                endMutation();
-              }
-            },
-          });
-        }
-
-        // The optimistic state above can't know a video's resolved poster
-        // URL (only the server-side isolated query in grid-data.ts can) --
-        // a video assignment leaves thumbnailUrl deliberately null/"Video"
-        // placeholder until this refresh brings back the real poster.
-        if (mediaItem?.mediaType === "video") {
-          router.refresh();
-        }
-      } catch (error) {
-        console.error("Failed to place media in slot:", error);
-        setOverrideRows(null);
+    async function applyAssign(value: GridBoardSlot, run: () => Promise<Partial<GridBoardSlot> | void>) {
+      const ok = await mutateSlot(slotId, value, run);
+      if (!ok) {
         showError("Couldn't place that media. Please try again.");
-        router.refresh();
-      } finally {
-        endMutation();
+        requestIdleRefresh();
       }
+      return ok;
+    }
+
+    applyAssign(optimisticValue, async () => {
+      if (demoMode) return undefined;
+      const result = await placeMediaInSlot(projectId, slotId, mediaAssetId);
+      assignedPostId.id = result?.postId ?? null;
+      // The optimistic state above can't know a video's resolved poster URL
+      // (only the server-side isolated query in grid-data.ts can) -- this
+      // is the one deliberate exception to "no mutation resyncs via a
+      // refresh": requestIdleRefresh still won't fire until every other
+      // pending mutation (including this one) has settled.
+      if (mediaItem?.mediaType === "video") requestIdleRefresh();
+      return assignedPostId.id ? { postId: assignedPostId.id } : undefined;
+    }).then((ok) => {
+      if (!ok || demoMode) return;
+      pushCommand({
+        label: "Replace media",
+        undo: async () => {
+          const undoOk = await mutateSlot(slotId, beforeSlot, async () => {
+            if (!beforeSlot.postId) {
+              // Slot was empty before -- undo just removes the post this
+              // assignment created.
+              if (assignedPostId.id) await deletePost(projectId, assignedPostId.id);
+              assignedPostId.id = null;
+            } else if (beforeSlot.coverMediaAssetId) {
+              // Slot already had a post -- restore its previous cover asset
+              // and crop onto that same post.
+              await placeMediaInSlot(projectId, slotId, beforeSlot.coverMediaAssetId);
+              await updatePostCoverTransform(projectId, beforeSlot.postId, beforeSlot.coverTransform);
+            }
+          });
+          if (!undoOk) {
+            showError("Couldn't undo that. Please try again.");
+            requestIdleRefresh();
+          }
+        },
+        redo: async () => {
+          await applyAssign(optimisticValue, async () => {
+            const redoResult = await placeMediaInSlot(projectId, slotId, mediaAssetId);
+            assignedPostId.id = redoResult?.postId ?? null;
+            if (mediaItem?.mediaType === "video") requestIdleRefresh();
+            return assignedPostId.id ? { postId: assignedPostId.id } : undefined;
+          });
+        },
+      });
     });
   }
 
   // Genuinely optimistic Add Row: the new row (and its 3 empty slots) is
-  // applied to overrideRows synchronously, before the server call even
-  // starts, so the click has visible effect immediately -- no dependence on
-  // addGridRow's round-trip. This directly fixes the "click does nothing,
-  // then N rows appear at once" report: that was caused by addGridRow's
-  // now-removed revalidatePath call on this same route batching every
-  // pending call's visible effect into one delayed commit (confirmed via an
-  // isolated repro outside this file; see the comment on addGridRow itself).
-  // addRowPending disables the button for the duration of this one add --
-  // the deliberate alternative to letting clicks queue invisibly and burst
-  // later, per the interaction contract: first click must give immediate
-  // feedback, and further clicks are prevented, not silently swallowed.
+  // applied via mutateAddRow's BEGIN synchronously, before the server call
+  // even starts, so the click has visible effect immediately -- no
+  // dependence on addGridRow's round-trip. This directly fixes the "click
+  // does nothing, then N rows appear at once" report: that was caused by
+  // addGridRow's now-removed revalidatePath call on this same route
+  // batching every pending call's visible effect into one delayed commit
+  // (confirmed via an isolated repro outside this file; see the comment on
+  // addGridRow itself). addRowPending disables the button for the duration
+  // of this one add -- the deliberate alternative to letting clicks queue
+  // invisibly and replay later as a burst, per the interaction contract:
+  // first click must give immediate feedback, further clicks are
+  // prevented, not silently swallowed.
   function handleAddRow() {
     if (addRowPending) return;
     const tempRowId = `optimistic-${crypto.randomUUID()}`;
@@ -663,27 +701,10 @@ export function GridBoard({
       };
     });
     const tempRow: GridBoardRow = { id: tempRowId, clientKey: tempRowId, slots: tempSlots };
-    setOverrideRows([tempRow, ...effectiveRows]);
     setAddRowPending(true);
-    beginMutation();
-    startTransition(async () => {
-      try {
-        const { rowId, slotIds } = await addGridRow(projectId);
-        setOverrideRows((current) =>
-          (current ?? effectiveRows).map((row) =>
-            row.id === tempRowId
-              ? { ...row, id: rowId, slots: row.slots.map((slot, i) => ({ ...slot, id: slotIds[i] ?? slot.id })) }
-              : row,
-          ),
-        );
-      } catch (error) {
-        console.error("Failed to add row:", error);
-        setOverrideRows((current) => (current ?? effectiveRows).filter((row) => row.id !== tempRowId));
-        showError("Couldn't add a new row. Please try again.");
-      } finally {
-        setAddRowPending(false);
-        endMutation();
-      }
+    mutateAddRow(tempRow, () => addGridRow(projectId)).then((ok) => {
+      setAddRowPending(false);
+      if (!ok) showError("Couldn't add a new row. Please try again.");
     });
   }
 
@@ -802,6 +823,9 @@ export function GridBoard({
                 canManage={canManage}
                 onOpenPicker={setPickerSlotId}
                 pushCommand={pushCommand}
+                mutateSlot={mutateSlot}
+                mutateRemoveRow={mutateRemoveRow}
+                requestIdleRefresh={requestIdleRefresh}
                 selectionMode={selectionMode}
                 selectedPostIds={selectedPostIds}
                 onToggleSelectPost={handleToggleSelectPost}
@@ -918,6 +942,9 @@ function GridRow({
   canManage,
   onOpenPicker,
   pushCommand,
+  mutateSlot,
+  mutateRemoveRow,
+  requestIdleRefresh,
   selectionMode,
   selectedPostIds,
   onToggleSelectPost,
@@ -930,6 +957,13 @@ function GridRow({
   canManage: boolean;
   onOpenPicker: (slotId: string) => void;
   pushCommand: (command: UndoableCommand) => void;
+  mutateSlot: (
+    slotId: string,
+    optimisticValue: GridBoardSlot,
+    run: () => Promise<Partial<GridBoardSlot> | void>,
+  ) => Promise<boolean>;
+  mutateRemoveRow: (rowId: string, run: () => Promise<void>) => Promise<boolean>;
+  requestIdleRefresh: () => void;
   selectionMode: boolean;
   selectedPostIds: Set<string>;
   onToggleSelectPost: (postId: string) => void;
@@ -937,18 +971,12 @@ function GridRow({
   dragEnabled?: boolean;
   reorderMode?: boolean;
 }) {
-  // Owns its own "removed" flag rather than reaching up into GridBoard's
-  // overrideRows -- "Remove Row" only ever needs to hide this one row
-  // instantly, and this is the smallest scope that can do that.
-  const [removed, setRemoved] = useState(false);
-  // Stable reference (empty deps, setRemoved is itself stable) -- otherwise
-  // every GridSlot below would see a "new" onRequestRemoveRow prop on every
-  // render and its React.memo would never actually skip re-rendering.
-  const handleRequestRemoveRow = useCallback(() => setRemoved(true), []);
-  if (removed) return null;
-
-  // No dedicated "remove row" bar between rows -- the grid stays tight like
-  // desktop, and "Remove Row" lives in each slot's own ⋮ menu instead.
+  // Row visibility is now entirely GridBoard's reducer's call (a removed
+  // row is simply absent from deriveRows' output) -- no local "removed"
+  // state needed here anymore; this component just doesn't get rendered
+  // for a row that's gone. No dedicated "remove row" bar between rows --
+  // the grid stays tight like desktop, and "Remove Row" lives in each
+  // slot's own ⋮ menu instead.
   return (
     <div className="grid grid-cols-3" style={{ gap: "2px" }}>
       {row.slots.map((slot) => (
@@ -960,10 +988,12 @@ function GridRow({
           canManage={canManage}
           onOpenPicker={onOpenPicker}
           pushCommand={pushCommand}
+          mutateSlot={mutateSlot}
+          mutateRemoveRow={mutateRemoveRow}
+          requestIdleRefresh={requestIdleRefresh}
           selectionMode={selectionMode}
           selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
           onToggleSelectPost={onToggleSelectPost}
-          onRequestRemoveRow={handleRequestRemoveRow}
           demoMode={demoMode}
           dragEnabled={dragEnabled}
           reorderMode={reorderMode}
@@ -977,9 +1007,9 @@ function GridRow({
 // it every slot re-rendered whenever GridBoard re-rendered for ANY reason
 // (starting a drag anywhere on the board, an unrelated toast, etc.) --
 // see the perf investigation this was added for. Only actually skips
-// re-rendering when every prop below is reference-stable, which is why
-// onToggleSelectPost/onRequestRemoveRow are wrapped in useCallback at their
-// call sites rather than passed as fresh inline closures.
+// re-rendering when every prop below is reference-stable -- mutateSlot/
+// mutateRemoveRow/requestIdleRefresh are all useCallback'd once in
+// GridBoard with stable deps, same as onToggleSelectPost already was.
 const GridSlot = memo(function GridSlot({
   slot,
   rowId,
@@ -987,10 +1017,12 @@ const GridSlot = memo(function GridSlot({
   canManage,
   onOpenPicker,
   pushCommand,
+  mutateSlot,
+  mutateRemoveRow,
+  requestIdleRefresh,
   selectionMode,
   selected,
   onToggleSelectPost,
-  onRequestRemoveRow,
   demoMode = false,
   dragEnabled = true,
   reorderMode = false,
@@ -1001,10 +1033,16 @@ const GridSlot = memo(function GridSlot({
   canManage: boolean;
   onOpenPicker: (slotId: string) => void;
   pushCommand: (command: UndoableCommand) => void;
+  mutateSlot: (
+    slotId: string,
+    optimisticValue: GridBoardSlot,
+    run: () => Promise<Partial<GridBoardSlot> | void>,
+  ) => Promise<boolean>;
+  mutateRemoveRow: (rowId: string, run: () => Promise<void>) => Promise<boolean>;
+  requestIdleRefresh: () => void;
   selectionMode: boolean;
   selected: boolean;
   onToggleSelectPost: (postId: string) => void;
-  onRequestRemoveRow: () => void;
   demoMode?: boolean;
   dragEnabled?: boolean;
   reorderMode?: boolean;
@@ -1068,10 +1106,9 @@ const GridSlot = memo(function GridSlot({
   // Defensive close for both -- covers the moment Edit Grid mode turns on
   // while a menu/crop session was already open on this tile, so nothing
   // crop-related can be mid-interaction the instant dragging becomes
-  // available. "Adjust state during render" (matching prevSlot/
-  // overrideTransform's own idiom just below) rather than a useEffect --
-  // this needs to take effect in the SAME commit reorderMode flips in, not
-  // one render later.
+  // available. "Adjust state during render" rather than a useEffect -- this
+  // needs to take effect in the SAME commit reorderMode flips in, not one
+  // render later.
   const [prevReorderMode, setPrevReorderMode] = useState(reorderMode);
   if (reorderMode !== prevReorderMode) {
     setPrevReorderMode(reorderMode);
@@ -1080,41 +1117,13 @@ const GridSlot = memo(function GridSlot({
       setCropMode(false);
     }
   }
-  const [, startDeleteTransition] = useTransition();
-  const [prevSlot, setPrevSlot] = useState(slot);
-  const [overrideTransform, setOverrideTransform] = useState<GridCoverTransform | null | undefined>(
-    undefined,
-  );
-  // Same shape as overrideTransform, generalized to the rest of the slot's
-  // fields -- lets delete and the poster self-heal effect update this one
-  // tile instantly without waiting on a route refresh, exactly like a fresh
-  // crop already does.
-  const [overridePatch, setOverridePatch] = useState<Partial<GridBoardSlot> | null>(null);
-  // Same pending-mutation guard as GridBoard's own overrideRows (see its
-  // comment) -- a `slot` prop can get a fresh reference for a reason having
-  // nothing to do with THIS tile (any other slot's assign/reorder causing a
-  // parent-level rows refresh) while this tile's own crop/delete/remove is
-  // still between "applied optimistically" and "confirmed" -- without this,
-  // that unrelated refresh would silently discard this tile's own
-  // not-yet-settled edit.
-  const [pendingSlotMutations, setPendingSlotMutations] = useState(0);
-  const beginSlotMutation = useCallback(() => {
-    setPendingSlotMutations((n) => n + 1);
-  }, []);
-  const endSlotMutation = useCallback(() => {
-    setPendingSlotMutations((n) => Math.max(0, n - 1));
-  }, []);
-  // See GridBoard's own overrideRows guard for why prevSlot must advance
-  // unconditionally here while only the actual apply is pendingSlotMutations-gated.
-  if (slot !== prevSlot) {
-    setPrevSlot(slot);
-    if (pendingSlotMutations === 0) {
-      setOverrideTransform(undefined);
-      setOverridePatch(null);
-    }
-  }
-  const effectiveTransform = overrideTransform !== undefined ? overrideTransform : slot.coverTransform;
-  const effectiveSlot: GridBoardSlot = overridePatch ? { ...slot, ...overridePatch } : slot;
+
+  // `slot` IS the final, derived-from-GridBoard's-reducer value -- no local
+  // override/patch/pendingMutation machinery needed here anymore (that
+  // whole layer -- overrideTransform/overridePatch/prevSlot/
+  // pendingSlotMutations -- is exactly the dead architecture this round
+  // replaced; see grid-reducer.ts for where its job went). Every mutation
+  // below goes through the mutateSlot/mutateRemoveRow props from GridBoard.
 
   // Self-heals a video cover that's missing its poster (upload-time capture
   // can fail for some codecs/timeouts -- see video-poster.ts) instead of
@@ -1130,17 +1139,28 @@ const GridSlot = memo(function GridSlot({
     if (autoHealAttemptedRef.current) return;
     autoHealAttemptedRef.current = true;
 
-    (async () => {
+    // Routed through mutateSlot (BEGIN with the unchanged current value --
+    // there's nothing to show optimistically until the capture finishes --
+    // COMMIT with a thumbnailUrl patch if it succeeds) purely so this
+    // slot's in-flight state is visible to the reducer the same way every
+    // other mutation's is, not because this one can meaningfully fail or
+    // needs to roll back anything: no error/toast on failure, matching the
+    // original silent-best-effort behavior exactly.
+    mutateSlot(slot.id, slot, async () => {
       const posterBlob = await generatePosterFromVideoUrl(slot.coverOriginalUrl!);
-      if (!posterBlob) return;
+      if (!posterBlob) return undefined;
       const formData = new FormData();
       formData.set("poster", new File([posterBlob], "poster.jpg", { type: "image/jpeg" }));
       const result = await saveRegeneratedPoster(projectId, slot.coverMediaAssetId!, formData);
-      if (result.posterUrl) {
-        setOverridePatch((current) => ({ ...current, thumbnailUrl: result.posterUrl }));
-      }
-    })();
-  }, [canManage, demoMode, projectId, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
+      return result.posterUrl ? { thumbnailUrl: result.posterUrl } : undefined;
+    });
+    // `slot` itself deliberately isn't a dep: the ref guard above already
+    // makes this effect's body a one-time thing per slot instance, and
+    // depending on individual primitive fields (not the whole object,
+    // which gets a new reference on every unrelated mutation now) keeps it
+    // from re-running pointlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canManage, demoMode, projectId, mutateSlot, slot.coverMediaAssetId, slot.coverMediaType, slot.coverOriginalUrl, slot.thumbnailUrl]);
 
   // Warms the intercepted Post Editor route's RSC payload (its own
   // page.tsx runs a dozen-plus sequential Supabase queries + signs the
@@ -1201,49 +1221,41 @@ const GridSlot = memo(function GridSlot({
   // on GridSlotBody itself) would defeat that memo for every slot on the
   // board on every pointer-move frame during any drag, not just this one.
   const handleSaveCrop = useCallback(
-    async (next: GridCoverTransform) => {
+    (next: GridCoverTransform) => {
       if (!slot.postId) return;
       const postId = slot.postId;
-      const previousTransform = effectiveTransform;
-      setOverrideTransform(next);
+      const previousTransform = slot.coverTransform;
       setCropMode(false);
-      // The crop itself is applied above (real, visible) -- demoMode skips
-      // persisting/undo-redo, same reasoning as the drag-and-drop branches.
-      if (demoMode) return;
-      beginSlotMutation();
-      try {
+      mutateSlot(slot.id, { ...slot, coverTransform: next }, async () => {
+        // The crop itself is applied optimistically either way -- demoMode
+        // just skips persisting it, same reasoning as every mutation here.
+        if (demoMode) return;
         await updatePostCoverTransform(projectId, postId, next);
+      }).then((ok) => {
+        if (!ok) {
+          showError("Couldn't save that crop. Please try again.");
+          requestIdleRefresh();
+          return;
+        }
+        if (demoMode) return;
         pushCommand({
           label: "Crop",
-          undo: async () => {
-            beginSlotMutation();
-            try {
-              setOverrideTransform(previousTransform);
+          undo: () =>
+            mutateSlot(slot.id, { ...slot, coverTransform: previousTransform }, async () => {
               await updatePostCoverTransform(projectId, postId, previousTransform);
-            } finally {
-              endSlotMutation();
-            }
-          },
-          redo: async () => {
-            beginSlotMutation();
-            try {
-              setOverrideTransform(next);
+            }).then((undoOk) => {
+              if (!undoOk) requestIdleRefresh();
+            }),
+          redo: () =>
+            mutateSlot(slot.id, { ...slot, coverTransform: next }, async () => {
               await updatePostCoverTransform(projectId, postId, next);
-            } finally {
-              endSlotMutation();
-            }
-          },
+            }).then((redoOk) => {
+              if (!redoOk) requestIdleRefresh();
+            }),
         });
-      } catch (error) {
-        console.error("Failed to save crop:", error);
-        setOverrideTransform(undefined);
-        showError("Couldn't save that crop. Please try again.");
-        router.refresh();
-      } finally {
-        endSlotMutation();
-      }
+      });
     },
-    [slot.postId, effectiveTransform, demoMode, projectId, pushCommand, router, showError, beginSlotMutation, endSlotMutation],
+    [slot, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh],
   );
 
   const handleCancelCrop = useCallback(() => setCropMode(false), []);
@@ -1264,54 +1276,51 @@ const GridSlot = memo(function GridSlot({
     const postId = slot.postId;
     setContentMenuOpen(false);
     if (!confirm("Delete this post? This can't be undone.")) return;
-    setOverridePatch({
-      postId: null,
-      thumbnailUrl: null,
-      coverMediaType: null,
-      coverMediaAssetId: null,
-      coverOriginalUrl: null,
-      assetCount: 0,
-      coverTransform: null,
-      scheduledDate: null,
-    });
-    beginSlotMutation();
-    startDeleteTransition(async () => {
-      try {
+    mutateSlot(
+      slot.id,
+      {
+        ...slot,
+        postId: null,
+        thumbnailUrl: null,
+        coverMediaType: null,
+        coverMediaAssetId: null,
+        coverOriginalUrl: null,
+        assetCount: 0,
+        coverTransform: null,
+        scheduledDate: null,
+      },
+      async () => {
         await deletePost(projectId, postId);
-      } catch (error) {
-        console.error("Failed to delete post:", error);
-        setOverridePatch(null);
+      },
+    ).then((ok) => {
+      if (!ok) {
         showError("Couldn't delete that post. Please try again.");
-        router.refresh();
-      } finally {
-        endSlotMutation();
+        requestIdleRefresh();
       }
     });
-  }, [slot.postId, projectId, startDeleteTransition, router, showError, beginSlotMutation, endSlotMutation]);
+  }, [slot, projectId, mutateSlot, showError, requestIdleRefresh]);
 
   const handleRemoveRow = useCallback(() => {
     setContentMenuOpen(false);
     if (!confirm("Remove this row? This can't be undone.")) return;
-    onRequestRemoveRow();
-    startDeleteTransition(async () => {
-      try {
-        await removeGridRow(projectId, rowId);
-      } catch (error) {
-        console.error("Failed to remove row:", error);
+    mutateRemoveRow(rowId, async () => {
+      await removeGridRow(projectId, rowId);
+    }).then((ok) => {
+      if (!ok) {
         showError("Couldn't remove that row. Please try again.");
-        router.refresh();
+        requestIdleRefresh();
       }
     });
-  }, [onRequestRemoveRow, projectId, rowId, startDeleteTransition, router, showError]);
+  }, [mutateRemoveRow, projectId, rowId, showError, requestIdleRefresh]);
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      {...(effectiveSlot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
-      role={effectiveSlot.postId || canManage ? "button" : undefined}
-      tabIndex={effectiveSlot.postId || canManage ? 0 : undefined}
-      onClick={effectiveSlot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
+      {...(slot.postId && canManage && dragEnabled ? { ...attributes, ...listeners } : {})}
+      role={slot.postId || canManage ? "button" : undefined}
+      tabIndex={slot.postId || canManage ? 0 : undefined}
+      onClick={slot.postId ? handleClick : canManage ? () => onOpenPicker(slot.id) : undefined}
       // select-none + -webkit-touch-callout:none -- iOS Safari's own
       // long-press-on-an-image gesture (its "Save Photo/Copy/Share" system
       // callout) is a well-known conflict with a custom long-press-to-drag
@@ -1320,13 +1329,13 @@ const GridSlot = memo(function GridSlot({
       // compete with dnd-kit's own long-press activation, regardless of
       // which element inside the tile the touch happens to land on.
       className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
-        effectiveSlot.postId && canManage && dragEnabled
+        slot.postId && canManage && dragEnabled
           ? "cursor-grab touch-none"
-          : effectiveSlot.postId || canManage
+          : slot.postId || canManage
             ? "cursor-pointer"
             : ""
       } ${
-        effectiveSlot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
+        slot.thumbnailUrl ? "border-border hover:border-foreground/30" : "border-dashed border-border"
       } ${
         isDragging ? "opacity-30" : ""
       } ${
@@ -1336,8 +1345,8 @@ const GridSlot = memo(function GridSlot({
       }`}
     >
       <GridSlotBody
-        slot={effectiveSlot}
-        transform={effectiveTransform}
+        slot={slot}
+        transform={slot.coverTransform}
         canManage={canManage}
         selectionMode={selectionMode}
         selected={selected}
@@ -1713,6 +1722,7 @@ function MediaPickerDialog({
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
     if (!confirm("Delete this asset? This removes it from any post or story using it.")) return;
+    const removedItem = effectiveItems.find((item) => item.id === mediaAssetId) ?? null;
     setOverrideItems(effectiveItems.filter((item) => item.id !== mediaAssetId));
     beginMutation();
     startDeleteTransition(async () => {
@@ -1720,7 +1730,16 @@ function MediaPickerDialog({
         await deleteMedia(projectId, mediaAssetId);
       } catch (error) {
         console.error("Failed to delete media:", error);
-        setOverrideItems(null);
+        // Narrow: restore only the one item THIS call removed, not a
+        // blanket null -- a concurrent in-flight upload's own optimistic
+        // placeholder must not be discarded by an unrelated delete's
+        // failure (Invariant 2 -- see grid-reducer.ts's own comment on the
+        // same class of bug in the rows/slots domain).
+        setOverrideItems((current) => {
+          const cur = current ?? itemsRef.current;
+          if (!removedItem || cur.some((i) => i.id === removedItem.id)) return cur;
+          return [...cur, removedItem];
+        });
         showError("Couldn't delete this asset. Please try again.");
       } finally {
         endMutation();
