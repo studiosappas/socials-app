@@ -198,6 +198,7 @@ export function GridBoard({
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
+  const { showError } = useToast();
   const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
   const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
   // Mobile has no room to keep the media library visible alongside the grid
@@ -284,9 +285,40 @@ export function GridBoard({
   // the grid visibly snaps back to the old order for a beat after drop.
   const [prevRows, setPrevRows] = useState(rows);
   const [overrideRows, setOverrideRows] = useState<GridBoardRow[] | null>(null);
+  // How many mutations (reorder, assign, crop-adjacent refreshes, etc.) are
+  // currently between "applied optimistically" and "confirmed or rolled
+  // back" -- incremented in beginMutation/decremented in endMutation, called
+  // around every async server round-trip below. A fresh `rows` prop is only
+  // trusted to fully replace overrideRows while this is 0: a prop change
+  // landing while something is still in flight (e.g. a video-assign's own
+  // router.refresh(), or any future revalidation elsewhere on this route)
+  // must never silently discard a newer, not-yet-confirmed optimistic edit —
+  // that's the exact "stale response overwrites newer state" failure mode
+  // this guards against. Once nothing is pending, the incoming prop is
+  // trusted again immediately, same as before this existed. Plain state
+  // (not a ref) deliberately -- the reset-on-prop-change check just below
+  // reads it during render, and reading a ref's .current during render
+  // isn't safe under React's own rules (a render can be discarded/retried).
+  const [pendingMutations, setPendingMutations] = useState(0);
+  const beginMutation = useCallback(() => {
+    setPendingMutations((n) => n + 1);
+  }, []);
+  const endMutation = useCallback(() => {
+    setPendingMutations((n) => Math.max(0, n - 1));
+  }, []);
+  // prevRows always advances the instant a new `rows` reference is SEEN,
+  // whether or not it's actually applied -- only the decision to apply it
+  // (clear overrideRows) is gated on pendingMutations. Getting this backwards
+  // (gating BOTH together, so prevRows only advances once nothing is
+  // pending) was a real bug caught by this branch's own race-condition
+  // test: a stale prop arriving while a mutation was still in flight would
+  // correctly get deferred, but then get wrongly APPLIED the instant that
+  // unrelated mutation's own endMutation() happened to fire -- because
+  // prevRows had never advanced past it, so it still looked "new" at that
+  // point, even though a fresher local edit had happened in the meantime.
   if (rows !== prevRows) {
     setPrevRows(rows);
-    setOverrideRows(null);
+    if (pendingMutations === 0) setOverrideRows(null);
   }
   const effectiveRows = overrideRows ?? rows;
 
@@ -388,12 +420,16 @@ export function GridBoard({
 
       async function applyReorder(rowsSnapshot: GridBoardRow[], serverUpdates: typeof updates) {
         setOverrideRows(rowsSnapshot);
+        beginMutation();
         try {
           await reorderGridPosts(serverUpdates);
         } catch (error) {
           console.error("Failed to save grid reorder:", error);
           setOverrideRows(null);
+          showError("Couldn't undo/redo that move. Please try again.");
           router.refresh();
+        } finally {
+          endMutation();
         }
       }
 
@@ -408,13 +444,17 @@ export function GridBoard({
       // cause a redundant flash -- the next real navigation picks up fresh
       // data. On failure, resync with the server instead of leaving an
       // optimistic state that was never actually persisted.
+      beginMutation();
       startTransition(async () => {
         try {
           await reorderGridPosts(updates);
         } catch (error) {
           console.error("Failed to save grid reorder:", error);
           setOverrideRows(null);
+          showError("Couldn't save that move. Please try again.");
           router.refresh();
+        } finally {
+          endMutation();
         }
       });
       return;
@@ -481,6 +521,7 @@ export function GridBoard({
     // skips persistence + undo/redo, same reasoning as the reorder branch.
     if (demoMode) return;
 
+    beginMutation();
     startTransition(async () => {
       try {
         const result = await placeMediaInSlot(projectId, slotId, mediaAssetId);
@@ -500,38 +541,48 @@ export function GridBoard({
           pushCommand({
             label: "Replace media",
             undo: async () => {
-              if (!beforeSlot.postId) {
-                // Slot was empty before -- undo just removes the post this
-                // assignment created.
-                if (createdPostId) await deletePost(projectId, createdPostId);
-              } else if (beforeSlot.coverMediaAssetId) {
-                // Slot already had a post -- restore its previous cover
-                // asset and crop onto that same post.
-                await placeMediaInSlot(projectId, slotId, beforeSlot.coverMediaAssetId);
-                await updatePostCoverTransform(projectId, beforeSlot.postId, beforeSlot.coverTransform);
-              }
-              setOverrideRows((current) =>
-                (current ?? []).map((row) => ({
-                  ...row,
-                  slots: row.slots.map((slot) => (slot.id === slotId ? { ...beforeSlot } : slot)),
-                })),
-              );
-              router.refresh();
-            },
-            redo: async () => {
-              applyAssignOptimistic(slotId, mediaAssetId, mediaItem);
-              const redoResult = await placeMediaInSlot(projectId, slotId, mediaAssetId);
-              if (redoResult?.postId) {
+              beginMutation();
+              try {
+                if (!beforeSlot.postId) {
+                  // Slot was empty before -- undo just removes the post this
+                  // assignment created.
+                  if (createdPostId) await deletePost(projectId, createdPostId);
+                } else if (beforeSlot.coverMediaAssetId) {
+                  // Slot already had a post -- restore its previous cover
+                  // asset and crop onto that same post.
+                  await placeMediaInSlot(projectId, slotId, beforeSlot.coverMediaAssetId);
+                  await updatePostCoverTransform(projectId, beforeSlot.postId, beforeSlot.coverTransform);
+                }
                 setOverrideRows((current) =>
                   (current ?? []).map((row) => ({
                     ...row,
-                    slots: row.slots.map((slot) =>
-                      slot.id === slotId ? { ...slot, postId: redoResult.postId } : slot,
-                    ),
+                    slots: row.slots.map((slot) => (slot.id === slotId ? { ...beforeSlot } : slot)),
                   })),
                 );
+                router.refresh();
+              } finally {
+                endMutation();
               }
-              if (mediaItem?.mediaType === "video") router.refresh();
+            },
+            redo: async () => {
+              beginMutation();
+              try {
+                applyAssignOptimistic(slotId, mediaAssetId, mediaItem);
+                const redoResult = await placeMediaInSlot(projectId, slotId, mediaAssetId);
+                if (redoResult?.postId) {
+                  setOverrideRows((current) =>
+                    (current ?? []).map((row) => ({
+                      ...row,
+                      slots: row.slots.map((slot) =>
+                        slot.id === slotId ? { ...slot, postId: redoResult.postId } : slot,
+                      ),
+                    })),
+                  );
+                }
+                if (mediaItem?.mediaType === "video") router.refresh();
+              } finally {
+                endMutation();
+              }
             },
           });
         }
@@ -546,7 +597,10 @@ export function GridBoard({
       } catch (error) {
         console.error("Failed to place media in slot:", error);
         setOverrideRows(null);
+        showError("Couldn't place that media. Please try again.");
         router.refresh();
+      } finally {
+        endMutation();
       }
     });
   }
@@ -874,6 +928,7 @@ const GridSlot = memo(function GridSlot({
   reorderMode?: boolean;
 }) {
   const router = useRouter();
+  const { showError } = useToast();
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
     useSortable({
       id: slot.id,
@@ -953,10 +1008,28 @@ const GridSlot = memo(function GridSlot({
   // tile instantly without waiting on a route refresh, exactly like a fresh
   // crop already does.
   const [overridePatch, setOverridePatch] = useState<Partial<GridBoardSlot> | null>(null);
+  // Same pending-mutation guard as GridBoard's own overrideRows (see its
+  // comment) -- a `slot` prop can get a fresh reference for a reason having
+  // nothing to do with THIS tile (any other slot's assign/reorder causing a
+  // parent-level rows refresh) while this tile's own crop/delete/remove is
+  // still between "applied optimistically" and "confirmed" -- without this,
+  // that unrelated refresh would silently discard this tile's own
+  // not-yet-settled edit.
+  const [pendingSlotMutations, setPendingSlotMutations] = useState(0);
+  const beginSlotMutation = useCallback(() => {
+    setPendingSlotMutations((n) => n + 1);
+  }, []);
+  const endSlotMutation = useCallback(() => {
+    setPendingSlotMutations((n) => Math.max(0, n - 1));
+  }, []);
+  // See GridBoard's own overrideRows guard for why prevSlot must advance
+  // unconditionally here while only the actual apply is pendingSlotMutations-gated.
   if (slot !== prevSlot) {
     setPrevSlot(slot);
-    setOverrideTransform(undefined);
-    setOverridePatch(null);
+    if (pendingSlotMutations === 0) {
+      setOverrideTransform(undefined);
+      setOverridePatch(null);
+    }
   }
   const effectiveTransform = overrideTransform !== undefined ? overrideTransform : slot.coverTransform;
   const effectiveSlot: GridBoardSlot = overridePatch ? { ...slot, ...overridePatch } : slot;
@@ -1055,26 +1128,40 @@ const GridSlot = memo(function GridSlot({
       // The crop itself is applied above (real, visible) -- demoMode skips
       // persisting/undo-redo, same reasoning as the drag-and-drop branches.
       if (demoMode) return;
+      beginSlotMutation();
       try {
         await updatePostCoverTransform(projectId, postId, next);
         pushCommand({
           label: "Crop",
           undo: async () => {
-            setOverrideTransform(previousTransform);
-            await updatePostCoverTransform(projectId, postId, previousTransform);
+            beginSlotMutation();
+            try {
+              setOverrideTransform(previousTransform);
+              await updatePostCoverTransform(projectId, postId, previousTransform);
+            } finally {
+              endSlotMutation();
+            }
           },
           redo: async () => {
-            setOverrideTransform(next);
-            await updatePostCoverTransform(projectId, postId, next);
+            beginSlotMutation();
+            try {
+              setOverrideTransform(next);
+              await updatePostCoverTransform(projectId, postId, next);
+            } finally {
+              endSlotMutation();
+            }
           },
         });
       } catch (error) {
         console.error("Failed to save crop:", error);
         setOverrideTransform(undefined);
+        showError("Couldn't save that crop. Please try again.");
         router.refresh();
+      } finally {
+        endSlotMutation();
       }
     },
-    [slot.postId, effectiveTransform, demoMode, projectId, pushCommand, router],
+    [slot.postId, effectiveTransform, demoMode, projectId, pushCommand, router, showError, beginSlotMutation, endSlotMutation],
   );
 
   const handleCancelCrop = useCallback(() => setCropMode(false), []);
@@ -1105,16 +1192,20 @@ const GridSlot = memo(function GridSlot({
       coverTransform: null,
       scheduledDate: null,
     });
+    beginSlotMutation();
     startDeleteTransition(async () => {
       try {
         await deletePost(projectId, postId);
       } catch (error) {
         console.error("Failed to delete post:", error);
         setOverridePatch(null);
+        showError("Couldn't delete that post. Please try again.");
         router.refresh();
+      } finally {
+        endSlotMutation();
       }
     });
-  }, [slot.postId, projectId, startDeleteTransition, router]);
+  }, [slot.postId, projectId, startDeleteTransition, router, showError, beginSlotMutation, endSlotMutation]);
 
   const handleRemoveRow = useCallback(() => {
     setContentMenuOpen(false);
@@ -1125,10 +1216,11 @@ const GridSlot = memo(function GridSlot({
         await removeGridRow(projectId, rowId);
       } catch (error) {
         console.error("Failed to remove row:", error);
+        showError("Couldn't remove that row. Please try again.");
         router.refresh();
       }
     });
-  }, [onRequestRemoveRow, projectId, rowId, startDeleteTransition, router]);
+  }, [onRequestRemoveRow, projectId, rowId, startDeleteTransition, router, showError]);
 
   return (
     <div
@@ -1439,13 +1531,27 @@ function MediaPickerDialog({
   // its comments for the full reasoning (instant blob-URL preview on
   // upload, instant removal on delete; upload reconciles its placeholder
   // directly from uploadMedia's own return value, delete needs no further
-  // reconciliation -- neither action revalidates this route anymore).
+  // reconciliation -- neither action revalidates this route anymore), now
+  // including its same pending-mutation guard and immediate blob-URL swap.
   const [prevItems, setPrevItems] = useState(items);
   const [overrideItems, setOverrideItems] = useState<MediaLibraryItem[] | null>(null);
   const pendingBlobUrlsRef = useRef<Set<string>>(new Set());
+  const [pendingMutations, setPendingMutations] = useState(0);
+  const beginMutation = useCallback(() => setPendingMutations((n) => n + 1), []);
+  const endMutation = useCallback(() => setPendingMutations((n) => Math.max(0, n - 1)), []);
+  const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
+  function advanceUploadBatch() {
+    setUploadBatch((current) => {
+      if (!current) return null;
+      const done = current.done + 1;
+      return done >= current.total ? null : { total: current.total, done };
+    });
+  }
+  // See GridBoard's own overrideRows guard for why prevItems must advance
+  // unconditionally here while only the actual apply is pendingMutations-gated.
   if (items !== prevItems) {
     setPrevItems(items);
-    setOverrideItems(null);
+    if (pendingMutations === 0) setOverrideItems(null);
   }
   const effectiveItems = overrideItems ?? items;
 
@@ -1463,19 +1569,27 @@ function MediaPickerDialog({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setOverrideItems(null);
       showError(state.message);
+      setPendingMutations(0);
+      advanceUploadBatch();
       return;
     }
     if (state?.id && state.clientTempId) {
+      endMutation();
+      advanceUploadBatch();
       const tempId = state.clientTempId;
       const realId = state.id;
       const realStoragePath = state.storagePath;
       const realPosterStoragePath = state.posterStoragePath ?? null;
+      const matched = effectiveItems.find((i) => i.id === tempId);
+      const oldBlobUrl = matched?.url;
+      const newUrl = state.displayUrl ?? matched?.url;
       setOverrideItems((current) =>
         (current ?? effectiveItems).map((i) =>
           i.id === tempId
             ? {
                 ...i,
                 id: realId,
+                url: newUrl ?? i.url,
                 storagePath: realStoragePath,
                 posterStoragePath: realPosterStoragePath,
                 pending: false,
@@ -1483,6 +1597,10 @@ function MediaPickerDialog({
             : i,
         ),
       );
+      if (state.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
+        pendingBlobUrlsRef.current.delete(oldBlobUrl);
+        URL.revokeObjectURL(oldBlobUrl);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -1491,6 +1609,7 @@ function MediaPickerDialog({
     e.stopPropagation();
     if (!confirm("Delete this asset? This removes it from any post or story using it.")) return;
     setOverrideItems(effectiveItems.filter((item) => item.id !== mediaAssetId));
+    beginMutation();
     startDeleteTransition(async () => {
       try {
         await deleteMedia(projectId, mediaAssetId);
@@ -1498,6 +1617,8 @@ function MediaPickerDialog({
         console.error("Failed to delete media:", error);
         setOverrideItems(null);
         showError("Couldn't delete this asset. Please try again.");
+      } finally {
+        endMutation();
       }
     });
   }
@@ -1538,6 +1659,11 @@ function MediaPickerDialog({
                   };
                 });
                 setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
+                for (let i = 0; i < optimistic.length; i++) beginMutation();
+                setUploadBatch((current) => ({
+                  total: (current?.total ?? 0) + optimistic.length,
+                  done: current?.done ?? 0,
+                }));
 
                 uploadFilesWithPosters(
                   projectId,
@@ -1552,6 +1678,8 @@ function MediaPickerDialog({
                     setUploadError(message);
                     const failed = optimistic.find((o) => o.file.name === fileName);
                     if (!failed) return;
+                    endMutation();
+                    advanceUploadBatch();
                     pendingBlobUrlsRef.current.delete(failed.item.url!);
                     URL.revokeObjectURL(failed.item.url!);
                     setOverrideItems((current) =>
@@ -1569,7 +1697,7 @@ function MediaPickerDialog({
               disabled={pending}
               className="w-full py-3 text-xs tracking-wide uppercase"
             >
-              {pending ? "Uploading..." : "Upload New Asset"}
+              {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : pending ? "Uploading..." : "Upload New Asset"}
             </Button>
             {(uploadError || state?.message) && (
               <p className="mt-2 text-xs text-error">{uploadError || state?.message}</p>
@@ -1582,8 +1710,19 @@ function MediaPickerDialog({
             viewport height, since 9 full rows here would be taller than
             most screens -- either limit alone isn't enough: a fixed row
             count can overflow small viewports, and a pure vh cap wouldn't
-            read as "about 9 rows" on a typically-sized one. */}
-        <div className="grid max-h-[min(1400px,70vh)] grid-cols-3 gap-2 overflow-y-auto">
+            read as "about 9 rows" on a typically-sized one.
+
+            --tile-row-h/auto-rows, not the tile's own aspect-square, is what
+            actually sizes every row -- same root cause and same fix as
+            media-library.tsx's own sidebar grid (see its comment): a burst
+            of many optimistic placeholders landing in the DOM at once (a
+            batch upload) can get measured/painted before an aspect-ratio-
+            derived height settles, especially on WebKit -- confirmed live
+            via Playwright at 50-item batches. An explicit, fixed row height
+            has no dependency on any child's aspect-ratio or load state.
+            155px measured against this dialog's own max-w-lg width (three
+            columns, gap-2, minus the Dialog's own padding). */}
+        <div className="grid max-h-[min(1400px,70vh)] grid-cols-3 gap-2 [--tile-row-h:155px] auto-rows-[var(--tile-row-h)] overflow-y-auto">
           {effectiveItems.map((item) => (
             <div key={item.id} className="relative min-w-0">
               <button
@@ -1591,7 +1730,7 @@ function MediaPickerDialog({
                 onClick={() => onSelect(item)}
                 disabled={item.pending}
                 title={item.pending ? "Uploading…" : undefined}
-                className="aspect-square w-full overflow-hidden border border-border transition-colors duration-150 hover:border-foreground/30 disabled:pointer-events-none"
+                className="h-full w-full overflow-hidden border border-border transition-colors duration-150 hover:border-foreground/30 disabled:pointer-events-none"
               >
                 <MediaThumbPreview item={item} />
               </button>

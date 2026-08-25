@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useDraggable } from "@dnd-kit/core";
 import {
@@ -105,6 +105,23 @@ export function MediaLibrary({
   // Surfaces a too-large/direct-upload-failed file before the Server Action
   // ever runs -- see grid-board.tsx's identical picker-dialog pattern.
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // "Uploading 17 / 40" -- a batch is asynchronous per-file (see
+  // uploadFilesWithPosters' own sequential-per-file loop), so `pending`
+  // alone (true for the whole duration) gave no sense of progress on a
+  // large selection. Reset to a fresh count on every new file selection;
+  // "done" advances on both success AND failure (a file that fails is still
+  // no longer in flight), one increment per file resolved.
+  const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
+  // One file resolved (success or failure) -- clears the counter entirely
+  // once every file in the running total has, so the button reverts to its
+  // normal "Upload Assets" label instead of getting stuck at "N / N".
+  function advanceUploadBatch() {
+    setUploadBatch((current) => {
+      if (!current) return null;
+      const done = current.done + 1;
+      return done >= current.total ? null : { total: current.total, done };
+    });
+  }
 
   // Optimistic overlay so a new upload appears (via a local blob URL --
   // instant, no network round trip needed to show it) and a delete
@@ -123,15 +140,41 @@ export function MediaLibrary({
   // upload-reconciliation effect below -- sees a single, unambiguous
   // declaration-before-use ordering.
   const suppressAutoTrackRef = useRef(false);
+  // Same pending-mutation guard as grid-board.tsx's own overrideRows (see
+  // its comment) -- a batch upload dispatches many uploadMedia calls in
+  // quick succession (see video-poster.ts), each independently pending
+  // between "optimistic placeholder shown" and "reconciled with its real
+  // id" -- a fresh `items` prop (e.g. from an unrelated folder move's
+  // router.refresh()) landing while ANY of them is still in flight must not
+  // wipe out placeholders that haven't been reconciled yet.
+  const [pendingMutations, setPendingMutations] = useState(0);
+  const beginMutation = useCallback(() => {
+    setPendingMutations((n) => n + 1);
+  }, []);
+  const endMutation = useCallback(() => {
+    setPendingMutations((n) => Math.max(0, n - 1));
+  }, []);
+  // prevItems always advances the instant a new `items` reference is SEEN,
+  // whether or not it's actually applied -- only clearing overrideItems is
+  // gated on pendingMutations. Getting this backwards (gating both together)
+  // was a real bug caught by this branch's own race-condition test: a stale
+  // prop arriving while a mutation was still in flight would correctly get
+  // deferred, then get wrongly APPLIED the instant that unrelated mutation's
+  // own endMutation() happened to fire, since prevItems had never advanced
+  // past it and so it still looked "new" at that point.
   if (items !== prevItems) {
     setPrevItems(items);
-    setOverrideItems(null);
+    if (pendingMutations === 0) setOverrideItems(null);
   }
   const effectiveItems = overrideItems ?? items;
 
-  // The real (signed-URL) item has arrived to replace whichever optimistic
-  // blob-URL placeholders were showing -- release them now rather than
-  // leaking that memory for the rest of the page's life.
+  // Backstop only -- the reconciliation effect below is what actually
+  // revokes each blob URL, individually, the moment its own upload resolves
+  // (see its own comment). This just catches whatever's left in the set on
+  // an eventual real navigation/refresh to this route (e.g. a blob whose
+  // upload failed before finishing, or reconciled without a displayUrl for
+  // some other reason) -- by then `items` itself already carries the real
+  // signed URL, so nothing currently on screen still depends on any of these.
   useEffect(() => {
     for (const url of pendingBlobUrlsRef.current) URL.revokeObjectURL(url);
     pendingBlobUrlsRef.current = new Set();
@@ -160,21 +203,42 @@ export function MediaLibrary({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setOverrideItems(null);
       showError(state.message);
+      advanceUploadBatch();
+      // Whichever specific placeholder this failure belonged to can't be
+      // identified from a bare message alone (see this branch's own comment
+      // above) -- dropping back to the real items list, uncondtionally,
+      // makes any further tracking of it moot, so just clear the whole
+      // pending count rather than try to decrement by exactly one.
+      setPendingMutations(0);
       return;
     }
     if (state?.id && state.clientTempId) {
+      endMutation();
+      advanceUploadBatch();
       const tempId = state.clientTempId;
       const realId = state.id;
       const realStoragePath = state.storagePath;
       const realPosterStoragePath = state.posterStoragePath ?? null;
       const matched = effectiveItems.find((i) => i.id === tempId);
       if (matched) {
+        // Swap off the optimistic blob URL (backing the full-resolution
+        // original file, decoded and held in memory for as long as it's
+        // rendered) onto the real, cheap signed thumbnail URL the action
+        // just computed -- without this, a reconciled item kept showing its
+        // blob URL indefinitely (there was no other display URL known
+        // client-side), so every upload in a session left its full-res
+        // decode pinned in memory until an actual page reload. Falls back
+        // to keeping the blob URL only if displayUrl genuinely couldn't be
+        // signed (never revoke a URL that's still the only thing rendered).
+        const oldBlobUrl = matched.url;
+        const newUrl = state.displayUrl ?? matched.url;
         setOverrideItems((current) =>
           (current ?? effectiveItems).map((i) =>
             i.id === tempId
               ? {
                   ...i,
                   id: realId,
+                  url: newUrl,
                   storagePath: realStoragePath,
                   posterStoragePath: realPosterStoragePath,
                   pending: false,
@@ -182,6 +246,10 @@ export function MediaLibrary({
               : i,
           ),
         );
+        if (state.displayUrl && oldBlobUrl && pendingBlobUrlsRef.current.has(oldBlobUrl)) {
+          pendingBlobUrlsRef.current.delete(oldBlobUrl);
+          URL.revokeObjectURL(oldBlobUrl);
+        }
         // The generic items-diffing effect below can't see this reconciled
         // item (it only ever watches the real server `items` prop, which
         // this never touches -- see grid.ts's own no-revalidation comment),
@@ -192,20 +260,30 @@ export function MediaLibrary({
           pushCommand({
             label: "Add media",
             undo: async () => {
-              suppressAutoTrackRef.current = true;
-              await deleteMedia(projectId, current.id);
-              router.refresh();
+              beginMutation();
+              try {
+                suppressAutoTrackRef.current = true;
+                await deleteMedia(projectId, current.id);
+                router.refresh();
+              } finally {
+                endMutation();
+              }
             },
             redo: async () => {
-              suppressAutoTrackRef.current = true;
-              const result = await restoreMediaAsset(projectId, {
-                storagePath: realStoragePath,
-                mediaType,
-                posterStoragePath: realPosterStoragePath,
-              });
-              if ("message" in result) throw new Error(result.message);
-              current.id = result.id;
-              router.refresh();
+              beginMutation();
+              try {
+                suppressAutoTrackRef.current = true;
+                const result = await restoreMediaAsset(projectId, {
+                  storagePath: realStoragePath,
+                  mediaType,
+                  posterStoragePath: realPosterStoragePath,
+                });
+                if ("message" in result) throw new Error(result.message);
+                current.id = result.id;
+                router.refresh();
+              } finally {
+                endMutation();
+              }
             },
           });
         }
@@ -250,6 +328,7 @@ export function MediaLibrary({
     // already the complete final state (bulkDeleteMedia no longer
     // revalidates this route either, see its own comment), so a refresh
     // would only redo the same round trip for nothing new to show.
+    beginMutation();
     startBulkDelete(async () => {
       try {
         await bulkDeleteMedia(projectId, ids);
@@ -257,6 +336,8 @@ export function MediaLibrary({
         console.error("Failed to delete media:", error);
         setOverrideItems(null);
         showError("Couldn't delete those assets. Please try again.");
+      } finally {
+        endMutation();
       }
     });
   }
@@ -269,17 +350,22 @@ export function MediaLibrary({
     const ids = Array.from(selectedIds);
     if (ids.length === 0 || !newFolderName.trim()) return;
     setMoveError(undefined);
+    beginMutation();
     startMove(async () => {
-      const result = await createMediaFolder(projectId, newFolderName);
-      if ("message" in result) {
-        setMoveError(result.message);
-        return;
+      try {
+        const result = await createMediaFolder(projectId, newFolderName);
+        if ("message" in result) {
+          setMoveError(result.message);
+          return;
+        }
+        await moveMediaToFolder(projectId, ids, result.id);
+        setSelectedIds(new Set());
+        setNewFolderName("");
+        setMoveDialogOpen(false);
+        router.refresh();
+      } finally {
+        endMutation();
       }
-      await moveMediaToFolder(projectId, ids, result.id);
-      setSelectedIds(new Set());
-      setNewFolderName("");
-      setMoveDialogOpen(false);
-      router.refresh();
     });
   }
 
@@ -315,20 +401,30 @@ export function MediaLibrary({
         pushCommand({
           label: "Add media",
           undo: async () => {
-            suppressAutoTrackRef.current = true;
-            await deleteMedia(projectId, current.id);
-            router.refresh();
+            beginMutation();
+            try {
+              suppressAutoTrackRef.current = true;
+              await deleteMedia(projectId, current.id);
+              router.refresh();
+            } finally {
+              endMutation();
+            }
           },
           redo: async () => {
-            suppressAutoTrackRef.current = true;
-            const result = await restoreMediaAsset(projectId, {
-              storagePath,
-              mediaType: item.mediaType,
-              posterStoragePath,
-            });
-            if ("message" in result) throw new Error(result.message);
-            current.id = result.id;
-            router.refresh();
+            beginMutation();
+            try {
+              suppressAutoTrackRef.current = true;
+              const result = await restoreMediaAsset(projectId, {
+                storagePath,
+                mediaType: item.mediaType,
+                posterStoragePath,
+              });
+              if ("message" in result) throw new Error(result.message);
+              current.id = result.id;
+              router.refresh();
+            } finally {
+              endMutation();
+            }
           },
         });
       }
@@ -381,6 +477,18 @@ export function MediaLibrary({
                 };
               });
               setOverrideItems([...effectiveItems, ...optimistic.map((o) => o.item)]);
+              // One begin per file -- each resolves independently (its own
+              // endMutation() call, in the reconciliation effect above or
+              // the onError callback just below), not as a single batch.
+              for (let i = 0; i < optimistic.length; i++) beginMutation();
+              // Adds to any already-in-progress batch rather than replacing
+              // it -- selecting more files while an earlier batch is still
+              // uploading grows the running total instead of resetting the
+              // visible progress back to a smaller number.
+              setUploadBatch((current) => ({
+                total: (current?.total ?? 0) + optimistic.length,
+                done: current?.done ?? 0,
+              }));
 
               uploadFilesWithPosters(
                 projectId,
@@ -398,6 +506,8 @@ export function MediaLibrary({
                   setUploadError(message);
                   const failed = optimistic.find((o) => o.file.name === fileName);
                   if (!failed) return;
+                  endMutation();
+                  advanceUploadBatch();
                   pendingBlobUrlsRef.current.delete(failed.item.url!);
                   URL.revokeObjectURL(failed.item.url!);
                   setOverrideItems((current) =>
@@ -415,7 +525,7 @@ export function MediaLibrary({
             disabled={pending}
             className="w-full py-3 text-xs tracking-wide uppercase"
           >
-            {pending ? "Uploading..." : "Upload Assets"}
+            {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : pending ? "Uploading..." : "Upload Assets"}
           </Button>
           {(uploadError || state?.message) && (
             <p className="text-xs text-error">{uploadError || state?.message}</p>
@@ -439,8 +549,26 @@ export function MediaLibrary({
           for anything past that instead. Uncapped in demoMode: the landing
           page's demo library is small and deliberately rendered much wider
           than the real sidebar, where this cap would just crop the hero
-          panel oddly. */}
-      <div className={`grid grid-cols-3 gap-1 ${demoMode ? "" : "max-h-[620px] overflow-y-auto"}`}>
+          panel oddly.
+
+          --tile-row-h/auto-rows, not each tile's own aspect-square, is what
+          actually sizes every row here -- same root cause and same fix as
+          story-editor.tsx's/post-editor.tsx's own "Add from library" grids:
+          an aspect-square tile's height is DERIVED from its resolved width
+          only after layout, so a burst of many tiles landing in the DOM at
+          once (a real batch upload's optimistic placeholders, all inserted
+          in a single setState) can get measured/painted before that
+          derivation settles, especially on WebKit -- confirmed live via
+          Playwright screenshots at 50-item batches: every tile collapsed to
+          a thin horizontal strip in WebKit, and the below-the-fold tiles did
+          the same in Chromium. An explicit, fixed row height has no
+          dependency on any child's aspect-ratio or load state at all, so
+          that race can't recur regardless of batch size or browser. 83px
+          measured live against this exact sidebar's real lg:w-64 width
+          (82.66px), not guessed. */}
+      <div
+        className={`grid grid-cols-3 gap-1 [--tile-row-h:83px] auto-rows-[var(--tile-row-h)] ${demoMode ? "" : "max-h-[620px] overflow-y-auto"}`}
+      >
         {!activeFolderId &&
           folders.map((folder) => (
             <button
@@ -448,7 +576,7 @@ export function MediaLibrary({
               type="button"
               onClick={() => setActiveFolderId(folder.id)}
               title={folder.name}
-              className="group flex aspect-square min-w-0 flex-col items-center justify-center gap-1.5 rounded-md p-1.5 text-center transition-colors duration-150 hover:bg-black/[.04]"
+              className="group flex min-w-0 flex-col items-center justify-center gap-1.5 rounded-md p-1.5 text-center transition-colors duration-150 hover:bg-black/[.04]"
             >
               <FolderIcon className="h-6 w-6 shrink-0 text-muted/70 transition-colors duration-150 group-hover:text-foreground" />
               <span className="line-clamp-2 w-full break-words text-[10px] leading-tight text-muted">
@@ -469,7 +597,7 @@ export function MediaLibrary({
             type="button"
             onClick={() => fileInputRef.current?.click()}
             title="Add assets"
-            className="flex aspect-square min-w-0 items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
+            className="flex min-w-0 items-center justify-center rounded-none border border-dashed border-border text-lg text-muted transition-colors duration-150 hover:border-foreground/30"
           >
             +
           </button>
@@ -575,7 +703,7 @@ function MediaThumb({
 
   return (
     <div
-      className={`group relative aspect-square min-w-0 touch-none overflow-hidden border border-border transition-[opacity,border-color] duration-150 ${
+      className={`group relative min-w-0 touch-none overflow-hidden border border-border transition-[opacity,border-color] duration-150 ${
         isDragging ? "cursor-grabbing opacity-30" : item.pending ? "cursor-default" : "cursor-grab hover:border-foreground/30"
       }`}
     >

@@ -8,6 +8,7 @@ import { logSystemEvent } from "@/lib/system-event-log";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { syncPostType } from "@/lib/post-type";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
+import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import type { MediaType } from "@/types/database";
 
 export type UploadMediaState =
@@ -25,6 +26,16 @@ export type UploadMediaState =
       storagePath?: string;
       posterStoragePath?: string | null;
       clientTempId?: string;
+      // A ready-to-use signed URL for the small generated thumbnail (falls
+      // back to signing the full original if thumbnail generation failed) --
+      // lets the caller swap its optimistic placeholder's `url` off the
+      // local blob URL (backing the full-resolution original file, kept
+      // alive in memory for as long as it's rendered) onto this cheap real
+      // one immediately, instead of leaving the blob URL as the only known
+      // display source for the rest of the session. Routed through the
+      // shared signed-URL cache, so if this exact path gets read again by
+      // another page in the same request window, it reuses this same URL.
+      displayUrl?: string | null;
     }
   | undefined;
 
@@ -171,6 +182,19 @@ export async function uploadMedia(
     ),
   ]);
 
+  // Same resolution grid/page.tsx's own mediaLibrary mapping already uses
+  // for a persisted item's `url` (thumbnail preferred for an image, the raw
+  // file itself for a video -- there's no separate video thumbnail concept,
+  // it's rendered via a real <video> element) -- computed here too so the
+  // caller can immediately swap off its optimistic blob-URL placeholder
+  // onto this cheap real one, without needing a page refresh to pick up
+  // what grid/page.tsx would have resolved anyway on next load.
+  const displayUrl = await getCachedSignedUrl(
+    supabase,
+    "project-media",
+    mediaType === "image" ? (thumbnailStoragePath ?? storagePath) : storagePath,
+  );
+
   // Not revalidating /grid (its own currently-mounted route -- Media
   // Library only ever renders there) -- that used to force a full fresh
   // Grid RSC payload to be bundled into THIS action's own response before
@@ -179,7 +203,7 @@ export async function uploadMedia(
   // placeholder directly from the id/paths returned below, no page
   // refresh required. A real future navigation to /grid still picks up
   // the change regardless, since staleTimes.dynamic is 0.
-  return { id: mediaAsset.id, storagePath, posterStoragePath, clientTempId };
+  return { id: mediaAsset.id, storagePath, posterStoragePath, clientTempId, displayUrl };
 }
 
 // An asset still referenced by any post/story is archived (hidden from the

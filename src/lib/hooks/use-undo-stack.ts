@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useToast } from "@/lib/hooks/use-toast";
 
 export type UndoableCommand = {
   label: string;
@@ -18,6 +19,7 @@ const MAX_HISTORY = 50;
 // call the inverse server action or a page refresh would bring the old
 // state right back.
 export function useUndoStack() {
+  const { showError } = useToast();
   const undoRef = useRef<UndoableCommand[]>([]);
   const redoRef = useRef<UndoableCommand[]>([]);
   const [isBusy, setIsBusy] = useState(false);
@@ -53,6 +55,7 @@ export function useUndoStack() {
       redoRef.current.push(command);
     } catch (error) {
       console.error(`Failed to undo "${command.label}":`, error);
+      showError(`Couldn't undo "${command.label}". Please try again.`);
       // Put it back -- the mutation may have partially applied, but treating
       // it as "still undoable" is safer than silently dropping the entry.
       undoRef.current.push(command);
@@ -60,7 +63,7 @@ export function useUndoStack() {
       setIsBusy(false);
       syncFlags();
     }
-  }, [isBusy, syncFlags]);
+  }, [isBusy, syncFlags, showError]);
 
   const redo = useCallback(async () => {
     const command = redoRef.current.pop();
@@ -71,12 +74,13 @@ export function useUndoStack() {
       undoRef.current.push(command);
     } catch (error) {
       console.error(`Failed to redo "${command.label}":`, error);
+      showError(`Couldn't redo "${command.label}". Please try again.`);
       redoRef.current.push(command);
     } finally {
       setIsBusy(false);
       syncFlags();
     }
-  }, [isBusy, syncFlags]);
+  }, [isBusy, syncFlags, showError]);
 
   return { push, undo, redo, canUndo, canRedo, isBusy };
 }
