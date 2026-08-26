@@ -104,8 +104,28 @@ type PostRecord = {
 };
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
+// min-w-0/max-w-full/box-border matter beyond the usual "flex/grid item
+// shrink" reason: iOS Safari's native input[type=date]/[type=time] chrome
+// doesn't reliably honor an inherited box-sizing, so without an explicit
+// box-border here their own border can render past the end of a w-full
+// box sized by its padding on top of 100% width, poking outside the
+// Schedule row's grid cell (and the popup itself on narrow screens).
 const fieldClass =
-  "w-full rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+  "block w-full min-w-0 max-w-full box-border rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+// The width chain above (block/w-full/min-w-0/max-w-full/box-border) isn't
+// actually enough for input[type=date]/[type=time] on real iOS Safari --
+// confirmed against real-device screenshots, not just this project's own
+// Chromium testing, which never reproduces this. WebKit treats these two
+// input types as native controls with their own internal shadow-DOM parts
+// (-webkit-datetime-edit-*) that keep an intrinsic min-content width driven
+// by the rendered date/time text -- wider still for locales like Hebrew --
+// and ignores author `width`/`box-sizing` for that box entirely as long as
+// its default native chrome is active. `-webkit-appearance: none` turns
+// that native chrome off (the standard, documented fix for this exact
+// overflow), which is what makes WebKit fall back to normal CSS box
+// layout -- it does not remove type=date/time's own tap-to-open-picker
+// behavior, only its default visual rendering.
+const dateTimeFieldClass = `${fieldClass} appearance-none [-webkit-appearance:none]`;
 
 export function PostEditor({
   projectId,
@@ -394,17 +414,16 @@ export function PostEditor({
       // originals here doesn't silently drop anything meaningful for the
       // common multi-image case this path exists for.
       //
-      // Deliberately not gated on isTouchDevice -- shareOriginalAssets'
-      // own canShareFiles check is what decides. On a desktop browser
-      // (which essentially never supports canShare({files}) as of
-      // current browser support) this returns false immediately and
-      // falls through to the exact same server-export zip download it
-      // always has.
+      // Gated on isTouchDevice -- some desktop browsers do support
+      // canShare({files}), so shareOriginalAssets' own preferMobileUx
+      // parameter is what actually keeps the OS share dialog off desktop
+      // "Download Media" clicks; on desktop this falls straight through
+      // to the exact same server-export zip download it always has.
       const shareable = orderedAssets
         .map((a) => a.originalUrl ?? a.url)
         .filter((url): url is string => !!url)
         .map((url) => ({ url, filename: filenameFromUrl(url, "asset") }));
-      if (shareable.length > 0 && (await shareOriginalAssets(shareable))) return;
+      if (shareable.length > 0 && (await shareOriginalAssets(shareable, isTouchDevice))) return;
 
       // Falls back to the server-composited export (crop-applied cover,
       // canonical per-slide sizing) as a plain zip download -- unchanged
@@ -1382,8 +1401,8 @@ function PostMainForm({
 
       <div className="flex flex-col gap-3">
         <span className={labelClass}>Schedule post</span>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="flex flex-col gap-1.5">
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Status</span>
             <select
               name="status"
@@ -1397,7 +1416,7 @@ function PostMainForm({
               <option value="published">Published</option>
             </select>
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Approval Status</span>
             {isClient ? (
               // Client's own client-safe path -- immediate-submit via
@@ -1452,7 +1471,7 @@ function PostMainForm({
               </>
             )}
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>
             <input
               type="date"
@@ -1460,10 +1479,10 @@ function PostMainForm({
               value={scheduledDate}
               onChange={(e) => setScheduledDate(e.target.value)}
               disabled={!canManage}
-              className={fieldClass}
+              className={dateTimeFieldClass}
             />
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule time</span>
             <input
               type="time"
@@ -1471,7 +1490,7 @@ function PostMainForm({
               value={scheduledTime}
               onChange={(e) => setScheduledTime(e.target.value)}
               disabled={!canManage}
-              className={fieldClass}
+              className={dateTimeFieldClass}
             />
           </label>
         </div>
@@ -1551,7 +1570,7 @@ function PostLinks({
         <ul className="flex flex-col gap-1">
           {links.map((link) => (
             <li key={link.id} className="flex items-center justify-between gap-2 text-sm">
-              <a href={link.url} target="_blank" rel="noreferrer" className="truncate underline">
+              <a href={link.url} target="_blank" rel="noreferrer" className="min-w-0 truncate underline">
                 {link.label || link.url}
               </a>
               {canManage && (

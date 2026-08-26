@@ -4,8 +4,9 @@ import { memo, useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteStory, moveStoryToFolder } from "@/lib/actions/stories";
-import { downloadAsset, downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
+import { downloadAssetsAsZip, filenameFromUrl, shareOrDownloadAsset, shareOriginalAssets } from "@/lib/download-zip";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import type { ContentFolderItem, StoryFileItem } from "./stories-board";
 import type { MediaType } from "@/types/database";
 
@@ -66,6 +67,9 @@ export const StoryCard = memo(function StoryCard({
   const [downloading, setDownloading] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [deleted, setDeleted] = useState(false);
+  // Same feature-detected (not UA-sniffed) signal as Post Editor's own
+  // approved "Save Media" -- see shareOrDownloadAsset's own comment.
+  const isTouchDevice = useIsTouchDevice();
   // Moving out of the current view (a different folder, or Unfiled) makes
   // this card disappear here too -- same "gone from this list" shape as
   // delete, just via a different reason.
@@ -127,11 +131,19 @@ export const StoryCard = memo(function StoryCard({
     setDownloading(true);
     try {
       if (files.length === 1) {
-        await downloadAsset(files[0].url, filenameFromUrl(files[0].url, name || "content"));
-      } else {
-        const zipAssets = files.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `file-${i + 1}`) }));
-        await downloadAssetsAsZip(zipAssets, `${name || "content"}.zip`);
+        await shareOrDownloadAsset(files[0].url, filenameFromUrl(files[0].url, name || "content"), isTouchDevice);
+        return;
       }
+      // Individual image Files through the approved native-share path --
+      // same shared helper Post Editor's own "Save Media" uses, reused
+      // here rather than duplicated. Only when every file is an image:
+      // a mixed/video set keeps the existing zip download untouched.
+      if (files.every((f) => f.mediaType === "image")) {
+        const assets = files.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `file-${i + 1}`) }));
+        if (await shareOriginalAssets(assets, isTouchDevice)) return;
+      }
+      const zipAssets = files.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `file-${i + 1}`) }));
+      await downloadAssetsAsZip(zipAssets, `${name || "content"}.zip`);
     } finally {
       setDownloading(false);
     }
@@ -361,7 +373,7 @@ export const StoryCard = memo(function StoryCard({
                     disabled={downloading || files.length === 0}
                     className="block w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-50"
                   >
-                    {downloading ? "Downloading…" : "Download"}
+                    {downloading ? "Downloading…" : isTouchDevice ? "Save Media" : "Download"}
                   </button>
                   {folders.length > 0 && (
                     <button
@@ -460,6 +472,7 @@ function AssetPreviewModal({
 }) {
   const [index, setIndex] = useState(initialIndex);
   const [downloading, setDownloading] = useState(false);
+  const isTouchDevice = useIsTouchDevice();
   const file = files[index];
   const trackRef = useRef<HTMLDivElement>(null);
   const settleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -510,7 +523,7 @@ function AssetPreviewModal({
   async function handleDownload() {
     setDownloading(true);
     try {
-      await downloadAsset(file.url, filenameFromUrl(file.url, name || "content"));
+      await shareOrDownloadAsset(file.url, filenameFromUrl(file.url, name || "content"), isTouchDevice);
     } finally {
       setDownloading(false);
     }
@@ -548,8 +561,8 @@ function AssetPreviewModal({
         type="button"
         onClick={handleDownload}
         disabled={downloading}
-        aria-label="Download"
-        title="Download"
+        aria-label={isTouchDevice ? "Save Media" : "Download"}
+        title={isTouchDevice ? "Save Media" : "Download"}
         className="absolute right-16 top-4 z-10 flex h-9 w-9 items-center justify-center rounded-full text-foreground/60 transition-colors duration-150 hover:text-foreground disabled:opacity-50"
       >
         <DownloadIcon className="h-5 w-5" />

@@ -28,7 +28,8 @@ import {
 } from "@/lib/actions/stories";
 import { SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
-import { downloadAssetsAsZip, filenameFromUrl } from "@/lib/download-zip";
+import { downloadAssetsAsZip, filenameFromUrl, shareOriginalAssets } from "@/lib/download-zip";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addStoryComment, fetchStoryComments } from "@/lib/actions/post-comments";
 import { CONTENT_STATUS_LABEL, CONTENT_STATUS_OPTIONS } from "@/lib/content-status";
@@ -51,8 +52,22 @@ type StoryRecord = {
 };
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
+// min-w-0/max-w-full/box-border matter beyond the usual "flex/grid item
+// shrink" reason: iOS Safari's native input[type=date] chrome doesn't
+// reliably honor an inherited box-sizing, so without an explicit
+// box-border here its own border can render past the end of a w-full box
+// sized by its padding on top of 100% width, poking outside the Schedule
+// row's grid cell (and the popup itself on narrow screens).
 const fieldClass =
-  "w-full rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+  "block w-full min-w-0 max-w-full box-border rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+// Not enough on its own for input[type=date] on real iOS Safari (confirmed
+// against real-device screenshots, not just Chromium testing, which never
+// reproduces this) -- WebKit gives these native controls their own
+// intrinsic min-content width (wider still for locales like Hebrew) and
+// ignores author width/box-sizing while their default chrome is active.
+// -webkit-appearance: none turns that chrome off, the standard fix for
+// this, without removing the tap-to-open-picker behavior itself.
+const dateTimeFieldClass = `${fieldClass} appearance-none [-webkit-appearance:none]`;
 
 export function StoryEditor({
   projectId,
@@ -128,12 +143,22 @@ export function StoryEditor({
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
   const [downloading, setDownloading] = useState(false);
+  // Same feature-detected (not UA-sniffed) signal as Post Editor's own
+  // approved "Save Media".
+  const isTouchDevice = useIsTouchDevice();
   async function handleDownloadAll() {
     setDownloading(true);
     try {
-      const zipAssets = orderedFrames
-        .filter((f): f is typeof f & { url: string } => Boolean(f.url))
-        .map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `frame-${i + 1}`) }));
+      const framesWithUrl = orderedFrames.filter((f): f is typeof f & { url: string } => Boolean(f.url));
+      // Individual image Files through the approved native-share path --
+      // same shared helper Post Editor's own "Save Media" uses, reused
+      // here rather than duplicated. Only when every frame is an image: a
+      // mixed/video story keeps the existing zip download untouched.
+      if (framesWithUrl.length > 0 && framesWithUrl.every((f) => f.mediaType === "image")) {
+        const assets = framesWithUrl.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `frame-${i + 1}`) }));
+        if (await shareOriginalAssets(assets, isTouchDevice)) return;
+      }
+      const zipAssets = framesWithUrl.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `frame-${i + 1}`) }));
       await downloadAssetsAsZip(zipAssets, `story-${story.id}-frames.zip`);
     } finally {
       setDownloading(false);
@@ -230,7 +255,7 @@ export function StoryEditor({
           disabled={downloading}
           className="w-fit self-start px-6 py-3 text-xs tracking-wide uppercase"
         >
-          {downloading ? "Preparing…" : "Download Media"}
+          {downloading ? "Preparing…" : isTouchDevice ? "Save Media" : "Download Media"}
         </Button>
       ) : (
         <p className="text-xs text-muted">No files yet — upload one or add from the library below.</p>
@@ -585,8 +610,8 @@ function StoryMainForm({
 
       <div className="flex flex-col gap-3">
         <span className={labelClass}>Schedule content</span>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="flex flex-col gap-1.5">
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Status</span>
             <select
               name="status"
@@ -606,7 +631,7 @@ function StoryMainForm({
               <option value="published">Published (legacy)</option>
             </select>
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Approval Status</span>
             {isClient ? (
               // Client's own client-safe path -- immediate-submit via
@@ -657,7 +682,7 @@ function StoryMainForm({
               </>
             )}
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>
             <input
               type="date"
@@ -665,7 +690,7 @@ function StoryMainForm({
               value={scheduledDate}
               onChange={(e) => setScheduledDate(e.target.value)}
               disabled={!canManage}
-              className={fieldClass}
+              className={dateTimeFieldClass}
             />
           </label>
         </div>
@@ -745,7 +770,7 @@ function StoryLinks({
         <ul className="flex flex-col gap-1">
           {links.map((link) => (
             <li key={link.id} className="flex items-center justify-between gap-2 text-sm">
-              <a href={link.url} target="_blank" rel="noreferrer" className="truncate underline">
+              <a href={link.url} target="_blank" rel="noreferrer" className="min-w-0 truncate underline">
                 {link.label || link.url}
               </a>
               {canManage && (

@@ -92,7 +92,7 @@ export default async function ProjectsPage() {
         {projects.map((project) => (
           <li key={project.id} className="border-b border-border">
             <Link
-              href={`/projects/${project.id}/grid`}
+              href={`/projects/${project.id}/overview`}
               className="flex items-center gap-3 px-1 py-4 transition-[transform,background-color] duration-100 hover:bg-black/[0.02] active:scale-[0.98] active:bg-black/[0.04]"
             >
               <Avatar

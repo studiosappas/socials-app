@@ -7,12 +7,8 @@ import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { getEffectivePermissions, type PermissionPageKey } from "@/lib/role-permissions";
 import type { ProjectRole } from "@/types/database";
 
-// href/key stay `null` for Overview (the bare project root, e.g.
-// /projects/abc) since it has no path segment of its own to match a
-// PermissionPageKey against by name -- handled by its own explicit "overview"
-// key below instead.
 const PROJECT_PAGES: { href: string; label: string; key: PermissionPageKey }[] = [
-  { href: "", label: "Overview", key: "overview" },
+  { href: "overview", label: "Overview", key: "overview" },
   { href: "grid", label: "Grid", key: "grid" },
   { href: "calendar", label: "Calendar", key: "calendar" },
   { href: "stories", label: "Content", key: "stories" },
@@ -66,7 +62,7 @@ export function NavProjectMenu({
   // so the label should say where you ARE (Grid, Calendar, Brief, ...) and
   // the arrow says where else you can go.
   const activePage = base
-    ? PROJECT_PAGES.find((page) => (page.href ? pathname.startsWith(`${base}/${page.href}`) : pathname === base))
+    ? PROJECT_PAGES.find((page) => pathname.startsWith(`${base}/${page.href}`))
     : null;
   // Post detail pages -- both the @modal-intercepted overlay opened from a
   // Grid tile and the standalone page reached by a direct URL/hard refresh
@@ -142,8 +138,8 @@ export function NavProjectMenu({
         >
           <div className="w-44 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background py-1 shadow-[0_4px_20px_rgba(0,0,0,0.08)]">
             {visiblePages.map((page) => {
-              const href = page.href ? `${base}/${page.href}` : base;
-              const active = page.href ? pathname.startsWith(href) : pathname === base;
+              const href = `${base}/${page.href}`;
+              const active = pathname.startsWith(href);
               return (
                 <Link
                   key={page.href}

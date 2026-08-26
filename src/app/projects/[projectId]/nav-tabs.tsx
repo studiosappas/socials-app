@@ -3,7 +3,7 @@
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
-  { href: "", label: "Overview" },
+  { href: "overview", label: "Overview" },
   { href: "grid", label: "Grid" },
   { href: "calendar", label: "Calendar" },
   { href: "stories", label: "Content" },
@@ -15,10 +15,7 @@ const NAV_ITEMS = [
 export function CurrentPageLabel({ projectId }: { projectId: string }) {
   const pathname = usePathname();
   const base = `/projects/${projectId}`;
-  const active = NAV_ITEMS.find((item) => {
-    const href = item.href ? `${base}/${item.href}` : base;
-    return item.href ? pathname.startsWith(href) : pathname === base;
-  });
+  const active = NAV_ITEMS.find((item) => pathname.startsWith(`${base}/${item.href}`));
   return <span className="text-foreground">{active?.label ?? ""}</span>;
 }
 
