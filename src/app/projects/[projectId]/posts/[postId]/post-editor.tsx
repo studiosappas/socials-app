@@ -104,8 +104,14 @@ type PostRecord = {
 };
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
+// min-w-0/max-w-full/box-border matter beyond the usual "flex/grid item
+// shrink" reason: iOS Safari's native input[type=date]/[type=time] chrome
+// doesn't reliably honor an inherited box-sizing, so without an explicit
+// box-border here their own border can render past the end of a w-full
+// box sized by its padding on top of 100% width, poking outside the
+// Schedule row's grid cell (and the popup itself on narrow screens).
 const fieldClass =
-  "w-full rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+  "block w-full min-w-0 max-w-full box-border rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
 
 export function PostEditor({
   projectId,
@@ -1381,8 +1387,8 @@ function PostMainForm({
 
       <div className="flex flex-col gap-3">
         <span className={labelClass}>Schedule post</span>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="flex flex-col gap-1.5">
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Status</span>
             <select
               name="status"
@@ -1396,7 +1402,7 @@ function PostMainForm({
               <option value="published">Published</option>
             </select>
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Approval Status</span>
             {isClient ? (
               // Client's own client-safe path -- immediate-submit via
@@ -1451,7 +1457,7 @@ function PostMainForm({
               </>
             )}
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>
             <input
               type="date"
@@ -1462,7 +1468,7 @@ function PostMainForm({
               className={fieldClass}
             />
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule time</span>
             <input
               type="time"
