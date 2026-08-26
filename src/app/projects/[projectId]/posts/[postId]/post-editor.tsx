@@ -334,32 +334,43 @@ export function PostEditor({
       const response = await fetch(`/projects/${projectId}/posts/${post.id}/export`);
       if (!response.ok) return;
       const zipBlob = await response.blob();
-      // On a touch device, unzip the export CLIENT-SIDE (still the same
-      // server-composited, crop-applied bytes -- the zip is only ever the
-      // transport format between server and client here, never something
-      // the mobile user is meant to see or manage) and hand the individual
-      // image(s) to the native share sheet instead, so the user gets a
-      // real "Save Image"/"Save to Photos" action rather than a .zip
-      // landing in Files. Desktop is completely unaffected: preferShare is
-      // false there, so this always takes the exact same saveAs(zipBlob,
-      // ...) path it always has.
-      if (isTouchDevice) {
-        try {
-          const zip = await JSZip.loadAsync(zipBlob);
-          const entries = await Promise.all(
-            Object.values(zip.files)
-              .filter((f) => !f.dir)
-              .map(async (f) => ({ filename: f.name, blob: await f.async("blob") })),
-          );
-          if (entries.length > 0) {
-            await shareOrDownloadZipEntries(zipBlob, entries, `post-${post.id}-export.zip`, true);
-            return;
-          }
-        } catch (error) {
-          console.error("Failed to unzip export for sharing, falling back to zip download:", error);
-          // Falls through to the plain zip save below -- download must
-          // never end up completely broken because the share path failed.
+      // Unzip the export CLIENT-SIDE (still the same server-composited,
+      // crop-applied bytes -- the zip is only ever the transport format
+      // between server and client here, never something a mobile user is
+      // meant to see or manage) and offer the individual image(s) to the
+      // native share sheet, so a supported browser gets a real "Save
+      // Image"/"Save to Photos" action rather than a .zip landing in
+      // Files/Downloads.
+      //
+      // Deliberately NOT gated on isTouchDevice anymore -- that was a
+      // confirmed real bug: it hard-blocked this whole unzip-and-share
+      // attempt before shareOrDownloadZipEntries's own capability check
+      // (canShareFiles) ever ran, so a device this device-classification
+      // heuristic misclassified (or that simply isn't covered by
+      // `pointer: coarse`) could never reach native share at all,
+      // regardless of whether the browser actually supported it --
+      // exactly matching "Download Media still lands in Files" as a real
+      // Preview report. shareOrDownloadZipEntries's own canShareFiles
+      // check is what actually decides now; on a desktop browser (which
+      // essentially never supports canShare({files}) as of current
+      // browser support) this still resolves to the exact same
+      // saveAs(zipBlob, ...) path it always has, just decided by real
+      // capability instead of a device guess.
+      try {
+        const zip = await JSZip.loadAsync(zipBlob);
+        const entries = await Promise.all(
+          Object.values(zip.files)
+            .filter((f) => !f.dir)
+            .map(async (f) => ({ filename: f.name, blob: await f.async("blob") })),
+        );
+        if (entries.length > 0) {
+          await shareOrDownloadZipEntries(zipBlob, entries, `post-${post.id}-export.zip`, isTouchDevice);
+          return;
         }
+      } catch (error) {
+        console.error("Failed to unzip export for sharing, falling back to zip download:", error);
+        // Falls through to the plain zip save below -- download must
+        // never end up completely broken because the share path failed.
       }
       saveAs(zipBlob, `post-${post.id}-export.zip`);
     } finally {
@@ -1013,7 +1024,22 @@ function ReplaceAssetPopover({
       ref={popoverRef}
       onClick={(e) => e.stopPropagation()}
       style={{ position: "fixed", top: position.top, left: position.left }}
-      className="z-20 w-56 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-2 shadow-lg"
+      // z-[110] -- NOT z-20. Post Editor is normally reached through the
+      // (.)posts/[postId] intercepting route, which renders it inside
+      // <Modal> (modal.tsx: `fixed inset-0 z-50`). This popover is
+      // portaled straight to document.body, landing as a SIBLING of that
+      // modal in the DOM (not a descendant), so it competes on z-index
+      // terms alone -- at z-20 it rendered fully underneath the modal's
+      // own z-50 backdrop/dialog, genuinely present and correctly
+      // positioned in the DOM but never paintable or clickable (confirmed
+      // live: elementFromPoint at the button's own coordinates returned
+      // the modal's content, not this button). This was the actual,
+      // previously-missed reason Replace did nothing in real Preview --
+      // a live-only bug this component's synthetic test harness (no
+      // Modal wrapper) could never have surfaced. z-[110] clears the
+      // modal's z-50 with the same margin GridCropOverlay's own portal
+      // already uses (z-[100]/z-[101]) for the identical reason.
+      className="z-[110] w-56 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-2 shadow-lg"
     >
       <input
         ref={fileInputRef}

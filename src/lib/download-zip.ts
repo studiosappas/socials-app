@@ -71,19 +71,35 @@ const EXTENSION_MIME: Record<string, string> = {
   mov: "video/quicktime",
 };
 
-function mimeFromFilename(filename: string): string {
+function mimeFromExtension(filename: string): string | undefined {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-  return EXTENSION_MIME[ext] ?? "application/octet-stream";
+  return EXTENSION_MIME[ext];
 }
 
-// Feature-detected only -- never sniffs the user agent. `navigator.share`
-// exists on some desktop browsers too, which is exactly why callers must
-// ALSO gate this on their own isTouchDevice signal (see
-// use-is-touch-device.ts, already used elsewhere in this codebase for the
-// identical "don't treat a capability as identical to a form factor"
-// reason) before treating a positive result here as "show the share sheet"
-// -- this function alone answers "can these files legitimately be shared,"
-// not "should we prefer sharing over downloading on this device."
+// Storage responses can legitimately come back with a generic/wrong
+// Content-Type (`application/octet-stream` is a common default for a
+// storage-bucket object whose metadata wasn't set precisely) -- fetch()'s
+// resulting blob.type reflects that HEADER verbatim, not the file's real
+// content. Web Share's own `canShare({files})` validation is strict about
+// this: a File whose `type` isn't a recognized shareable type (image/*,
+// video/*) makes it correctly refuse to offer the file at all, since it
+// has no way to know it's actually an image -- confirmed as a concrete,
+// reproducible cause of "downloads to Files instead of sharing" on a
+// real device (via a mocked octet-stream response + mocked canShare in
+// this round's test harness): the file was constructed with type
+// "application/octet-stream", canShare(files) correctly returned false
+// for it, and the code silently fell through to plain download exactly
+// as designed -- just not what anyone wanted.
+//
+// Fixed by trusting the FILENAME's own extension first (present on every
+// real asset here -- storage paths always carry the original upload's
+// extension) and only falling back to the response's own blob.type when
+// the extension is unrecognized.
+function resolveMimeType(blobType: string, filename: string): string {
+  return mimeFromExtension(filename) ?? blobType ?? "application/octet-stream";
+}
+
+// Feature-detected only -- never sniffs the user agent.
 export async function canShareFiles(files: File[]): Promise<boolean> {
   if (typeof navigator === "undefined" || typeof navigator.share !== "function" || typeof navigator.canShare !== "function") {
     return false;
@@ -98,7 +114,29 @@ export async function canShareFiles(files: File[]): Promise<boolean> {
 async function fetchAsFile(url: string, filename: string): Promise<File> {
   const response = await fetch(url);
   const blob = await response.blob();
-  return new File([blob], filename, { type: blob.type || mimeFromFilename(filename) });
+  return new File([blob], filename, { type: resolveMimeType(blob.type, filename) });
+}
+
+// Compact, non-sensitive diagnostic for the mobile share path -- kept
+// deliberately active (not stripped after this round) because the actual
+// failure this was written to chase could only be reproduced/confirmed on
+// a real device, which this environment has no access to. Logs shapes and
+// outcomes only: no signed URLs, no file bytes. Safe to remove once a real
+// device has confirmed the native share sheet appears correctly; until
+// then this is the only way to see what a real browser's `canShare`/
+// `share` actually returned.
+function logShareDiagnostic(diagnostic: {
+  preferMobileUx: boolean;
+  shareAvailable: boolean;
+  canShareAvailable: boolean;
+  fileCount: number;
+  fileTypes: string[];
+  canShareResult: boolean | null;
+  shareAttempted: boolean;
+  shareError: string | null;
+  fallbackUsed: boolean;
+}) {
+  console.debug("[share-diagnostic]", diagnostic);
 }
 
 // The mobile-preferred path for a single image: fetches the real bytes
@@ -112,24 +150,55 @@ async function fetchAsFile(url: string, filename: string): Promise<File> {
 // this file, or fails for any reason other than the user dismissing the
 // share sheet themselves -- download must never be left completely broken
 // on a browser that doesn't support file sharing.
-export async function shareOrDownloadAsset(url: string, filename: string, preferShare: boolean) {
-  if (preferShare) {
-    try {
-      const file = await fetchAsFile(url, filename);
-      if (await canShareFiles([file])) {
-        await navigator.share({ files: [file] });
-        return;
-      }
-    } catch (error) {
-      // The user closing the share sheet themselves is not a failure --
-      // falling back to a second, confusing download prompt right after
-      // they explicitly dismissed the first one would be worse than doing
-      // nothing.
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      // Any other failure (network, mid-flight unsupported, etc.) falls
-      // through to the plain download below instead.
+//
+// `preferMobileUx` (the caller's own touch/device hint) is no longer a
+// hard precondition for attempting this -- capability detection
+// (canShareFiles) runs regardless of it and is the thing that actually
+// decides whether to share. It's still passed through so a confidently-
+// desktop caller can note that in the diagnostic, but a device this
+// hint misclassifies (or simply doesn't cover) is no longer silently
+// blocked from ever reaching navigator.canShare at all. In practice this
+// changes nothing on real desktop browsers (none of the mainstream ones
+// support canShare({files}) today, so they still fall through to
+// download exactly as before) while removing a whole class of "device
+// heuristic said no" false negatives on mobile.
+export async function shareOrDownloadAsset(url: string, filename: string, preferMobileUx: boolean) {
+  const diag = {
+    preferMobileUx,
+    shareAvailable: typeof navigator !== "undefined" && typeof navigator.share === "function",
+    canShareAvailable: typeof navigator !== "undefined" && typeof navigator.canShare === "function",
+    fileCount: 1,
+    fileTypes: [] as string[],
+    canShareResult: null as boolean | null,
+    shareAttempted: false,
+    shareError: null as string | null,
+    fallbackUsed: false,
+  };
+  try {
+    const file = await fetchAsFile(url, filename);
+    diag.fileTypes = [file.type];
+    diag.canShareResult = await canShareFiles([file]);
+    if (diag.canShareResult) {
+      diag.shareAttempted = true;
+      await navigator.share({ files: [file] });
+      logShareDiagnostic(diag);
+      return;
     }
+  } catch (error) {
+    diag.shareError = error instanceof Error ? error.name || error.message : String(error);
+    // The user closing the share sheet themselves is not a failure --
+    // falling back to a second, confusing download prompt right after
+    // they explicitly dismissed the first one would be worse than doing
+    // nothing.
+    if (error instanceof DOMException && error.name === "AbortError") {
+      logShareDiagnostic(diag);
+      return;
+    }
+    // Any other failure (network, mid-flight unsupported, etc.) falls
+    // through to the plain download below instead.
   }
+  diag.fallbackUsed = true;
+  logShareDiagnostic(diag);
   await downloadAsset(url, filename);
 }
 
@@ -149,36 +218,85 @@ export async function shareOrDownloadZipEntries(
   zipBlob: Blob,
   entries: { filename: string; blob: Blob }[],
   zipName: string,
-  preferShare: boolean,
+  preferMobileUx: boolean,
 ) {
+  // Same reasoning as shareOrDownloadAsset: capability detection
+  // (canShareFiles) runs and decides regardless of preferMobileUx, which
+  // is now diagnostic-only.
+  const baseDiag = {
+    preferMobileUx,
+    shareAvailable: typeof navigator !== "undefined" && typeof navigator.share === "function",
+    canShareAvailable: typeof navigator !== "undefined" && typeof navigator.canShare === "function",
+  };
+
   if (entries.length === 1) {
     const only = entries[0];
-    if (preferShare) {
-      try {
-        const file = new File([only.blob], only.filename, { type: only.blob.type || mimeFromFilename(only.filename) });
-        if (await canShareFiles([file])) {
-          await navigator.share({ files: [file] });
-          return;
-        }
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-      }
-    }
-    saveAs(only.blob, only.filename);
-    return;
-  }
-  if (preferShare) {
+    const diag = {
+      ...baseDiag,
+      fileCount: 1,
+      fileTypes: [] as string[],
+      canShareResult: null as boolean | null,
+      shareAttempted: false,
+      shareError: null as string | null,
+      fallbackUsed: false,
+    };
     try {
-      const files = entries.map(
-        (e) => new File([e.blob], e.filename, { type: e.blob.type || mimeFromFilename(e.filename) }),
-      );
-      if (await canShareFiles(files)) {
-        await navigator.share({ files });
+      const file = new File([only.blob], only.filename, { type: resolveMimeType(only.blob.type, only.filename) });
+      diag.fileTypes = [file.type];
+      diag.canShareResult = await canShareFiles([file]);
+      if (diag.canShareResult) {
+        diag.shareAttempted = true;
+        await navigator.share({ files: [file] });
+        logShareDiagnostic(diag);
         return;
       }
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
+      diag.shareError = error instanceof Error ? error.name || error.message : String(error);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        logShareDiagnostic(diag);
+        return;
+      }
+    }
+    diag.fallbackUsed = true;
+    logShareDiagnostic(diag);
+    saveAs(only.blob, only.filename);
+    return;
+  }
+
+  const diag = {
+    ...baseDiag,
+    fileCount: entries.length,
+    fileTypes: [] as string[],
+    canShareResult: null as boolean | null,
+    shareAttempted: false,
+    shareError: null as string | null,
+    fallbackUsed: false,
+  };
+  try {
+    // Individual image Files, never a zip, on the native-share path --
+    // one share call offering every file at once where the browser/OS
+    // supports multi-file Web Share (deliberately not one share call per
+    // file, which on iOS pops a separate share sheet per image -- worse
+    // than a single zip -- and deliberately not the zip itself, which
+    // would hand the user a single .zip in their share targets instead
+    // of individual photos).
+    const files = entries.map((e) => new File([e.blob], e.filename, { type: resolveMimeType(e.blob.type, e.filename) }));
+    diag.fileTypes = files.map((f) => f.type);
+    diag.canShareResult = await canShareFiles(files);
+    if (diag.canShareResult) {
+      diag.shareAttempted = true;
+      await navigator.share({ files });
+      logShareDiagnostic(diag);
+      return;
+    }
+  } catch (error) {
+    diag.shareError = error instanceof Error ? error.name || error.message : String(error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      logShareDiagnostic(diag);
+      return;
     }
   }
+  diag.fallbackUsed = true;
+  logShareDiagnostic(diag);
   saveAs(zipBlob, zipName);
 }
