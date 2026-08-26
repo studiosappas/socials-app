@@ -202,70 +202,38 @@ export async function shareOrDownloadAsset(url: string, filename: string, prefer
   await downloadAsset(url, filename);
 }
 
-// The mobile-preferred path for a whole post's worth of images. A single-
-// asset post never zips at all, on any device -- see shareOrDownloadAsset.
-// For multiple assets: one native share call offering every file at once
-// where the browser/OS supports multi-file Web Share (deliberately not
-// one share call per file, which on iOS pops a separate share sheet per
-// image -- worse than a single zip); falls back to the existing zip
-// download otherwise, exactly as before this existed. `alreadyZipped` lets
-// a caller that already has the export as one blob (Post Editor's
-// server-composited, crop-applied export) hand it in directly instead of
-// this function re-fetching each asset's raw bytes -- see post-editor.tsx's
-// own call site for why that matters (the zip contains the CROPPED
-// export, not the originals).
-export async function shareOrDownloadZipEntries(
-  zipBlob: Blob,
-  entries: { filename: string; blob: Blob }[],
-  zipName: string,
-  preferMobileUx: boolean,
-) {
-  // Same reasoning as shareOrDownloadAsset: capability detection
-  // (canShareFiles) runs and decides regardless of preferMobileUx, which
-  // is now diagnostic-only.
-  const baseDiag = {
-    preferMobileUx,
+// The mobile-preferred path for a whole post's worth of images: fetches
+// each asset's ORIGINAL bytes directly (never a server-composited export,
+// never a zip) and offers them to the native share sheet as individual
+// image/video Files in one share call. Deliberately not one share call
+// per file (which on iOS pops a separate share sheet per image -- worse
+// than a single zip) and deliberately not a zip either (a .zip in the
+// share sheet's own file list isn't "individual images" -- the whole
+// point of this path).
+//
+// An earlier version of this fetched the server's crop-applied export
+// ZIP first, then unzipped it client-side with JSZip just to get back to
+// individual files -- a real "server creates ZIP -> client downloads ZIP
+// -> client unpacks it again" round trip for a case that doesn't need
+// the export's own crop/resize (a carousel's non-cover slides never have
+// a saved crop to begin with, and native share is for getting the images
+// onto the device, not for a distribution-ready composite). Fetching
+// every asset's real original directly is both simpler and matches what
+// the existing single-asset share/download path already does.
+//
+// Returns true if this fully handled the request (shared successfully,
+// or the user dismissed the share sheet themselves) -- the caller should
+// do nothing further. Returns false if native file sharing isn't
+// supported/available for these files, or a non-abort error occurred, so
+// the caller can fall back to its own existing (server-export ZIP)
+// download path -- see post-editor.tsx's own call site.
+export async function shareOriginalAssets(assets: { url: string; filename: string }[]): Promise<boolean> {
+  if (assets.length === 0) return false;
+  const diag = {
+    preferMobileUx: true,
     shareAvailable: typeof navigator !== "undefined" && typeof navigator.share === "function",
     canShareAvailable: typeof navigator !== "undefined" && typeof navigator.canShare === "function",
-  };
-
-  if (entries.length === 1) {
-    const only = entries[0];
-    const diag = {
-      ...baseDiag,
-      fileCount: 1,
-      fileTypes: [] as string[],
-      canShareResult: null as boolean | null,
-      shareAttempted: false,
-      shareError: null as string | null,
-      fallbackUsed: false,
-    };
-    try {
-      const file = new File([only.blob], only.filename, { type: resolveMimeType(only.blob.type, only.filename) });
-      diag.fileTypes = [file.type];
-      diag.canShareResult = await canShareFiles([file]);
-      if (diag.canShareResult) {
-        diag.shareAttempted = true;
-        await navigator.share({ files: [file] });
-        logShareDiagnostic(diag);
-        return;
-      }
-    } catch (error) {
-      diag.shareError = error instanceof Error ? error.name || error.message : String(error);
-      if (error instanceof DOMException && error.name === "AbortError") {
-        logShareDiagnostic(diag);
-        return;
-      }
-    }
-    diag.fallbackUsed = true;
-    logShareDiagnostic(diag);
-    saveAs(only.blob, only.filename);
-    return;
-  }
-
-  const diag = {
-    ...baseDiag,
-    fileCount: entries.length,
+    fileCount: assets.length,
     fileTypes: [] as string[],
     canShareResult: null as boolean | null,
     shareAttempted: false,
@@ -273,30 +241,23 @@ export async function shareOrDownloadZipEntries(
     fallbackUsed: false,
   };
   try {
-    // Individual image Files, never a zip, on the native-share path --
-    // one share call offering every file at once where the browser/OS
-    // supports multi-file Web Share (deliberately not one share call per
-    // file, which on iOS pops a separate share sheet per image -- worse
-    // than a single zip -- and deliberately not the zip itself, which
-    // would hand the user a single .zip in their share targets instead
-    // of individual photos).
-    const files = entries.map((e) => new File([e.blob], e.filename, { type: resolveMimeType(e.blob.type, e.filename) }));
+    const files = await Promise.all(assets.map((a) => fetchAsFile(a.url, a.filename)));
     diag.fileTypes = files.map((f) => f.type);
     diag.canShareResult = await canShareFiles(files);
     if (diag.canShareResult) {
       diag.shareAttempted = true;
       await navigator.share({ files });
       logShareDiagnostic(diag);
-      return;
+      return true;
     }
   } catch (error) {
     diag.shareError = error instanceof Error ? error.name || error.message : String(error);
     if (error instanceof DOMException && error.name === "AbortError") {
       logShareDiagnostic(diag);
-      return;
+      return true;
     }
   }
   diag.fallbackUsed = true;
   logShareDiagnostic(diag);
-  saveAs(zipBlob, zipName);
+  return false;
 }

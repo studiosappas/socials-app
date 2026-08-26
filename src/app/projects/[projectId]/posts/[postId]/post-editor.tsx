@@ -32,9 +32,8 @@ import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { filenameFromUrl, shareOrDownloadAsset, shareOrDownloadZipEntries } from "@/lib/download-zip";
+import { filenameFromUrl, shareOrDownloadAsset, shareOriginalAssets } from "@/lib/download-zip";
 import { saveAs } from "file-saver";
-import JSZip from "jszip";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
@@ -151,6 +150,42 @@ export function PostEditor({
   const [, startTransition] = useTransition();
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Replace's "choose from library" option targets THIS asset for
+  // replacement, then puts the existing "Add from library" section below
+  // into a temporary mode where clicking an item there replaces this asset
+  // instead of appending a new one -- see handleLibraryItemClick. null
+  // means normal (append) behavior; libraryZoneRef wraps that section so
+  // the cancel-on-outside-click effect below can tell a click on a library
+  // item apart from a click anywhere else.
+  const [replaceTarget, setReplaceTarget] = useState<{ postAssetId: string; isCover: boolean } | null>(null);
+  const libraryZoneRef = useRef<HTMLDivElement>(null);
+
+  // Cancels a pending replace-from-library target on Escape or any click
+  // outside the library section itself -- opening a different asset's own
+  // menu/action is itself a click outside that section, so this also
+  // covers "reopening another menu clears it" without needing separate
+  // plumbing. No stale target can survive to silently replace an unrelated
+  // click later: this effect only exists at all while replaceTarget is
+  // set, and clears it (not just closes some UI) the instant either
+  // condition fires.
+  useEffect(() => {
+    if (!replaceTarget) return;
+    function handlePointerDown(e: PointerEvent) {
+      if (libraryZoneRef.current && !libraryZoneRef.current.contains(e.target as Node)) {
+        setReplaceTarget(null);
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setReplaceTarget(null);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [replaceTarget]);
+
   // Optimistic override for the cover crop -- saveMediaAssetAnnotation/
   // saveMediaAssetPosterAnnotation reset posts.cover_transform server-side
   // whenever the edited asset is the cover (position 0); this mirrors that
@@ -260,6 +295,26 @@ export function PostEditor({
     });
   }
 
+  // Replace's "choose from library" click -- just records which asset is
+  // being replaced. The actual replacement happens later, from
+  // handleLibraryItemClick, when the user picks an item in the (already
+  // visible) library section below.
+  function handleChooseFromLibrary(postAssetId: string, isCover: boolean) {
+    setReplaceTarget({ postAssetId, isCover });
+  }
+
+  // The single click handler the "Add from library" section's items now
+  // go through -- branches on whether a replace is pending instead of
+  // AddFromLibrarySection needing two different modes/props of its own.
+  function handleLibraryItemClick(item: MediaLibraryItem) {
+    if (replaceTarget) {
+      handleReplaceFromLibrary(replaceTarget.postAssetId, item, replaceTarget.isCover);
+      setReplaceTarget(null);
+      return;
+    }
+    handleAddFromLibrary(item);
+  }
+
   function handleAnnotationSaved(previewUrl: string) {
     const target = editingImage;
     setOrderedAssets((current) =>
@@ -327,51 +382,37 @@ export function PostEditor({
   async function handleDownloadAll() {
     setDownloading(true);
     try {
-      // Hits the server export route instead of zipping raw source bytes --
-      // this needs real per-asset resizing (1080x1350 cover / 1080x1440
-      // slides) and must apply the user's saved crop, neither of which a
-      // client-side byte-for-byte zip (downloadAssetsAsZip) can do.
+      // Prefer sharing each asset's real ORIGINAL directly (image or
+      // video) as individual native-share Files -- no server export, no
+      // zip, no client-side unzip. This is genuinely simpler than the
+      // previous "fetch the server's crop-applied export zip, then unzip
+      // it client-side just to get individual files back" round trip,
+      // and matches what the single-asset Download/Share action already
+      // does (asset.originalUrl, not a composited export). Only the
+      // COVER (position 0) can ever have a saved crop in this app --
+      // every other carousel slide has none to begin with -- so using
+      // originals here doesn't silently drop anything meaningful for the
+      // common multi-image case this path exists for.
+      //
+      // Deliberately not gated on isTouchDevice -- shareOriginalAssets'
+      // own canShareFiles check is what decides. On a desktop browser
+      // (which essentially never supports canShare({files}) as of
+      // current browser support) this returns false immediately and
+      // falls through to the exact same server-export zip download it
+      // always has.
+      const shareable = orderedAssets
+        .map((a) => a.originalUrl ?? a.url)
+        .filter((url): url is string => !!url)
+        .map((url) => ({ url, filename: filenameFromUrl(url, "asset") }));
+      if (shareable.length > 0 && (await shareOriginalAssets(shareable))) return;
+
+      // Falls back to the server-composited export (crop-applied cover,
+      // canonical per-slide sizing) as a plain zip download -- unchanged
+      // from before, and the only path taken when native file sharing
+      // isn't supported/available for these files.
       const response = await fetch(`/projects/${projectId}/posts/${post.id}/export`);
       if (!response.ok) return;
       const zipBlob = await response.blob();
-      // Unzip the export CLIENT-SIDE (still the same server-composited,
-      // crop-applied bytes -- the zip is only ever the transport format
-      // between server and client here, never something a mobile user is
-      // meant to see or manage) and offer the individual image(s) to the
-      // native share sheet, so a supported browser gets a real "Save
-      // Image"/"Save to Photos" action rather than a .zip landing in
-      // Files/Downloads.
-      //
-      // Deliberately NOT gated on isTouchDevice anymore -- that was a
-      // confirmed real bug: it hard-blocked this whole unzip-and-share
-      // attempt before shareOrDownloadZipEntries's own capability check
-      // (canShareFiles) ever ran, so a device this device-classification
-      // heuristic misclassified (or that simply isn't covered by
-      // `pointer: coarse`) could never reach native share at all,
-      // regardless of whether the browser actually supported it --
-      // exactly matching "Download Media still lands in Files" as a real
-      // Preview report. shareOrDownloadZipEntries's own canShareFiles
-      // check is what actually decides now; on a desktop browser (which
-      // essentially never supports canShare({files}) as of current
-      // browser support) this still resolves to the exact same
-      // saveAs(zipBlob, ...) path it always has, just decided by real
-      // capability instead of a device guess.
-      try {
-        const zip = await JSZip.loadAsync(zipBlob);
-        const entries = await Promise.all(
-          Object.values(zip.files)
-            .filter((f) => !f.dir)
-            .map(async (f) => ({ filename: f.name, blob: await f.async("blob") })),
-        );
-        if (entries.length > 0) {
-          await shareOrDownloadZipEntries(zipBlob, entries, `post-${post.id}-export.zip`, isTouchDevice);
-          return;
-        }
-      } catch (error) {
-        console.error("Failed to unzip export for sharing, falling back to zip download:", error);
-        // Falls through to the plain zip save below -- download must
-        // never end up completely broken because the share path failed.
-      }
       saveAs(zipBlob, `post-${post.id}-export.zip`);
     } finally {
       setDownloading(false);
@@ -438,9 +479,8 @@ export function PostEditor({
                   coverTransform={effectiveCoverTransform}
                   projectId={projectId}
                   postId={post.id}
-                  mediaLibraryPromise={mediaLibraryPromise}
                   onRemove={() => handleRemoveAsset(asset.postAssetId)}
-                  onReplaceFromLibrary={handleReplaceFromLibrary}
+                  onChooseFromLibrary={handleChooseFromLibrary}
                   onEditImage={() =>
                     asset.mediaAssetId &&
                     asset.originalUrl &&
@@ -492,7 +532,7 @@ export function PostEditor({
           disabled={downloading}
           className="w-fit self-start px-6 py-3 text-xs tracking-wide uppercase"
         >
-          {downloading ? "Preparing…" : isTouchDevice ? "Share / Save Media" : "Download Media"}
+          {downloading ? "Preparing…" : isTouchDevice ? "Save Media" : "Download Media"}
         </Button>
       ) : (
         <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
@@ -504,7 +544,9 @@ export function PostEditor({
             mediaLibraryPromise={mediaLibraryPromise}
             usedMediaIds={usedMediaIds}
             hideBackLink={hideBackLink}
-            onAdd={handleAddFromLibrary}
+            onAdd={handleLibraryItemClick}
+            replaceActive={replaceTarget !== null}
+            sectionRef={libraryZoneRef}
           />
         </Suspense>
       )}
@@ -547,25 +589,56 @@ export function PostEditor({
 // only part of the editor that waits on the whole-project media library,
 // instead of that blocking the primary editing surface the way the old
 // single-fetch page did.
+//
+// This is the ONE library-browsing surface Post Editor has -- Replace's
+// own "choose from library" option does not open a second one. It puts
+// THIS section into replace mode instead (replaceActive), which only
+// changes what a click here means (see onAdd/handleLibraryItemClick in
+// PostEditor) and adds a minimal visual cue -- everything else about how
+// this section looks and behaves is exactly what it always was.
 function AddFromLibrarySection({
   mediaLibraryPromise,
   usedMediaIds,
   hideBackLink,
   onAdd,
+  replaceActive,
+  sectionRef,
 }: {
   mediaLibraryPromise: Promise<MediaLibraryItem[]>;
   usedMediaIds: Set<string>;
   hideBackLink: boolean;
   onAdd: (item: MediaLibraryItem) => void;
+  replaceActive: boolean;
+  sectionRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const mediaLibrary = use(mediaLibraryPromise);
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
+  // Scrolls this section into view the instant replace mode activates --
+  // scrollIntoView's own "nearest" block option is a no-op when the
+  // element is already fully visible, so this never yanks the page around
+  // for a target that's already on screen, only nudges it into view when
+  // it's genuinely (partially) off-screen.
+  useEffect(() => {
+    if (replaceActive) sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replaceActive]);
+
   if (availableMedia.length === 0) return null;
 
   return (
-    <section className="flex flex-col gap-2">
-      <span className={labelClass}>Add from library</span>
+    <section
+      ref={sectionRef}
+      // ring, not border -- doesn't consume layout space, so no shift when
+      // it fades in/out. Deliberately just a steady, subtle ring (no
+      // looping animation) fading in over 300ms: enough to catch the eye
+      // once without an ongoing pulse competing for attention the whole
+      // time a decision is being made.
+      className={`flex flex-col gap-2 rounded-none ring-2 ring-inset transition-shadow duration-300 ${
+        replaceActive ? "ring-foreground/30" : "ring-transparent"
+      }`}
+    >
+      <span className={labelClass}>{replaceActive ? "Choose a replacement" : "Add from library"}</span>
       {/* grid-cols-4 (mobile) vs sm:grid-cols-6 (unchanged -- desktop stays
           exactly as it was). Row height stays an EXPLICIT value (no
           per-item aspect-ratio on mobile) for the same reason established
@@ -669,10 +742,9 @@ function SortableAsset({
   coverTransform,
   projectId,
   postId,
-  mediaLibraryPromise,
   onRemove,
   onEditImage,
-  onReplaceFromLibrary,
+  onChooseFromLibrary,
 }: {
   asset: PostAssetItem;
   canManage: boolean;
@@ -680,10 +752,14 @@ function SortableAsset({
   coverTransform: GridCoverTransform | null;
   projectId: string;
   postId: string;
-  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
   onRemove: () => void;
   onEditImage: () => void;
-  onReplaceFromLibrary: (postAssetId: string, item: MediaLibraryItem, isCover: boolean) => void;
+  // Replace's "choose from library" option no longer opens its own
+  // duplicate library grid -- it hands the target identity up to
+  // PostEditor, which puts the ALREADY-VISIBLE "Add from library"
+  // section into a temporary replace-target mode instead. See PostEditor's
+  // own replaceTarget state.
+  onChooseFromLibrary: (postAssetId: string, isCover: boolean) => void;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -842,7 +918,7 @@ function SortableAsset({
                 disabled={downloading}
                 className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
               >
-                {downloading ? "Downloading..." : isTouchDevice ? "Share / Save" : "Download"}
+                {downloading ? "Downloading..." : isTouchDevice ? "Save" : "Download"}
               </button>
               <button
                 type="button"
@@ -868,24 +944,15 @@ function SortableAsset({
         />
       )}
       {replaceOpen && (
-        // Its own boundary -- only mounts when the user explicitly opens
-        // Replace (several clicks into the editor), by which point
-        // mediaLibraryPromise -- kicked off back when the page itself
-        // started rendering -- has almost always already resolved, so this
-        // fallback is rarely if ever seen in practice.
-        <Suspense fallback={null}>
-          <ReplaceAssetPopover
-            projectId={projectId}
-            postId={postId}
-            postAssetId={asset.postAssetId}
-            mediaLibraryPromise={mediaLibraryPromise}
-            excludeMediaAssetId={asset.mediaAssetId}
-            isCover={isCover}
-            onReplaceFromLibrary={onReplaceFromLibrary}
-            anchorRef={tileRef}
-            onClose={() => setReplaceOpen(false)}
-          />
-        </Suspense>
+        <ReplaceMenu
+          projectId={projectId}
+          postId={postId}
+          postAssetId={asset.postAssetId}
+          isCover={isCover}
+          onChooseFromLibrary={onChooseFromLibrary}
+          anchorRef={tileRef}
+          onClose={() => setReplaceOpen(false)}
+        />
       )}
     </div>
   );
@@ -893,38 +960,40 @@ function SortableAsset({
 
 // Swap this frame's media in place -- upload a new file, or pick an
 // existing library asset -- rather than the old delete-then-re-add, which
-// lost carousel position and any per-asset crop. Direct action calls +
-// startTransition (not useActionState) since "pick a library thumbnail" and
-// "pick a file" both need to invoke the same action with differently-built
-// FormData, not a single <form> submit.
+// lost carousel position and any per-asset crop.
+//
+// Deliberately minimal: exactly two choices, no embedded library grid of
+// its own. An earlier version of this menu additionally rendered a small
+// duplicate "pick from library" thumbnail grid inline -- redundant with
+// the already-visible, already-larger "Add from library" section further
+// down this same editor, and confusing for offering two different-looking
+// ways to browse the same library at once. "Choose from library" here
+// instead hands the target identity up to PostEditor (onChooseFromLibrary)
+// and closes; PostEditor puts the EXISTING section into a temporary
+// replace-target mode instead of this menu duplicating it.
 //
 // Rendered via a portal at a fixed, viewport-clamped position computed from
 // anchorRef, instead of position:absolute inside the asset strip -- that
 // strip sets overflow-x-auto (for horizontal scrolling), which per the CSS
 // overflow spec forces its overflow-y to auto too, clipping an
 // absolutely-positioned popover that opens below its ~106px-tall row.
-function ReplaceAssetPopover({
+function ReplaceMenu({
   projectId,
   postId,
   postAssetId,
-  mediaLibraryPromise,
-  excludeMediaAssetId,
   isCover,
-  onReplaceFromLibrary,
+  onChooseFromLibrary,
   anchorRef,
   onClose,
 }: {
   projectId: string;
   postId: string;
   postAssetId: string;
-  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
-  excludeMediaAssetId: string;
   isCover: boolean;
-  onReplaceFromLibrary: (postAssetId: string, item: MediaLibraryItem, isCover: boolean) => void;
+  onChooseFromLibrary: (postAssetId: string, isCover: boolean) => void;
   anchorRef: React.RefObject<HTMLElement | null>;
   onClose: () => void;
 }) {
-  const mediaLibrary = use(mediaLibraryPromise).filter((m) => m.id !== excludeMediaAssetId);
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [pending, setPending] = useState(false);
@@ -1006,17 +1075,6 @@ function ReplaceAssetPopover({
     runReplace(formData);
   }
 
-  // Optimistic -- unlike the file-upload path below, the picked item's
-  // url/mediaType are already known client-side (it's from the already-
-  // loaded media library), so this applies the swap immediately via the
-  // parent's onReplaceFromLibrary and closes right away instead of waiting
-  // on replacePostAsset's round trip. The parent handles rollback + a toast
-  // if the save actually fails.
-  function handlePickLibrary(item: MediaLibraryItem) {
-    onReplaceFromLibrary(postAssetId, item, isCover);
-    onClose();
-  }
-
   if (!position) return null;
 
   return createPortal(
@@ -1056,29 +1114,17 @@ function ReplaceAssetPopover({
       >
         {pending ? "Replacing…" : "Upload new file"}
       </button>
-      {mediaLibrary.length > 0 && (
-        <>
-          <p className="mb-1 mt-1.5 px-2 text-[10px] tracking-wide text-muted uppercase">Or choose from library</p>
-          <div className="grid max-h-40 grid-cols-4 gap-1 overflow-y-auto">
-            {mediaLibrary.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => handlePickLibrary(item)}
-                className="aspect-square min-w-0 overflow-hidden rounded-none border border-border transition-colors duration-150 hover:border-foreground/30 disabled:opacity-60"
-              >
-                {item.url && item.mediaType === "image" && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.url} alt="" className="h-full w-full object-cover" />
-                )}
-                {item.url && item.mediaType === "video" && (
-                  <video src={item.url} className="h-full w-full object-cover" muted />
-                )}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
+      <button
+        type="button"
+        onClick={() => {
+          onChooseFromLibrary(postAssetId, isCover);
+          onClose();
+        }}
+        disabled={pending}
+        className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
+      >
+        Choose from library
+      </button>
       {error && <p className="mt-1 px-2 text-xs text-error">{error}</p>}
     </div>,
     document.body,
