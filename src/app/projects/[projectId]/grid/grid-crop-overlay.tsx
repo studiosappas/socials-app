@@ -1,125 +1,252 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { GridCoverTransform } from "./grid-board";
 import { GRID_SLOT_ASPECT_RATIO } from "./grid-constants";
+import {
+  clampNum,
+  clampOffsetPx,
+  coverBaseScale,
+  coverageSlackPx,
+  minZoomForCoverage,
+  normalizeRotationDeg,
+} from "@/lib/crop-geometry";
 
 const MAX_ZOOM = 4;
+// The editing frame is always exactly 4:5 (the Grid's own output ratio --
+// see grid-constants.ts) regardless of how the anchor tile that opened it
+// is shaped: Post Editor's own asset strip renders every tile (including
+// the cover) at 3:4 for a consistent carousel-thumbnail row, but the
+// cover's actual OUTPUT is still 4:5, so the crop frame here must be 4:5
+// too, not whatever ratio the anchor happens to be.
+const MIN_EDIT_WIDTH = 260;
+const VIEWPORT_FRACTION = 0.86;
+// Clearance kept between the editor and the viewport edge -- the rotate
+// handle sits above the frame, the Save/Cancel bar and corner handles sit
+// below/around it, all outside the frame's own box.
+const TOP_MARGIN = 56;
+const BOTTOM_MARGIN = 48;
+const SIDE_MARGIN = 24;
 
 const CORNERS = ["tl", "tr", "bl", "br"] as const;
 type Corner = (typeof CORNERS)[number];
 
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
+type FrameGeom = { width: number; height: number; centerX: number; centerY: number };
+type NaturalSize = { w: number; h: number };
+
+function pointerAngleDeg(clientX: number, clientY: number, cx: number, cy: number): number {
+  return Math.atan2(clientY - cy, clientX - cx) * (180 / Math.PI);
 }
 
-function normalizeRotation(rotation: number | undefined): 0 | 90 | 180 | 270 {
-  const r = (((rotation ?? 0) % 360) + 360) % 360;
-  return r === 90 || r === 180 || r === 270 ? r : 0;
+// Loads (or reads, if already cached/decoded) an image's true natural
+// pixel dimensions -- the crop model needs the REAL source resolution,
+// not whatever size it happens to be displayed at, since that's exactly
+// what the old object-fit:cover approach got wrong (it only ever knew
+// about the display box). A plain `new Image()` here (not a ref off one
+// of the rendered <img> elements) sidesteps the "the load event may have
+// already fired before a listener could attach" race for an
+// already-cached image -- `.complete` is checked immediately as a
+// fallback for that same case.
+function useNaturalSize(src: string): NaturalSize | null {
+  const [size, setSize] = useState<NaturalSize | null>(null);
+  useEffect(() => {
+    // Resets to "loading" for a NEW src, not a state mutation driven by
+    // some other piece of React state -- src itself is the effect's only
+    // dependency, so this is synchronizing with an external resource
+    // (image decode), not cascading off other component state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSize(null);
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (!cancelled && img.naturalWidth && img.naturalHeight) {
+        setSize({ w: img.naturalWidth, h: img.naturalHeight });
+      }
+    };
+    img.src = src;
+    if (img.complete && img.naturalWidth && img.naturalHeight) {
+      setSize({ w: img.naturalWidth, h: img.naturalHeight });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  return size;
 }
 
-// The minimum zoom that still guarantees full coverage of the (non-square,
-// 4:5) crop viewport, for a given rotation. At 0/180 the image's own
-// object-fit:cover sizing already exactly covers the box at zoom=1 (the
-// existing, unchanged behavior). At 90/270 the image's effective footprint
-// is rotated 90 degrees relative to the box -- a rectangle that exactly
-// covers a W x H box at zoom 1 does NOT cover that same box once rotated
-// 90 degrees around its own center (its short side is now aligned with the
-// box's long side); the exact scale-up needed to close that gap is the
-// box's own aspect ratio inverted. Derived, not approximated: for a 4:5 box
-// this is exactly 1.25.
-function minZoomForRotation(rotation: number): number {
-  const r = normalizeRotation(rotation);
-  return r === 90 || r === 270 ? 1 / GRID_SLOT_ASPECT_RATIO : 1;
+// Measures the anchor tile's on-screen position (to center the editor
+// over it) and derives the editing frame's OWN size from it -- enlarged
+// up to a comfortable minimum (Grid tiles and, especially, Post Editor's
+// 96px-wide asset strip tiles are both far too small to drag/rotate
+// against directly) and capped against the viewport. Re-measured on
+// resize (window resize/orientation change) while the editor is open;
+// body scroll is locked for the same duration specifically so this
+// fixed-position anchor can't silently drift out from under the tile it
+// was opened on.
+function useEditFrame(anchorRef: React.RefObject<HTMLElement | null>): FrameGeom | null {
+  const [frame, setFrame] = useState<FrameGeom | null>(null);
+  useLayoutEffect(() => {
+    let rafId: number | null = null;
+    let cancelled = false;
+    let retriesLeft = 10;
+    function recompute() {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (!rect) {
+        // The anchor's own ref callback can momentarily read null the
+        // instant Crop opens -- every sibling slot re-renders on the same
+        // interaction-mode change that opens this editor (a shared
+        // reducer flag each GridSlot reads), and a fresh inline ref
+        // callback on each of THEIR re-renders makes React detach-then-
+        // reattach every one of those refs within that same commit. This
+        // never reflects a real unmount (confirmed live: the same slot's
+        // ref is attached again one frame later) -- retrying via
+        // requestAnimationFrame rides past that single-frame window
+        // instead of the editor silently never opening. Bounded so a
+        // genuinely-gone anchor (the slot itself removed mid-gesture)
+        // doesn't retry forever.
+        if (!cancelled && retriesLeft > 0) {
+          retriesLeft -= 1;
+          rafId = requestAnimationFrame(recompute);
+        }
+        return;
+      }
+      const maxW = Math.min(window.innerWidth * VIEWPORT_FRACTION, window.innerHeight * VIEWPORT_FRACTION * GRID_SLOT_ASPECT_RATIO);
+      const width = clampNum(Math.max(rect.width, MIN_EDIT_WIDTH), 160, Math.max(160, maxW));
+      const height = width / GRID_SLOT_ASPECT_RATIO;
+      // Clamp the center so the editor -- including the rotate handle
+      // above the frame and the Save/Cancel bar below it, both outside
+      // the frame's own box -- stays fully on screen even when the
+      // anchor tile sits right at the viewport's edge (e.g. the top row
+      // of the Grid, with little to no space above it).
+      const centerX = clampNum(rect.left + rect.width / 2, width / 2 + SIDE_MARGIN, window.innerWidth - width / 2 - SIDE_MARGIN);
+      const centerY = clampNum(
+        rect.top + rect.height / 2,
+        height / 2 + TOP_MARGIN,
+        window.innerHeight - height / 2 - BOTTOM_MARGIN,
+      );
+      setFrame({ width, height, centerX, centerY });
+    }
+    recompute();
+    window.addEventListener("resize", recompute);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      cancelled = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("resize", recompute);
+      document.body.style.overflow = prevOverflow;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return frame;
 }
 
-// Converts a raw screen-space pan delta (as a fraction of the container)
-// into the delta to apply to the image's OWN local (pre-rotation) offset.
-// The CSS transform applies scale+translate in the image's local space
-// FIRST, then rotate around the box center LAST (see imageStyle below) --
-// so at 90/270, a local-space translate ends up pointing sideways on
-// screen unless it's first rotated by the inverse of the current rotation.
-// Only ever called with rotation in {0,90,180,270}, so this is an exact
-// lookup, not trig with floating-point error.
-function rotateScreenDeltaToLocal(dxFrac: number, dyFrac: number, rotation: number) {
-  switch (normalizeRotation(rotation)) {
-    case 90:
-      return { dx: dyFrac, dy: -dxFrac };
-    case 180:
-      return { dx: -dxFrac, dy: -dyFrac };
-    case 270:
-      return { dx: -dyFrac, dy: dxFrac };
-    default:
-      return { dx: dxFrac, dy: dyFrac };
-  }
-}
-
-// Offsets are stored as fractions of the tile's own width/height (not raw
-// pixels), so a saved crop renders identically regardless of the tile's
-// actual on-screen size (responsive grid columns, export compositing, etc).
+// The 4:5 Grid slot is a FIXED OUTPUT VIEWPORT, not the source image's own
+// bounding box -- the source can (and, for anything not already 4:5,
+// always does) extend beyond it above/below/left/right. This editor's
+// whole structure exists to make that true: the image is rendered at its
+// own natural-aspect-ratio "base cover" size (naturalW/H * baseScale,
+// computed once real pixel dimensions are known -- see useNaturalSize/
+// useEditFrame above), NOT force-fit into a frame-sized box via
+// object-fit, so panning/zooming/rotating can reveal or hide any part of
+// the actual source pixels instead of manipulating an already-discarded
+// crop. Rendered via a portal (not inline in the Grid tile) so the parts
+// of the image extending past the frame have room to actually be visible
+// on screen instead of being clipped by the tile's own small box or any
+// ancestor's overflow -- see the audit notes in this round's report for
+// exactly where the old inline approach was silently discarding pixels.
+//
+// Canonical transform order (must match lib/image-crop.ts's server-side
+// pipeline exactly): scale -> rotate around the image's own center ->
+// translate in viewport/world pixels. Translate is OUTERMOST specifically
+// so a screen-pixel drag always moves the image in the same screen
+// direction regardless of the current rotation (no rotation-aware delta
+// conversion needed for panning, unlike the previous 90-degree-only
+// implementation).
 export function GridCropOverlay({
   imageUrl,
   initialTransform,
   onSave,
   onCancel,
+  anchorRef,
 }: {
   imageUrl: string;
   initialTransform: GridCoverTransform | null;
   onSave: (transform: GridCoverTransform) => void;
   onCancel: () => void;
+  anchorRef: React.RefObject<HTMLElement | null>;
 }) {
-  const [rotation, setRotation] = useState<number>(normalizeRotation(initialTransform?.rotation));
-  const [zoom, setZoom] = useState(
-    Math.max(initialTransform?.scale ?? 1, minZoomForRotation(normalizeRotation(initialTransform?.rotation))),
-  );
-  const [offset, setOffset] = useState({ x: initialTransform?.x ?? 0, y: initialTransform?.y ?? 0 });
-  const containerRef = useRef<HTMLDivElement>(null);
-  // containerWidth/Height and cx/cy below are captured once per gesture
-  // (at pointerdown) instead of being recomputed from a fresh
-  // getBoundingClientRect() on every pointermove -- the tile's on-screen
-  // size is fixed for the whole gesture (only the CSS transform inside it
-  // changes, which doesn't affect layout), so a fresh read every move was
-  // forcing a synchronous layout reflow for no reason, on every single
-  // pointer event during the pan/zoom.
-  const panRef = useRef<{
-    startX: number;
-    startY: number;
-    startOffset: { x: number; y: number };
-    containerWidth: number;
-    containerHeight: number;
-  } | null>(null);
-  const handleDragRef = useRef<{
-    startDist: number;
-    startZoom: number;
-    startOffset: { x: number; y: number };
-    cx: number;
-    cy: number;
-  } | null>(null);
+  const frame = useEditFrame(anchorRef);
+  const natural = useNaturalSize(imageUrl);
+  const ready = frame !== null && natural !== null;
 
-  // Refs mirror the latest committable state and callbacks so the
-  // document-level "click outside commits" listener (registered once on
-  // mount) always reads current values without needing to re-subscribe on
-  // every drag update.
+  const [rotation, setRotation] = useState<number>(normalizeRotationDeg(initialTransform?.rotation));
+  const [zoom, setZoom] = useState<number>(initialTransform?.scale ?? 1);
+  const [offset, setOffset] = useState<{ x: number; y: number }>({ x: initialTransform?.x ?? 0, y: initialTransform?.y ?? 0 });
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<{ startClientX: number; startClientY: number; startOffsetPx: { x: number; y: number } } | null>(null);
+  const cornerRef = useRef<{ startDist: number; startZoom: number; startOffset: { x: number; y: number } } | null>(null);
+  const rotateRef = useRef<{ lastAngle: number } | null>(null);
+
+  const baseScale = ready ? coverBaseScale(frame.width, frame.height, natural.w, natural.h) : 1;
+  // Storage unit: offset.x/y are fractions of the image's OWN base-cover
+  // size (naturalW*baseScale, naturalH*baseScale) -- not of the frame.
+  // This is what lets the exact same stored number reproduce identical
+  // framing at any frame pixel size (this small editing stage, a Grid
+  // thumbnail, a 1080px export): baseScale is recomputed fresh wherever
+  // it's rendered, so the normalization cancels out consistently
+  // everywhere. See lib/image-crop.ts's matching comment.
+  const imgW = ready ? natural.w * baseScale : 0;
+  const imgH = ready ? natural.h * baseScale : 0;
+
+  function toPx(stored: { x: number; y: number }) {
+    return { x: stored.x * imgW, y: stored.y * imgH };
+  }
+  function toStored(px: { x: number; y: number }) {
+    return { x: imgW === 0 ? 0 : px.x / imgW, y: imgH === 0 ? 0 : px.y / imgH };
+  }
+  function clampStoredOffset(stored: { x: number; y: number }, rotationDeg: number, zoomVal: number) {
+    if (!ready) return stored;
+    const w = imgW * zoomVal;
+    const h = imgH * zoomVal;
+    const { slackX, slackY } = coverageSlackPx(rotationDeg, w / 2, h / 2, frame!.width / 2, frame!.height / 2);
+    return toStored(clampOffsetPx(toPx(stored), rotationDeg, slackX, slackY));
+  }
+
+  // Whenever the frame's own pixel size changes (mount, or a window
+  // resize while the editor happens to stay open), re-derive the
+  // rotation-aware coverage floor and re-clamp -- defensive, not a reset:
+  // this only ever RAISES zoom if the new geometry demands it and only
+  // ever pulls offset back INSIDE newly-valid bounds, never zeroes either.
+  useEffect(() => {
+    if (!ready) return;
+    const minZ = minZoomForCoverage(frame.width, frame.height, natural.w, natural.h, rotation);
+    const nextZoom = Math.max(zoom, minZ);
+    // Defensive re-clamp against a geometry change (mount, or a window
+    // resize while the editor happens to stay open) -- not a response to
+    // other React state, so this is the effect's own job, not something
+    // to hoist into render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (nextZoom !== zoom) setZoom(nextZoom);
+    const clamped = clampStoredOffset(offset, rotation, nextZoom);
+    if (clamped.x !== offset.x || clamped.y !== offset.y) setOffset(clamped);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frame, natural]);
+
   const latestTransformRef = useRef<GridCoverTransform>({ scale: zoom, x: offset.x, y: offset.y, rotation });
   const onSaveRef = useRef(onSave);
   const onCancelRef = useRef(onCancel);
   useEffect(() => {
-    latestTransformRef.current = { scale: zoom, x: offset.x, y: offset.y, rotation };
+    latestTransformRef.current = { scale: zoom, x: offset.x, y: offset.y, rotation: normalizeRotationDeg(rotation) };
     onSaveRef.current = onSave;
     onCancelRef.current = onCancel;
   });
 
-  function clampOffset(next: { x: number; y: number }, z: number) {
-    const maxOffset = (z - 1) / 2;
-    return {
-      x: clamp(next.x, -maxOffset, maxOffset),
-      y: clamp(next.y, -maxOffset, maxOffset),
-    };
-  }
-
-  // Crop mode is inline (no popup/backdrop), so "click elsewhere on the
-  // page" is what commits it -- tracked via a document listener rather than
-  // a backdrop element.
+  // Crop mode is inline (no popup/backdrop click handler needed of its
+  // own), so "click elsewhere on the page" -- including the portal's own
+  // backdrop, which sits outside containerRef -- is what commits it.
   useEffect(() => {
     function handleDocPointerDown(e: PointerEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -138,53 +265,22 @@ export function GridCropOverlay({
   }, []);
 
   function commit() {
-    onSave({ scale: zoom, x: offset.x, y: offset.y, rotation });
-  }
-
-  // Rotates 90 degrees clockwise, cycling 0->90->180->270->0. Free/
-  // arbitrary rotation was deliberately not implemented: it would need the
-  // cover-fit scale, the minimum-zoom-to-avoid-corners, AND the pan-bounds
-  // clamp to all become real trigonometry, reproduced IDENTICALLY on the
-  // server (lib/image-crop.ts, sharp) for exports -- a real correctness
-  // risk to get pixel-perfect and bug-free versus a fixed 90-degree step,
-  // where sharp's own `.rotate(90|180|270)` is exact and lossless with no
-  // interpolation, and the client math is a clean 4-value lookup instead
-  // of floating-point sin/cos. A reliable rotation interaction beats a
-  // fragile arbitrary-angle one -- see this file's own header comment.
-  function handleRotate() {
-    const next = normalizeRotation(rotation + 90);
-    const nextMinZoom = minZoomForRotation(next);
-    const nextZoom = Math.max(zoom, nextMinZoom);
-    setRotation(next);
-    setZoom(nextZoom);
-    setOffset((current) => clampOffset(current, nextZoom));
+    onSave({ scale: zoom, x: offset.x, y: offset.y, rotation: normalizeRotationDeg(rotation) });
   }
 
   function handleImagePointerDown(e: React.PointerEvent<HTMLImageElement>) {
     e.preventDefault();
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
-    const rect = containerRef.current?.getBoundingClientRect();
-    panRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      startOffset: offset,
-      containerWidth: rect?.width ?? 1,
-      containerHeight: rect?.height ?? 1,
-    };
+    panRef.current = { startClientX: e.clientX, startClientY: e.clientY, startOffsetPx: toPx(offset) };
   }
 
   function handleImagePointerMove(e: React.PointerEvent<HTMLImageElement>) {
-    if (!panRef.current) return;
-    const dxFrac = (e.clientX - panRef.current.startX) / panRef.current.containerWidth;
-    const dyFrac = (e.clientY - panRef.current.startY) / panRef.current.containerHeight;
-    const local = rotateScreenDeltaToLocal(dxFrac, dyFrac, rotation);
-    setOffset(
-      clampOffset(
-        { x: panRef.current.startOffset.x + local.dx, y: panRef.current.startOffset.y + local.dy },
-        zoom,
-      ),
-    );
+    if (!panRef.current || !ready) return;
+    const dx = e.clientX - panRef.current.startClientX;
+    const dy = e.clientY - panRef.current.startClientY;
+    const rawPx = { x: panRef.current.startOffsetPx.x + dx, y: panRef.current.startOffsetPx.y + dy };
+    setOffset(clampStoredOffset(toStored(rawPx), rotation, zoom));
   }
 
   function handleImagePointerUp(e: React.PointerEvent<HTMLImageElement>) {
@@ -192,152 +288,210 @@ export function GridCropOverlay({
     panRef.current = null;
   }
 
-  // Corner handles scale the image uniformly around the tile's center --
-  // dragging outward enlarges it, dragging inward shrinks it, exactly like
-  // Canva's image-crop handles (the frame itself never moves or resizes).
-  // Radial distance-from-center is rotation-agnostic, so this needs no
-  // rotation-aware adjustment the way panning does.
+  // Corner handles scale the image uniformly around the frame's center --
+  // dragging outward enlarges it, dragging inward shrinks it (the frame
+  // itself never moves or resizes). Radial distance-from-center is
+  // rotation-agnostic, so this needs no rotation-aware adjustment the way
+  // panning does.
   function handleCornerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const startDist = Math.hypot(e.clientX - cx, e.clientY - cy);
-    handleDragRef.current = { startDist, startZoom: zoom, startOffset: offset, cx, cy };
+    if (!frame) return;
+    const startDist = Math.hypot(e.clientX - frame.centerX, e.clientY - frame.centerY);
+    cornerRef.current = { startDist, startZoom: zoom, startOffset: offset };
   }
 
   function handleCornerPointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (!handleDragRef.current) return;
-    const { cx, cy } = handleDragRef.current;
-    const dist = Math.hypot(e.clientX - cx, e.clientY - cy);
-    const ratio = dist / handleDragRef.current.startDist;
-    const nextZoom = clamp(handleDragRef.current.startZoom * ratio, minZoomForRotation(rotation), MAX_ZOOM);
+    if (!cornerRef.current || !frame || !ready) return;
+    const dist = Math.hypot(e.clientX - frame.centerX, e.clientY - frame.centerY);
+    const ratio = dist / cornerRef.current.startDist;
+    const minZ = minZoomForCoverage(frame.width, frame.height, natural.w, natural.h, rotation);
+    const nextZoom = clampNum(cornerRef.current.startZoom * ratio, minZ, MAX_ZOOM);
     setZoom(nextZoom);
-    setOffset(clampOffset(handleDragRef.current.startOffset, nextZoom));
+    setOffset(clampStoredOffset(cornerRef.current.startOffset, rotation, nextZoom));
   }
 
   function handleCornerPointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (handleDragRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
-    handleDragRef.current = null;
+    if (cornerRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
+    cornerRef.current = null;
   }
 
-  // rotate() is the OUTERMOST transform (applied last, around the box's own
-  // center by default) -- scale+translate happen first, in the image's own
-  // local space, exactly matching lib/image-crop.ts's server-side order
-  // (rotate the source pixels first, then run the existing crop math
-  // against the rotated buffer).
+  // Freeform rotation: pointer-down on the handle, then every move
+  // computes the pointer's current angle around the frame center and
+  // accumulates the INCREMENTAL step onto the running rotation (not the
+  // absolute angle from a fixed start) -- atan2 itself wraps at +-180
+  // degrees, so diffing against a fixed start angle would produce a
+  // visible ~360-degree snap the instant the pointer crosses that
+  // boundary mid-drag. Accumulating steps (each individually normalized
+  // into (-180,180]) instead lets rotation move continuously through
+  // multiple full turns with no discontinuity, and the running value is
+  // only normalized for storage/display, not mid-gesture.
+  function handleRotateHandlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (!frame) return;
+    rotateRef.current = { lastAngle: pointerAngleDeg(e.clientX, e.clientY, frame.centerX, frame.centerY) };
+  }
+
+  function handleRotateHandlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!rotateRef.current || !frame || !ready) return;
+    const angle = pointerAngleDeg(e.clientX, e.clientY, frame.centerX, frame.centerY);
+    let step = angle - rotateRef.current.lastAngle;
+    if (step > 180) step -= 360;
+    if (step <= -180) step += 360;
+    rotateRef.current.lastAngle = angle;
+    const nextRotation = rotation + step;
+    const minZ = minZoomForCoverage(frame.width, frame.height, natural.w, natural.h, nextRotation);
+    // Only ever bumped UP to whatever this new angle requires, never
+    // ratcheted back down -- a zoom the user chose above the old floor
+    // stays exactly as chosen when rotating back toward a less
+    // restrictive angle.
+    const nextZoom = Math.max(zoom, minZ);
+    setRotation(nextRotation);
+    setZoom(nextZoom);
+    setOffset(clampStoredOffset(offset, nextRotation, nextZoom));
+  }
+
+  function handleRotateHandlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (rotateRef.current) e.currentTarget.releasePointerCapture(e.pointerId);
+    rotateRef.current = null;
+  }
+
+  if (!ready || !frame) return null;
+
   const imageStyle: React.CSSProperties = {
-    transform: `rotate(${rotation}deg) translate(${offset.x * 100}%, ${offset.y * 100}%) scale(${zoom})`,
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    width: imgW,
+    height: imgH,
+    cursor: "move",
+    touchAction: "none",
+    transform: `translate(-50%, -50%) translate(${offset.x * imgW}px, ${offset.y * imgH}px) rotate(${rotation}deg) scale(${zoom})`,
   };
 
-  return (
-    <div
-      ref={containerRef}
-      className="absolute inset-0 z-20"
-      onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        commit();
-      }}
-    >
-      {/* Dimmed, unclipped copy shows the full image so the part outside the
-          frame stays visible as context, exactly like Canva's crop tool. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={imageUrl}
-        alt=""
-        draggable={false}
-        onPointerDown={handleImagePointerDown}
-        onPointerMove={handleImagePointerMove}
-        onPointerUp={handleImagePointerUp}
-        className="absolute inset-0 h-full w-full cursor-move touch-none object-cover opacity-40"
-        style={imageStyle}
-      />
-      {/* Full-opacity copy, clipped to the frame -- this is the actual crop. */}
-      <div className="absolute inset-0 overflow-hidden">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={imageUrl}
-          alt=""
-          draggable={false}
-          onPointerDown={handleImagePointerDown}
-          onPointerMove={handleImagePointerMove}
-          onPointerUp={handleImagePointerUp}
-          className="absolute inset-0 h-full w-full cursor-move touch-none object-cover"
-          style={imageStyle}
-        />
-      </div>
-      <div className="pointer-events-none absolute inset-0 border-2 border-foreground" />
-      {CORNERS.map((corner) => (
-        <CornerHandle
-          key={corner}
-          corner={corner}
-          onPointerDown={handleCornerPointerDown}
-          onPointerMove={handleCornerPointerMove}
-          onPointerUp={handleCornerPointerUp}
-        />
-      ))}
-      {/* Explicit, visible Confirm/Cancel/Rotate -- double-click-to-save and
-          click-outside-to-save/Escape-to-cancel all still work (kept for
-          anyone used to that gesture), but neither was ever a DISCOVERABLE
-          way to exit this editor, and this tile's own kebab menu -- the one
-          other control someone might reach for -- sits directly underneath
-          this overlay's z-20 (confirmed live: elementFromPoint at the
-          kebab's own coordinates returns this overlay's pan image while
-          cropping, not the button). A real user with no visible way out
-          reads as "stuck" regardless of what the invisible gestures
-          technically do. stopPropagation on pointerdown here isn't
-          strictly needed (dnd-kit's listeners are already withheld from the
-          tile for the whole time this overlay is mounted -- see GridSlot's
-          own {...attributes,...listeners} gate), but costs nothing and
-          keeps this component correct even if used somewhere without that
-          guarantee. */}
+  return createPortal(
+    <>
+      {/* Backdrop -- deliberately outside containerRef, so a click here
+          registers as "outside" via the document listener above and
+          commits, same as clicking anywhere else off the editor. */}
+      <div className="fixed inset-0 z-[100] bg-background/70" />
       <div
-        className="absolute inset-x-0 bottom-2 z-10 flex items-center justify-center gap-2"
-        onPointerDown={(e) => e.stopPropagation()}
+        ref={containerRef}
+        className="fixed z-[101]"
+        style={{ left: frame.centerX, top: frame.centerY }}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          commit();
+        }}
       >
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onCancel();
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: frame.width,
+            height: frame.height,
+            transform: "translate(-50%, -50%)",
           }}
-          className="rounded-none border border-background/40 bg-background/90 px-3 py-1.5 text-xs tracking-wide text-foreground uppercase shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:bg-background"
         >
-          Cancel
-        </button>
-        <button
-          type="button"
-          title="Rotate 90°"
-          onClick={(e) => {
-            e.stopPropagation();
-            handleRotate();
-          }}
-          className="flex items-center justify-center rounded-none border border-background/40 bg-background/90 p-1.5 text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:bg-background"
-        >
-          <RotateIcon className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            commit();
-          }}
-          className="rounded-none border border-foreground bg-foreground px-3 py-1.5 text-xs tracking-wide text-background uppercase shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:opacity-90"
-        >
-          Save
-        </button>
+          {/* Dimmed, unclipped copy -- shows the source extending past the
+              frame (above/below for portrait, left/right for landscape)
+              exactly as it exists, not a pre-clipped remnant of it. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imageUrl}
+            alt=""
+            draggable={false}
+            onPointerDown={handleImagePointerDown}
+            onPointerMove={handleImagePointerMove}
+            onPointerUp={handleImagePointerUp}
+            className="opacity-35"
+            style={imageStyle}
+          />
+          {/* Full-opacity copy, clipped to the frame -- this is the actual
+              crop; overflow-hidden lives on this wrapper only. */}
+          <div className="absolute inset-0 overflow-hidden">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={imageUrl}
+              alt=""
+              draggable={false}
+              onPointerDown={handleImagePointerDown}
+              onPointerMove={handleImagePointerMove}
+              onPointerUp={handleImagePointerUp}
+              style={imageStyle}
+            />
+          </div>
+          <div className="pointer-events-none absolute inset-0 border-2 border-foreground" />
+          {CORNERS.map((corner) => (
+            <CornerHandle
+              key={corner}
+              corner={corner}
+              onPointerDown={handleCornerPointerDown}
+              onPointerMove={handleCornerPointerMove}
+              onPointerUp={handleCornerPointerUp}
+            />
+          ))}
+          {/* Rotation handle -- grab and drag freely around the frame
+              center for continuous 0-360 degree rotation (see the
+              handlers above for the angle-accumulation math). Pointer
+              Events throughout, so this works with mouse and touch alike. */}
+          <div
+            className="absolute left-1/2 top-0 z-10 flex -translate-x-1/2 -translate-y-full flex-col items-center"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div
+              onPointerDown={handleRotateHandlePointerDown}
+              onPointerMove={handleRotateHandlePointerMove}
+              onPointerUp={handleRotateHandlePointerUp}
+              title="Drag to rotate"
+              className="flex h-7 w-7 touch-none cursor-grab items-center justify-center active:cursor-grabbing"
+            >
+              <RotateHandleIcon className="h-4 w-4 text-foreground" />
+              <span className="sr-only">Rotate</span>
+            </div>
+            <div className="h-4 w-px bg-foreground/30" />
+          </div>
+          <div
+            className="absolute inset-x-0 bottom-2 z-10 flex items-center justify-center gap-2"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCancel();
+              }}
+              className="rounded-none border border-background/40 bg-background/90 px-3 py-1.5 text-xs tracking-wide text-foreground uppercase shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:bg-background"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                commit();
+              }}
+              className="rounded-none border border-foreground bg-foreground px-3 py-1.5 text-xs tracking-wide text-background uppercase shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:opacity-90"
+            >
+              Save
+            </button>
+          </div>
+        </div>
       </div>
-    </div>
+    </>,
+    document.body,
   );
 }
 
-function RotateIcon({ className }: { className?: string }) {
+function RotateHandleIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <circle cx="12" cy="12" r="9" strokeOpacity="0.3" />
       <path d="M3 12a9 9 0 1 1 3 6.7" strokeLinecap="round" />
       <path d="M3 17v-5h5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
@@ -358,10 +512,9 @@ function CornerHandle({
   const isTop = corner.startsWith("t");
   const isLeft = corner.endsWith("l");
   return (
-    // The visible dot stays the same small size as before (matches the
-    // established Canva-style look); the actual pointer-hit area is a
-    // larger invisible box around it, so it's comfortable to grab with a
-    // finger without looking bigger on screen.
+    // The visible dot stays small; the actual pointer-hit area is a
+    // larger invisible box around it, comfortable to grab with a finger
+    // without looking bigger on screen.
     <div
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -383,10 +536,98 @@ function CornerHandle({
   );
 }
 
-export function coverTransformStyle(transform: GridCoverTransform | null): React.CSSProperties {
-  if (!transform) return {};
-  const rotation = normalizeRotation(transform.rotation);
-  return {
-    transform: `rotate(${rotation}deg) translate(${transform.x * 100}%, ${transform.y * 100}%) scale(${transform.scale})`,
-  };
+// The one shared, non-interactive renderer for a saved crop transform --
+// used everywhere a cropped cover needs to display correctly outside the
+// editor itself (Grid tiles, the drag overlay preview, Post Editor's
+// asset strip, the public preview/review gallery). Reproduces the SAME
+// "true source behind a fixed frame" model the editor uses (natural-size
+// image, transform: scale -> rotate -> translate, clipped by the
+// wrapper), NOT a plain object-fit:cover img -- that was the exact bug
+// being fixed: object-cover pre-clips to the wrapper's own box before any
+// transform runs, so it can only ever show what a zoom=1/rotation=0 crop
+// would have shown, silently ignoring any real pan/rotation/zoom.
+//
+// Falls back to plain object-cover when there's no saved transform at
+// all (never manually cropped) or before natural size has loaded --
+// pixel-identical to every caller's previous behavior for that case, and
+// a graceful stand-in for the one render before the load-measurement
+// effect resolves (typically near-instant, since the same URL is almost
+// always already decoded/cached from being visible elsewhere on the same
+// page).
+export function CroppedCoverImage({
+  src,
+  transform,
+  className,
+  imgClassName,
+  alt = "",
+  loading,
+}: {
+  src: string;
+  transform: GridCoverTransform | null;
+  className?: string;
+  // Extra classes applied to the actual rendered <img> (both the
+  // measured-transform render and the plain-object-cover fallback) --
+  // e.g. an entrance animation or `loading="lazy"` callers previously put
+  // directly on their own <img>, which this component now owns.
+  imgClassName?: string;
+  alt?: string;
+  loading?: "lazy" | "eager";
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [frameSize, setFrameSize] = useState<{ w: number; h: number } | null>(null);
+  const natural = useNaturalSize(transform ? src : "");
+
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el || !transform) return;
+    const measure = () => setFrameSize({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [transform]);
+
+  const ready = !!transform && !!natural && !!frameSize && frameSize.w > 0 && frameSize.h > 0;
+  const rotation = normalizeRotationDeg(transform?.rotation);
+
+  return (
+    <div ref={wrapRef} className={`relative overflow-hidden ${className ?? ""}`}>
+      {ready ? (
+        (() => {
+          const baseScale = coverBaseScale(frameSize.w, frameSize.h, natural.w, natural.h);
+          const zoom = Math.max(transform!.scale, minZoomForCoverage(frameSize.w, frameSize.h, natural.w, natural.h, rotation));
+          const imgW = natural.w * baseScale;
+          const imgH = natural.h * baseScale;
+          const { slackX, slackY } = coverageSlackPx(rotation, (imgW * zoom) / 2, (imgH * zoom) / 2, frameSize.w / 2, frameSize.h / 2);
+          const clamped = clampOffsetPx({ x: transform!.x * imgW, y: transform!.y * imgH }, rotation, slackX, slackY);
+          return (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={src}
+              alt={alt}
+              draggable={false}
+              loading={loading}
+              className={`pointer-events-none absolute ${imgClassName ?? ""}`}
+              style={{
+                top: "50%",
+                left: "50%",
+                width: imgW,
+                height: imgH,
+                transform: `translate(-50%, -50%) translate(${clamped.x}px, ${clamped.y}px) rotate(${rotation}deg) scale(${zoom})`,
+              }}
+            />
+          );
+        })()
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={src}
+          alt={alt}
+          draggable={false}
+          loading={loading}
+          className={`pointer-events-none h-full w-full object-cover ${imgClassName ?? ""}`}
+        />
+      )}
+    </div>
+  );
 }

@@ -46,7 +46,7 @@ import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { useToast } from "@/lib/hooks/use-toast";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
-import { GridCropOverlay, coverTransformStyle } from "../../grid/grid-crop-overlay";
+import { CroppedCoverImage, GridCropOverlay } from "../../grid/grid-crop-overlay";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 import { canSubmitClientReview } from "@/lib/role-permissions";
@@ -625,25 +625,22 @@ function AssetPreview({
 }: {
   asset: PostAssetItem;
   // Only ever non-null for the post's cover (position 0) -- see
-  // posts.cover_transform's own comment. Applied with the exact same CSS
-  // Grid's own on-screen tile uses (coverTransformStyle), so this always
+  // posts.cover_transform's own comment. Rendered with the exact same
+  // CroppedCoverImage Grid's own on-screen tile uses, so this always
   // matches what Grid shows.
   coverTransform: GridCoverTransform | null;
 }) {
-  const style = coverTransformStyle(coverTransform);
   return (
     <>
       {asset.url && asset.mediaType === "image" && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={asset.url} alt="" className="h-full w-full object-cover" draggable={false} style={style} />
+        <CroppedCoverImage src={asset.url} transform={coverTransform} className="h-full w-full" />
       )}
       {asset.mediaType === "video" &&
         (asset.posterUrl ? (
           // A picked/annotated cover exists -- show that, same as Grid,
           // instead of the raw video (which would look unchanged either way
           // and never reflects what "Edit Cover" actually saved).
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={asset.posterUrl} alt="" className="h-full w-full object-cover" draggable={false} style={style} />
+          <CroppedCoverImage src={asset.posterUrl} transform={coverTransform} className="h-full w-full" />
         ) : (
           asset.url && <video src={asset.url} className="h-full w-full object-cover" muted />
         ))}
@@ -838,6 +835,7 @@ function SortableAsset({
           initialTransform={effectiveTransform}
           onSave={handleSaveCrop}
           onCancel={() => setCropMode(false)}
+          anchorRef={tileRef}
         />
       )}
       {replaceOpen && (

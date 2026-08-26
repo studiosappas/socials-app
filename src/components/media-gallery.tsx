@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { coverTransformStyle } from "@/app/projects/[projectId]/grid/grid-crop-overlay";
+import { CroppedCoverImage } from "@/app/projects/[projectId]/grid/grid-crop-overlay";
 import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 
 // Shared with the anonymous Shared Client Preview (`/preview/[token]`,
@@ -94,14 +94,7 @@ export function MediaFrame({
       title="View larger"
       className={`${className} cursor-zoom-in transition-opacity duration-150 hover:opacity-90`}
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={imageSrc}
-        alt=""
-        draggable={false}
-        className="h-full w-full object-cover select-none"
-        style={coverTransformStyle(coverTransform)}
-      />
+      <CroppedCoverImage src={imageSrc} transform={coverTransform} className="h-full w-full select-none" />
     </button>
   );
 }
@@ -171,12 +164,10 @@ export function Lightbox({
             // sensible frame for an interactive document anyway; the
             // original PDF stays the real source of truth for anyone who
             // needs to actually read it.
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
+            <CroppedCoverImage
               src={current.mediaType === "pdf" ? (current.posterUrl ?? current.url) : current.url}
-              alt=""
-              className="h-full w-full object-cover"
-              style={coverTransformStyle(current.coverTransform)}
+              transform={current.coverTransform}
+              className="h-full w-full"
             />
           )}
         </div>

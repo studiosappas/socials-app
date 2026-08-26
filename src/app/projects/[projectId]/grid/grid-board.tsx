@@ -25,7 +25,7 @@ import { deletePost } from "@/lib/actions/posts";
 import { saveRegeneratedPoster } from "@/lib/actions/media";
 import { MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
-import { GridCropOverlay, coverTransformStyle } from "./grid-crop-overlay";
+import { CroppedCoverImage, GridCropOverlay } from "./grid-crop-overlay";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
@@ -1025,6 +1025,13 @@ export function GridBoard({
           // completely unaffected (no resize UI, no width state applied --
           // the whole wrapper only renders at `lg`+ to begin with).
           <div className="relative hidden lg:flex lg:shrink-0" style={{ width: libraryWidth }}>
+            {/* Adobe-panel-style: a thin, always-visible divider line reads
+                as a real boundary at rest (the previous version was
+                invisible until you happened to hover it -- not
+                discoverable). Hover/drag thickens and darkens that line
+                and fades in a small centered grip cue, so it clearly
+                reads as draggable without turning into a heavy admin
+                splitter or any instructional text. */}
             <div
               role="separator"
               aria-orientation="vertical"
@@ -1034,10 +1041,22 @@ export function GridBoard({
               onPointerMove={handleResizeHandlePointerMove}
               onPointerUp={handleResizeHandlePointerUp}
               onPointerCancel={handleResizeHandlePointerUp}
-              className={`absolute -left-2.5 top-0 z-10 h-full w-3 cursor-col-resize touch-none select-none ${
-                isResizingLibrary ? "bg-foreground/10" : "hover:bg-foreground/[.06]"
-              }`}
-            />
+              className="group absolute -left-2.5 top-0 z-10 flex h-full w-3 cursor-col-resize touch-none items-center justify-center select-none"
+            >
+              <div
+                className={`h-full transition-[width,background-color] duration-150 ${
+                  isResizingLibrary ? "w-0.5 bg-foreground/50" : "w-px bg-border group-hover:w-0.5 group-hover:bg-foreground/40"
+                }`}
+              />
+              <div
+                className={`pointer-events-none absolute flex flex-col gap-[3px] transition-opacity duration-150 ${
+                  isResizingLibrary ? "opacity-100" : "opacity-0 group-hover:opacity-70"
+                }`}
+              >
+                <span className="h-3 w-[3px] rounded-full bg-foreground/60" />
+                <span className="h-3 w-[3px] rounded-full bg-foreground/60" />
+              </div>
+            </div>
             <div className="min-w-0 flex-1">
               <MediaLibrary
                 projectId={projectId}
@@ -1082,18 +1101,12 @@ export function GridBoard({
         {activeSlot && (
           <div className={`${GRID_SLOT_ASPECT_CLASS} w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]`}>
             {activeSlot.thumbnailUrl ? (
-              // Same coverTransformStyle the real tile renders with (see
+              // Same CroppedCoverImage the real tile renders with (see
               // GridSlotBody) -- without it, a cropped post's drag preview
               // showed the raw, uncropped framing while dragging, a visible
               // mismatch from what the tile actually looks like at rest
               // (and from what it snaps back to on drop).
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={activeSlot.thumbnailUrl}
-                alt=""
-                className="h-full w-full object-cover"
-                style={coverTransformStyle(activeSlot.coverTransform)}
-              />
+              <CroppedCoverImage src={activeSlot.thumbnailUrl} transform={activeSlot.coverTransform} className="h-full w-full" />
             ) : null}
           </div>
         )}
@@ -1333,6 +1346,26 @@ const GridSlot = memo(function GridSlot({
     transform: CSS.Transform.toString(transform),
     transition,
   };
+
+  // Plain DOM ref alongside dnd-kit's own setNodeRef -- GridCropOverlay
+  // needs the tile's real on-screen rect to position its portal (a
+  // combined ref callback since a single element can't take two `ref`
+  // props). Memoized (not a fresh inline arrow function per render): a
+  // NEW ref callback identity on every render makes React detach (call
+  // with null) then reattach (call with the node) on every single
+  // re-render, even though the underlying DOM node never actually
+  // changes -- confirmed live as the exact cause of GridCropOverlay's
+  // own mount-time measurement occasionally reading a momentarily-null
+  // anchor. A stable callback (memoized on the two things it actually
+  // closes over) is attached once and never needlessly churns.
+  const tileElRef = useRef<HTMLDivElement>(null);
+  const combinedRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      setNodeRef(node);
+      tileElRef.current = node;
+    },
+    [setNodeRef],
+  );
 
   const [contentMenuOpen, setContentMenuOpen] = useState(false);
   // Gated on reorderMode -- same reasoning as handleClick's own reorderMode
@@ -1643,7 +1676,7 @@ const GridSlot = memo(function GridSlot({
 
   return (
     <div
-      ref={setNodeRef}
+      ref={combinedRef}
       style={style}
       // Deliberately still gated on the real, persisted slot.postId, NOT
       // `filled` -- picking a tile up to reorder it while its own
@@ -1703,6 +1736,7 @@ const GridSlot = memo(function GridSlot({
         selected={selected}
         demoMode={demoMode}
         cropMode={cropOpen}
+        tileElRef={tileElRef}
         contentMenuOpen={contentMenuOpen}
         contentMenuRef={contentMenuRef}
         onToggleMenu={handleToggleMenu}
@@ -1737,6 +1771,7 @@ const GridSlotBody = memo(function GridSlotBody({
   selected,
   demoMode,
   cropMode,
+  tileElRef,
   contentMenuOpen,
   contentMenuRef,
   onToggleMenu,
@@ -1754,6 +1789,7 @@ const GridSlotBody = memo(function GridSlotBody({
   selected: boolean;
   demoMode: boolean;
   cropMode: boolean;
+  tileElRef: React.RefObject<HTMLDivElement | null>;
   contentMenuOpen: boolean;
   contentMenuRef: React.RefObject<HTMLDivElement | null>;
   onToggleMenu: () => void;
@@ -1784,35 +1820,27 @@ const GridSlotBody = memo(function GridSlotBody({
           // Always a static <img>, even when the cover is a video -- this is
           // the video's poster frame (captured client-side at upload time),
           // never the video file itself. Grid never plays/autoplays video.
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            // Keyed on the asset's own identity, not the signed URL string
-            // -- a signed URL gets a fresh token every time it's re-minted
-            // even for the exact same file (see signed-url-cache.ts's own
-            // reasoning), and keying on it would force React to unmount and
-            // remount this <img> (a full fresh decode/paint, even when the
-            // browser has the bytes cached) every time that happened. This
-            // still replays the animate-settle-in entrance whenever the
-            // cover asset genuinely changes (upload/crop/replace), just not
-            // on an unrelated re-sign.
+          // Keyed on the asset's own identity, not the signed URL string --
+          // a signed URL gets a fresh token every time it's re-minted even
+          // for the exact same file (see signed-url-cache.ts's own
+          // reasoning), and keying on it would force a full remount (a
+          // fresh decode/paint, even when the browser has the bytes
+          // cached) every time that happened. This still replays the
+          // animate-settle-in entrance whenever the cover asset genuinely
+          // changes (upload/crop/replace), just not on an unrelated
+          // re-sign. Pointer events on the rendered <img> are always off
+          // (CroppedCoverImage's own default) -- clicks/drag are handled
+          // by the tile's outer wrapper; GridCropOverlay -- the only
+          // element that DOES need pointer events on the image itself --
+          // is a separate, later sibling in a portal, only while cropMode
+          // is true, so this never conflicts with actual cropping.
+          <CroppedCoverImage
             key={slot.coverMediaAssetId ?? slot.id}
             src={slot.thumbnailUrl}
-            alt=""
+            transform={transform}
+            className="h-full w-full"
+            imgClassName="animate-settle-in"
             loading="lazy"
-            // pointer-events-none -- this image never has interactive
-            // behavior of its own (clicks/drag are handled by the tile's
-            // outer wrapper); making that structural instead of incidental
-            // guarantees a touch landing anywhere on a cropped tile's
-            // (CSS-transformed) image resolves straight to the wrapper's
-            // dnd-kit listeners, with no dependency on how the browser
-            // hit-tests a transformed element. GridCropOverlay -- the only
-            // element that DOES need pointer events on the image itself --
-            // is a separate, later sibling layered on top (z-20) only while
-            // cropMode is true, so this never conflicts with actual
-            // cropping.
-            className="pointer-events-none h-full w-full animate-settle-in object-cover"
-            draggable={false}
-            style={coverTransformStyle(transform)}
           />
         ) : slot.coverMediaType === "video" ? (
           // A video cover with no poster yet (e.g. uploaded before this
@@ -1948,6 +1976,7 @@ const GridSlotBody = memo(function GridSlotBody({
           initialTransform={transform}
           onSave={onSaveCrop}
           onCancel={onCancelCrop}
+          anchorRef={tileElRef}
         />
       )}
     </>

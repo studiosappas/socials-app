@@ -34,6 +34,6 @@
     "node_modules",
     "src/app/projects/[projectId]/grid/grid-reducer.test.ts",
     "src/app/projects/[projectId]/grid/grid-interaction.test.ts",
-    "src/app/projects/[projectId]/grid/grid-crop-rotation.test.ts"
+    "src/lib/crop-geometry.test.ts"
   ]
 }
