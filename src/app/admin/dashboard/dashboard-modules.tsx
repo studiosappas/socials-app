@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AnimatedNumber } from "@/app/projects/[projectId]/animated-number";
+import { AnimatedNumber } from "@/app/projects/[projectId]/overview/animated-number";
 import { Avatar, EmptyAvatar } from "@/components/ui/avatar";
 import type {
   AdminActiveUser,

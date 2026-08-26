@@ -756,7 +756,7 @@ function StoryLinks({
         <ul className="flex flex-col gap-1">
           {links.map((link) => (
             <li key={link.id} className="flex items-center justify-between gap-2 text-sm">
-              <a href={link.url} target="_blank" rel="noreferrer" className="truncate underline">
+              <a href={link.url} target="_blank" rel="noreferrer" className="min-w-0 truncate underline">
                 {link.label || link.url}
               </a>
               {canManage && (

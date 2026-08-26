@@ -109,7 +109,7 @@ export function CreateProjectButton({
           showError(`Project created. Couldn't invite: ${list}`);
         }
 
-        router.push(`/projects/${result.projectId}/grid`);
+        router.push(`/projects/${result.projectId}/overview`);
         setOpen(false);
         reset();
       } catch (err) {
