@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, use, useActionState, useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
+import { Suspense, use, useActionState, useCallback, useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -55,9 +55,12 @@ import type { ProjectMemberOption } from "@/lib/data/post-comments";
 
 // Module-level constants (not object literals inline in JSX) so the same
 // reference is passed on every render regardless of which asset is being
-// edited -- 1080x1350 cover, 1080x1440 carousel slide.
-const COVER_ASPECT = { w: 4, h: 5 };
-const SLIDE_ASPECT = { w: 3, h: 4 };
+// edited -- 1080x1440 cover (3:4), 1080x1350 carousel slide (4:5). Mirrors
+// grid-constants.ts's GRID_COVER_ASPECT_RATIO / POST_BODY_ASPECT_RATIO;
+// kept as plain {w,h} objects here (not imported) since AnnotationEditor's
+// targetAspect prop wants that shape, not a single ratio number.
+const COVER_ASPECT = { w: 3, h: 4 };
+const SLIDE_ASPECT = { w: 4, h: 5 };
 
 export type PostAssetItem = {
   postAssetId: string;
@@ -83,7 +86,7 @@ type EditingImage = {
   mediaType: "image" | "video";
   // Position 0 in the post's own asset order is its cover; every other
   // position is a carousel slide -- the two get different export targets
-  // (4:5 cover vs 3:4 slide), see targetAspect below.
+  // (3:4 cover vs 4:5 slide), see targetAspect below.
   isCover: boolean;
 };
 
@@ -680,6 +683,24 @@ function SortableAsset({
   // compute a fixed portal position from this tile's rect even after the
   // ⋮ menu item that opened it has already unmounted.
   const tileRef = useRef<HTMLDivElement>(null);
+  // Memoized (not a fresh inline arrow function per render): a NEW ref
+  // callback identity on every render makes React detach (null) then
+  // reattach (the node) on every single re-render, even though the
+  // underlying DOM node never actually changes. This was the confirmed
+  // root cause of "Replace does nothing" -- setReplaceOpen(true) (from
+  // the same click that opens this popover) re-renders THIS component,
+  // which re-created this ref callback, which momentarily nulled
+  // tileRef.current during exactly the commit ReplaceAssetPopover mounts
+  // and reads it in its own mount-time layout effect -- so its computed
+  // `position` never got set, and it silently rendered nothing, forever.
+  // Same fix as GridSlot's own combined ref callback in grid-board.tsx.
+  const combinedTileRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      setNodeRef(node);
+      tileRef.current = node;
+    },
+    [setNodeRef],
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [cropMode, setCropMode] = useState(false);
@@ -740,10 +761,7 @@ function SortableAsset({
 
   return (
     <div
-      ref={(el) => {
-        setNodeRef(el);
-        tileRef.current = el;
-      }}
+      ref={combinedTileRef}
       style={style}
       {...(canManage ? { ...attributes, ...listeners } : {})}
       className={`relative aspect-[3/4] w-24 shrink-0 touch-none rounded-none border border-border transition-opacity duration-150 ${
@@ -905,13 +923,34 @@ function ReplaceAssetPopover({
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
 
   useLayoutEffect(() => {
-    const rect = anchorRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const width = 224; // w-56
-    setPosition({
-      top: Math.min(rect.bottom + 4, window.innerHeight - 12),
-      left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-    });
+    let rafId: number | null = null;
+    let cancelled = false;
+    let retriesLeft = 10;
+    function recompute() {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (!rect) {
+        // Defensive retry -- see SortableAsset's own combined ref callback
+        // (now memoized, which is the actual root-cause fix) for why this
+        // could otherwise momentarily read null the instant the popover
+        // opens, same mechanism as GridCropOverlay's own anchor-measuring
+        // effect.
+        if (!cancelled && retriesLeft > 0) {
+          retriesLeft -= 1;
+          rafId = requestAnimationFrame(recompute);
+        }
+        return;
+      }
+      const width = 224; // w-56
+      setPosition({
+        top: Math.min(rect.bottom + 4, window.innerHeight - 12),
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+      });
+    }
+    recompute();
+    return () => {
+      cancelled = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

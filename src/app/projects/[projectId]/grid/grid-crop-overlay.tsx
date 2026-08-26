@@ -3,7 +3,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { GridCoverTransform } from "./grid-board";
-import { GRID_SLOT_ASPECT_RATIO } from "./grid-constants";
 import {
   clampNum,
   clampOffsetPx,
@@ -14,20 +13,13 @@ import {
 } from "@/lib/crop-geometry";
 
 const MAX_ZOOM = 4;
-// The editing frame is always exactly 4:5 (the Grid's own output ratio --
-// see grid-constants.ts) regardless of how the anchor tile that opened it
-// is shaped: Post Editor's own asset strip renders every tile (including
-// the cover) at 3:4 for a consistent carousel-thumbnail row, but the
-// cover's actual OUTPUT is still 4:5, so the crop frame here must be 4:5
-// too, not whatever ratio the anchor happens to be.
-const MIN_EDIT_WIDTH = 260;
-const VIEWPORT_FRACTION = 0.86;
-// Clearance kept between the editor and the viewport edge -- the rotate
-// handle sits above the frame, the Save/Cancel bar and corner handles sit
-// below/around it, all outside the frame's own box.
-const TOP_MARGIN = 56;
-const BOTTOM_MARGIN = 48;
-const SIDE_MARGIN = 24;
+// Space the rotate handle needs ABOVE the frame (circle + connecting
+// line) to render outside it. When the anchor tile doesn't have this much
+// room above it on screen (e.g. the Grid's own top row), the handle moves
+// INSIDE the frame instead -- see canPlaceHandleAbove below. The frame
+// itself never grows or repositions to make room; only this one control
+// does.
+const ROTATE_HANDLE_CLEARANCE = 48;
 
 const CORNERS = ["tl", "tr", "bl", "br"] as const;
 type Corner = (typeof CORNERS)[number];
@@ -75,15 +67,23 @@ function useNaturalSize(src: string): NaturalSize | null {
   return size;
 }
 
-// Measures the anchor tile's on-screen position (to center the editor
-// over it) and derives the editing frame's OWN size from it -- enlarged
-// up to a comfortable minimum (Grid tiles and, especially, Post Editor's
-// 96px-wide asset strip tiles are both far too small to drag/rotate
-// against directly) and capped against the viewport. Re-measured on
-// resize (window resize/orientation change) while the editor is open;
-// body scroll is locked for the same duration specifically so this
-// fixed-position anchor can't silently drift out from under the tile it
-// was opened on.
+// Measures the anchor tile's REAL on-screen rect and uses it verbatim as
+// the crop frame -- same width, same height, same screen position as the
+// Grid tile the user double-clicked. Deliberately NOT enlarged to any
+// artificial minimum: the editing context should feel like "this exact
+// tile, still in place," not a bigger, different-looking editor that
+// happens to be centered near it. Space needed for controls (the rotate
+// handle above the frame) is handled by moving those controls, never by
+// growing or repositioning the frame -- see canPlaceHandleAbove in the
+// component below.
+//
+// Re-measured on window resize AND on visualViewport resize (covers
+// pinch-zoom on mobile, which doesn't always fire a plain window resize)
+// while the editor is open, so the frame stays anchored to the tile's
+// current position if the layout moves. Body scroll is locked for the
+// same duration -- the simplest way to guarantee the underlying page
+// can't scroll the anchor out from under this fixed-position frame while
+// editing (page-level scroll is not expected/needed mid-crop).
 function useEditFrame(anchorRef: React.RefObject<HTMLElement | null>): FrameGeom | null {
   const [frame, setFrame] = useState<FrameGeom | null>(null);
   useLayoutEffect(() => {
@@ -111,30 +111,23 @@ function useEditFrame(anchorRef: React.RefObject<HTMLElement | null>): FrameGeom
         }
         return;
       }
-      const maxW = Math.min(window.innerWidth * VIEWPORT_FRACTION, window.innerHeight * VIEWPORT_FRACTION * GRID_SLOT_ASPECT_RATIO);
-      const width = clampNum(Math.max(rect.width, MIN_EDIT_WIDTH), 160, Math.max(160, maxW));
-      const height = width / GRID_SLOT_ASPECT_RATIO;
-      // Clamp the center so the editor -- including the rotate handle
-      // above the frame and the Save/Cancel bar below it, both outside
-      // the frame's own box -- stays fully on screen even when the
-      // anchor tile sits right at the viewport's edge (e.g. the top row
-      // of the Grid, with little to no space above it).
-      const centerX = clampNum(rect.left + rect.width / 2, width / 2 + SIDE_MARGIN, window.innerWidth - width / 2 - SIDE_MARGIN);
-      const centerY = clampNum(
-        rect.top + rect.height / 2,
-        height / 2 + TOP_MARGIN,
-        window.innerHeight - height / 2 - BOTTOM_MARGIN,
-      );
-      setFrame({ width, height, centerX, centerY });
+      setFrame({
+        width: rect.width,
+        height: rect.height,
+        centerX: rect.left + rect.width / 2,
+        centerY: rect.top + rect.height / 2,
+      });
     }
     recompute();
     window.addEventListener("resize", recompute);
+    window.visualViewport?.addEventListener("resize", recompute);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
       window.removeEventListener("resize", recompute);
+      window.visualViewport?.removeEventListener("resize", recompute);
       document.body.style.overflow = prevOverflow;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -142,20 +135,26 @@ function useEditFrame(anchorRef: React.RefObject<HTMLElement | null>): FrameGeom
   return frame;
 }
 
-// The 4:5 Grid slot is a FIXED OUTPUT VIEWPORT, not the source image's own
-// bounding box -- the source can (and, for anything not already 4:5,
-// always does) extend beyond it above/below/left/right. This editor's
-// whole structure exists to make that true: the image is rendered at its
-// own natural-aspect-ratio "base cover" size (naturalW/H * baseScale,
-// computed once real pixel dimensions are known -- see useNaturalSize/
-// useEditFrame above), NOT force-fit into a frame-sized box via
-// object-fit, so panning/zooming/rotating can reveal or hide any part of
-// the actual source pixels instead of manipulating an already-discarded
-// crop. Rendered via a portal (not inline in the Grid tile) so the parts
-// of the image extending past the frame have room to actually be visible
-// on screen instead of being clipped by the tile's own small box or any
-// ancestor's overflow -- see the audit notes in this round's report for
-// exactly where the old inline approach was silently discarding pixels.
+// The Grid cover's own tile -- 3:4, see grid-constants.ts's
+// GRID_COVER_ASPECT_RATIO -- is a FIXED OUTPUT VIEWPORT, not the source
+// image's own bounding box: the source can (and, for anything not already
+// 3:4, always does) extend beyond it above/below/left/right. This
+// editor's whole structure exists to make that true: the image is
+// rendered at its own natural-aspect-ratio "base cover" size (naturalW/H
+// * baseScale, computed once real pixel dimensions are known -- see
+// useNaturalSize/useEditFrame above), NOT force-fit into a frame-sized
+// box via object-fit, so panning/zooming/rotating can reveal or hide any
+// part of the actual source pixels instead of manipulating an
+// already-discarded crop. The frame's own size/ratio is never hardcoded
+// here -- useEditFrame reads it straight off the anchor tile's real
+// getBoundingClientRect(), so this editor works at whatever size/ratio
+// the anchor tile happens to be (currently always the Grid's 3:4 cover,
+// but nothing here assumes that number specifically). Rendered via a
+// portal (not inline in the Grid tile) so the parts of the image
+// extending past the frame have room to actually be visible on screen
+// instead of being clipped by the tile's own small box or any ancestor's
+// overflow -- see the audit notes in this round's report for exactly
+// where the old inline approach was silently discarding pixels.
 //
 // Canonical transform order (must match lib/image-crop.ts's server-side
 // pipeline exactly): scale -> rotate around the image's own center ->
@@ -361,6 +360,13 @@ export function GridCropOverlay({
 
   if (!ready || !frame) return null;
 
+  // The frame itself never moves or grows to make room for controls --
+  // only the rotate handle's OWN placement adapts: outside/above when
+  // there's real room for it there, otherwise inside the frame's own top
+  // edge (a small chip over the image) so it's always reachable without
+  // ever pushing the frame off its anchored position or size.
+  const canPlaceHandleAbove = frame.centerY - frame.height / 2 >= ROTATE_HANDLE_CLEARANCE;
+
   const imageStyle: React.CSSProperties = {
     position: "absolute",
     top: "50%",
@@ -439,9 +445,17 @@ export function GridCropOverlay({
           {/* Rotation handle -- grab and drag freely around the frame
               center for continuous 0-360 degree rotation (see the
               handlers above for the angle-accumulation math). Pointer
-              Events throughout, so this works with mouse and touch alike. */}
+              Events throughout, so this works with mouse and touch alike.
+              Positioned outside/above the frame when there's real screen
+              room for it there; otherwise moved INSIDE the frame's own
+              top edge (a small chip over the image, still reachable) --
+              the frame itself never resizes or moves to make room. */}
           <div
-            className="absolute left-1/2 top-0 z-10 flex -translate-x-1/2 -translate-y-full flex-col items-center"
+            className={
+              canPlaceHandleAbove
+                ? "absolute left-1/2 top-0 z-10 flex -translate-x-1/2 -translate-y-full flex-col items-center"
+                : "absolute left-1/2 top-2 z-10 -translate-x-1/2"
+            }
             onPointerDown={(e) => e.stopPropagation()}
           >
             <div
@@ -449,12 +463,14 @@ export function GridCropOverlay({
               onPointerMove={handleRotateHandlePointerMove}
               onPointerUp={handleRotateHandlePointerUp}
               title="Drag to rotate"
-              className="flex h-7 w-7 touch-none cursor-grab items-center justify-center active:cursor-grabbing"
+              className={`flex h-7 w-7 touch-none cursor-grab items-center justify-center active:cursor-grabbing ${
+                canPlaceHandleAbove ? "" : "rounded-full bg-background/85 shadow-[0_1px_5px_rgba(0,0,0,0.35)]"
+              }`}
             >
               <RotateHandleIcon className="h-4 w-4 text-foreground" />
               <span className="sr-only">Rotate</span>
             </div>
-            <div className="h-4 w-px bg-foreground/30" />
+            {canPlaceHandleAbove && <div className="h-4 w-px bg-foreground/30" />}
           </div>
           <div
             className="absolute inset-x-0 bottom-2 z-10 flex items-center justify-center gap-2"

@@ -2,10 +2,10 @@ import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths, type CoverTransform } from "@/lib/grid-data";
 import { applyCoverTransform } from "@/lib/image-crop";
-import { GRID_EXPORT_WIDTH, GRID_EXPORT_HEIGHT } from "../grid-constants";
+import { GRID_COVER_EXPORT_WIDTH, GRID_COVER_EXPORT_HEIGHT } from "../grid-constants";
 
-const CELL_W = GRID_EXPORT_WIDTH;
-const CELL_H = GRID_EXPORT_HEIGHT; // 4:5, matching the on-screen grid's slot ratio
+const CELL_W = GRID_COVER_EXPORT_WIDTH;
+const CELL_H = GRID_COVER_EXPORT_HEIGHT; // 3:4, matching the on-screen grid's cover ratio
 const BLANK_FILL = "#e7e4de"; // matches the --border design token
 
 type RawCell = { input: Buffer; raw: { width: number; height: number; channels: 1 | 2 | 3 | 4 } };

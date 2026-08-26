@@ -51,7 +51,7 @@ import {
 import { gridInteractionReducer, initialGridInteractionState } from "./grid-interaction";
 import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
-import { GRID_SLOT_ASPECT_CLASS } from "./grid-constants";
+import { GRID_COVER_ASPECT_CLASS } from "./grid-constants";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -1099,7 +1099,7 @@ export function GridBoard({
           </div>
         )}
         {activeSlot && (
-          <div className={`${GRID_SLOT_ASPECT_CLASS} w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]`}>
+          <div className={`${GRID_COVER_ASPECT_CLASS} w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]`}>
             {activeSlot.thumbnailUrl ? (
               // Same CroppedCoverImage the real tile renders with (see
               // GridSlotBody) -- without it, a cropped post's drag preview
@@ -1712,7 +1712,7 @@ const GridSlot = memo(function GridSlot({
       // the whole draggable tile (not just the cover image) so it can never
       // compete with dnd-kit's own long-press activation, regardless of
       // which element inside the tile the touch happens to land on.
-      className={`relative flex ${GRID_SLOT_ASPECT_CLASS} items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
+      className={`relative flex ${GRID_COVER_ASPECT_CLASS} items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
         slot.postId && canManage && dragEnabled && interactionIdle
           ? "cursor-grab touch-none"
           : filled || canManage

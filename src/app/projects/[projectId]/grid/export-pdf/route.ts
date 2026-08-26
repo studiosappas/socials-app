@@ -2,6 +2,7 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
+import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
 
 const PAGE_W = 612; // US Letter, points
 const PAGE_H = 792;
@@ -9,8 +10,8 @@ const MARGIN = 40;
 const CONTENT_W = PAGE_W - MARGIN * 2;
 const THUMB_GAP = 4;
 // A single-image post's thumbnail at this size; a carousel's images shrink
-// uniformly (keeping the 4:5 ratio) only as far as needed to still all fit
-// across one row, however many there are.
+// uniformly (keeping the Grid cover's 3:4 ratio) only as far as needed to
+// still all fit across one row, however many there are.
 const IDEAL_THUMB_W = 90;
 const TEXT_BLOCK_H = 46; // caption (up to 2 lines) + type tag
 const ROW_GAP = 16;
@@ -186,7 +187,7 @@ export async function GET(
           imageCache.set(cacheKey, null);
         } else {
           const buf = Buffer.from(await data.arrayBuffer());
-          const pipeline = await applyCoverTransform(buf, transform, 360, 450);
+          const pipeline = await applyCoverTransform(buf, transform, 360, Math.round(360 / GRID_COVER_ASPECT_RATIO));
           const jpegBuf = await pipeline.jpeg({ quality: 90 }).toBuffer();
           imageCache.set(cacheKey, jpegBuf);
         }
@@ -216,7 +217,11 @@ export async function GET(
     if (count * IDEAL_THUMB_W + (count - 1) * THUMB_GAP > CONTENT_W) {
       thumbW = (CONTENT_W - (count - 1) * THUMB_GAP) / count;
     }
-    const thumbH = thumbW * 1.25;
+    // 1/GRID_COVER_ASPECT_RATIO -- this row shows each post primarily via
+    // its cover (a carousel's other slides ride along at the same box
+    // shape for a uniform-looking row), so it uses the Grid's own
+    // canonical cover ratio rather than a separate literal.
+    const thumbH = thumbW / GRID_COVER_ASPECT_RATIO;
     const rowH = thumbH + ROW_GAP + TEXT_BLOCK_H;
 
     if (cursorY - rowH < MARGIN) {

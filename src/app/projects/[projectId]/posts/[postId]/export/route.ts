@@ -1,11 +1,23 @@
 import JSZip from "jszip";
 import { createClient } from "@/lib/supabase/server";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
-import { GRID_EXPORT_WIDTH, GRID_EXPORT_HEIGHT } from "@/app/projects/[projectId]/grid/grid-constants";
+import {
+  GRID_COVER_EXPORT_WIDTH,
+  GRID_COVER_EXPORT_HEIGHT,
+  POST_BODY_EXPORT_WIDTH,
+  POST_BODY_EXPORT_HEIGHT,
+} from "@/app/projects/[projectId]/grid/grid-constants";
 
-const SLIDE_W = GRID_EXPORT_WIDTH;
-const COVER_H = GRID_EXPORT_HEIGHT; // 4:5, position 0 (the post's cover) -- same canonical Grid ratio, since this literally is the Grid tile's own image
-const SLIDE_H = 1440; // 3:4, every other carousel slide -- a genuinely different, unrelated ratio (not the Grid tile), intentionally left as its own literal
+// Position 0 (the post's cover) uses the Grid's own canonical cover
+// ratio/size -- this literally is the Grid tile's own image. Every other
+// position is a carousel body slide, using the separate canonical
+// POST_BODY ratio/size (a genuinely different composition target, not
+// the Grid tile). Both happen to share the same 1080px width, but that's
+// incidental -- each height is derived independently from its own ratio.
+const COVER_W = GRID_COVER_EXPORT_WIDTH;
+const COVER_H = GRID_COVER_EXPORT_HEIGHT;
+const SLIDE_W = POST_BODY_EXPORT_WIDTH;
+const SLIDE_H = POST_BODY_EXPORT_HEIGHT;
 
 // Server-side per-post export ("Download Media"): unlike the full-feed
 // export (which only ever needs each post's single cover), this needs to
@@ -108,13 +120,14 @@ export async function GET(
     }
 
     try {
-      // SLIDE_W/targetH here only pin the crop's aspect ratio (4:5 / 3:4) --
-      // nativeResolution:true makes applyCoverTransform skip its final
-      // resize-to-that-fixed-size step, so the output is the crop's own
-      // native pixel dimensions (derived from this original's real
-      // resolution), never downscaled to a fixed 1080-ish target.
+      // targetW/targetH here only pin the crop's aspect ratio (3:4 cover /
+      // 4:5 slide) -- nativeResolution:true makes applyCoverTransform skip
+      // its final resize-to-that-fixed-size step, so the output is the
+      // crop's own native pixel dimensions (derived from this original's
+      // real resolution), never downscaled to a fixed 1080-ish target.
+      const targetW = isCover ? COVER_W : SLIDE_W;
       const targetH = isCover ? COVER_H : SLIDE_H;
-      const pipeline = await applyCoverTransform(buf, transform, SLIDE_W, targetH, { nativeResolution: true });
+      const pipeline = await applyCoverTransform(buf, transform, targetW, targetH, { nativeResolution: true });
       const cropped = await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
       zip.file(`${isCover ? "cover" : `slide-${index + 1}`}.jpg`, cropped);
     } catch {
