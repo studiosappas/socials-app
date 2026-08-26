@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
@@ -12,10 +12,17 @@ import {
   type AdjustmentValues,
 } from "@/lib/image-adjustments";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
+import {
+  clampNum,
+  clampOffsetPx,
+  coverBaseScale,
+  coverageSlackPx,
+  minZoomForCoverage,
+  normalizeRotationDeg,
+} from "@/lib/crop-geometry";
 
 const INK = "#171412"; // matches --foreground
 const MAX_DISPLAY = 640;
-const CROP_MIN_ZOOM = 1;
 const CROP_MAX_ZOOM = 4;
 // The crop overlay is now always mounted (see its own render-site comment)
 // even before cropSourceUrl exists -- a real, valid src is still required,
@@ -375,6 +382,12 @@ export function AnnotationEditor({
   // (outside the overlay) can read the live values.
   const [cropZoom, setCropZoom] = useState(1);
   const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
+  // Freeform rotation (arbitrary degrees, not quantized) -- same
+  // crop-geometry.ts coverage math Grid's own crop tool uses, reused here
+  // rather than duplicated. Replaces the old whole-photo 90-degree
+  // Rotate panel (see applyBaseTransform/rotateBasePhoto's removal) --
+  // this is now the one rotation control, live while Crop is active.
+  const [cropRotation, setCropRotation] = useState(0);
   const [cropFrameSize, setCropFrameSize] = useState<{ width: number; height: number } | null>(null);
   // handleApplyCrop previously had no error handling or in-flight feedback
   // at all -- a failed fetch/loadFromJSON was an uncaught rejection, and
@@ -1086,6 +1099,7 @@ export function AnnotationEditor({
         // overlay would then be sized/positioned against a stale frame.
         setCropZoom(1);
         setCropOffset({ x: 0, y: 0 });
+        setCropRotation(0);
         const basePhoto = findBasePhoto(canvas);
         setCropSourceUrl(basePhoto ? (basePhoto.getElement() as HTMLImageElement).src : null);
       }
@@ -1183,6 +1197,7 @@ export function AnnotationEditor({
         canvas.fire("object:modified", { target: basePhoto });
         setCropZoom(1);
         setCropOffset({ x: 0, y: 0 });
+        setCropRotation(0);
       } catch (error) {
         // Previously uncaught -- any failure here (a CORS-tainted canvas
         // throwing SecurityError on toDataURL, same real failure mode already
@@ -1205,10 +1220,6 @@ export function AnnotationEditor({
         setRotating(false);
       }
     });
-  }
-
-  function rotateBasePhoto(deltaDegrees: 90 | -90) {
-    void applyBaseTransform(deltaDegrees === 90 ? 90 : 270, false, false);
   }
 
   function flipBasePhoto(axis: "horizontal" | "vertical") {
@@ -1280,6 +1291,85 @@ export function AnnotationEditor({
         if (fabricRef.current !== canvas) return;
         const naturalW = freshImg.width ?? frameW;
         const naturalH = freshImg.height ?? frameH;
+
+        // Freeform rotation: Fabric's own cropX/Y/width/height (the
+        // axis-aligned path below) has no concept of rotation, so this
+        // pre-bakes rotate-then-extract into a flat result via Canvas 2D
+        // instead -- same order and same coverage-guarantee math as
+        // lib/image-crop.ts's server-side applyCoverTransform (Grid/PDF
+        // export), just Canvas 2D here instead of sharp, and then loads
+        // the result via basePhoto.setElement() the same way the old
+        // 90-degree Rotate button already did (applyBaseTransform).
+        const rotation = normalizeRotationDeg(cropRotation);
+        if (rotation !== 0) {
+          const theta = (rotation * Math.PI) / 180;
+          const cosA = Math.abs(Math.cos(theta));
+          const sinA = Math.abs(Math.sin(theta));
+          const rotW = Math.max(1, Math.round(naturalW * cosA + naturalH * sinA));
+          const rotH = Math.max(1, Math.round(naturalW * sinA + naturalH * cosA));
+
+          const sourceEl = freshImg.getElement() as HTMLImageElement;
+          const rotCanvas = document.createElement("canvas");
+          rotCanvas.width = rotW;
+          rotCanvas.height = rotH;
+          const rotCtx = rotCanvas.getContext("2d");
+          if (!rotCtx) throw new Error("Canvas 2D context unavailable.");
+          rotCtx.translate(rotW / 2, rotH / 2);
+          rotCtx.rotate(theta);
+          rotCtx.drawImage(sourceEl, -naturalW / 2, -naturalH / 2, naturalW, naturalH);
+
+          const baseScale = coverBaseScale(cropFrameSize.width, cropFrameSize.height, naturalW, naturalH);
+          const zoom = Math.max(
+            cropZoom,
+            minZoomForCoverage(cropFrameSize.width, cropFrameSize.height, naturalW, naturalH, rotation),
+          );
+          const totalScale = baseScale * zoom;
+          const extractW = clampNum(cropFrameSize.width / totalScale, 1, rotW);
+          const extractH = clampNum(cropFrameSize.height / totalScale, 1, rotH);
+          const panWorld = { x: cropOffset.x * cropFrameSize.width, y: cropOffset.y * cropFrameSize.height };
+          const panNativeRaw = { x: panWorld.x / totalScale, y: panWorld.y / totalScale };
+          const { slackX, slackY } = coverageSlackPx(rotation, naturalW / 2, naturalH / 2, extractW / 2, extractH / 2);
+          const panNative = clampOffsetPx(panNativeRaw, rotation, slackX, slackY);
+          const extractLeft = clampNum(Math.round(rotW / 2 - extractW / 2 - panNative.x), 0, Math.max(0, rotW - extractW));
+          const extractTop = clampNum(Math.round(rotH / 2 - extractH / 2 - panNative.y), 0, Math.max(0, rotH - extractH));
+
+          const outCanvas = document.createElement("canvas");
+          outCanvas.width = Math.round(extractW);
+          outCanvas.height = Math.round(extractH);
+          const outCtx = outCanvas.getContext("2d");
+          if (!outCtx) throw new Error("Canvas 2D context unavailable.");
+          outCtx.drawImage(rotCanvas, extractLeft, extractTop, extractW, extractH, 0, 0, outCanvas.width, outCanvas.height);
+          const dataUrl = outCanvas.toDataURL("image/jpeg", 0.97);
+
+          const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const el = new window.Image();
+            el.onload = () => resolve(el);
+            el.onerror = () => reject(new Error("Couldn't load the cropped image."));
+            el.src = dataUrl;
+          });
+          if (fabricRef.current !== canvas) return;
+
+          basePhoto.setElement(img);
+          basePhoto.set({
+            scaleX: frameW / outCanvas.width,
+            scaleY: frameH / outCanvas.height,
+            left: 0,
+            top: 0,
+            cropX: 0,
+            cropY: 0,
+            width: outCanvas.width,
+            height: outCanvas.height,
+            originX: "left",
+            originY: "top",
+          });
+          basePhoto.setCoords();
+          canvas.requestRenderAll();
+          canvas.fire("object:modified", { target: basePhoto });
+          setCropping(false);
+          setTool("select");
+          return;
+        }
+
         // THE ACTUAL BUG this fixes: the crop overlay the user drags/pinches is
         // sized and CSS-`object-cover`-fit against cropFrameSize -- the
         // canvas element's live CSS DISPLAY box (measured via
@@ -2171,8 +2261,8 @@ export function AnnotationEditor({
           <AdjustIcon />
         </SidebarToolButton>
         {targetAspect && (
-          <SidebarToolButton active={rotatePanelOpen} onClick={toggleRotatePanel} label="Rotate" title="Rotate / Flip Photo">
-            <RotateIcon direction="right" />
+          <SidebarToolButton active={rotatePanelOpen} onClick={toggleRotatePanel} label="Flip" title="Flip Photo">
+            <FlipIcon axis="horizontal" />
           </SidebarToolButton>
         )}
         {isVideo && ready && (
@@ -2202,12 +2292,6 @@ export function AnnotationEditor({
         <div className="flex flex-col items-center gap-1 pb-2">
           <div className="flex flex-wrap items-center justify-center gap-3">
             <div className="flex items-center gap-1">
-              <IconToolButton onClick={() => rotateBasePhoto(-90)} label="Rotate left" disabled={rotating}>
-                <RotateIcon direction="left" />
-              </IconToolButton>
-              <IconToolButton onClick={() => rotateBasePhoto(90)} label="Rotate right" disabled={rotating}>
-                <RotateIcon direction="right" />
-              </IconToolButton>
               <IconToolButton
                 onClick={() => flipBasePhoto("horizontal")}
                 label="Flip horizontal"
@@ -2525,8 +2609,10 @@ export function AnnotationEditor({
               imageUrl={cropSourceUrl ?? EMPTY_IMAGE_SRC}
               zoom={cropZoom}
               offset={cropOffset}
+              rotation={cropRotation}
               onZoomChange={setCropZoom}
               onOffsetChange={setCropOffset}
+              onRotationChange={setCropRotation}
             />
           </div>
           {/* Unconditionally mounted (not gated on guides.x/y like the lines
@@ -2769,27 +2855,122 @@ function VideoFramePicker({
   );
 }
 
-// Same pan/zoom-within-a-fixed-frame interaction as Grid's own crop tool
-// (grid-crop-overlay.tsx): drag the image to pan, drag a corner handle to
-// scale it uniformly around the frame's center -- the frame itself never
-// moves or resizes. zoom/offset are controlled from the parent (rather than
-// committing internally on click-outside/double-click like Grid does) since
-// Brief already has explicit "Apply crop"/"Cancel crop" buttons elsewhere in
-// its toolbar, unlike Grid's chrome-less inline editing.
+// Loads an image's true natural pixel dimensions -- needed so the source
+// can be rendered at its own real size (not force-fit into the frame via
+// object-fit) so rotating never reveals a blank corner. `.complete` is
+// checked immediately as a fallback for an already-cached image whose
+// load event may have already fired before a listener could attach.
+function useImageNaturalSize(src: string): { w: number; h: number } | null {
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSize(null);
+    let cancelled = false;
+    const img = new window.Image();
+    img.onload = () => {
+      if (!cancelled && img.naturalWidth && img.naturalHeight) setSize({ w: img.naturalWidth, h: img.naturalHeight });
+    };
+    img.src = src;
+    if (img.complete && img.naturalWidth && img.naturalHeight) setSize({ w: img.naturalWidth, h: img.naturalHeight });
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  return size;
+}
+
+function pointerAngleDeg(clientX: number, clientY: number, cx: number, cy: number): number {
+  return Math.atan2(clientY - cy, clientX - cx) * (180 / Math.PI);
+}
+
+// Same pan/zoom/rotate-within-a-fixed-frame interaction as Grid's own crop
+// tool (grid-crop-overlay.tsx), reusing the identical coverage-guarantee
+// math (crop-geometry.ts) rather than a separate implementation: drag the
+// image to pan, drag a corner handle to scale it uniformly around the
+// frame's center, drag the rotation handle to rotate freely -- the frame
+// itself never moves or resizes. zoom/offset/rotation are controlled from
+// the parent (rather than committing internally on click-outside/double-
+// click like Grid does) since this editor already has explicit "Apply
+// crop"/"Cancel crop" buttons elsewhere in its toolbar, unlike Grid's
+// chrome-less inline editing.
+//
+// Offset stays in this file's own pre-existing unit (a fraction of the
+// FRAME, not of the image's own base size the way Grid's newer convention
+// works) specifically so handleApplyCrop's own already-correct pan-
+// direction math needed no changes beyond adding rotation -- only the
+// zoom/pan CLAMP bounds needed to become rotation-aware.
 function AnnotationCropOverlay({
   imageUrl,
   zoom,
   offset,
+  rotation,
   onZoomChange,
   onOffsetChange,
+  onRotationChange,
 }: {
   imageUrl: string;
   zoom: number;
   offset: { x: number; y: number };
+  rotation: number;
   onZoomChange: (zoom: number) => void;
   onOffsetChange: (offset: { x: number; y: number }) => void;
+  onRotationChange: (rotation: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const natural = useImageNaturalSize(imageUrl);
+  const [frameSize, setFrameSize] = useState<{ w: number; h: number } | null>(null);
+  useLayoutEffect(() => {
+    let observer: ResizeObserver | null = null;
+    let rafId: number | null = null;
+    let cancelled = false;
+    let retriesLeft = 10;
+    function attach() {
+      const el = containerRef.current;
+      if (!el) {
+        // This overlay is always mounted (a sibling of Fabric's canvas
+        // inside a container Fabric itself restructures outside React's
+        // bookkeeping -- see this file's own notes on that), so the ref
+        // can momentarily read null the first time this runs. Retrying
+        // via requestAnimationFrame rides past that instead of the crop
+        // frame silently never becoming ready -- same pattern already
+        // proven for Grid's own anchor-measurement effect.
+        if (!cancelled && retriesLeft > 0) {
+          retriesLeft -= 1;
+          rafId = requestAnimationFrame(attach);
+        }
+        return;
+      }
+      const measure = () => setFrameSize({ w: el.clientWidth, h: el.clientHeight });
+      measure();
+      observer = new ResizeObserver(measure);
+      observer.observe(el);
+    }
+    attach();
+    return () => {
+      cancelled = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      observer?.disconnect();
+    };
+  }, []);
+  const ready = !!natural && !!frameSize && frameSize.w > 0 && frameSize.h > 0;
+  const rotateGestureRef = useRef<{ lastAngle: number } | null>(null);
+
+  // Rotation-aware pan clamp -- offsetPx (Tpx, world/frame pixels) mirrors
+  // Grid's own derivation exactly (coverageSlackPx + clampOffsetPx), just
+  // fed with this file's frame-fraction offset unit converted to pixels.
+  function clampOffsetFrac(next: { x: number; y: number }, z: number, rot: number): { x: number; y: number } {
+    if (!ready) return next;
+    const baseScale = coverBaseScale(frameSize.w, frameSize.h, natural.w, natural.h);
+    const w = natural.w * baseScale * z;
+    const h = natural.h * baseScale * z;
+    const { slackX, slackY } = coverageSlackPx(rot, w / 2, h / 2, frameSize.w / 2, frameSize.h / 2);
+    const clampedPx = clampOffsetPx({ x: next.x * frameSize.w, y: next.y * frameSize.h }, rot, slackX, slackY);
+    return { x: clampedPx.x / frameSize.w, y: clampedPx.y / frameSize.h };
+  }
+  function minZoom(rot: number): number {
+    if (!ready) return 1;
+    return minZoomForCoverage(frameSize.w, frameSize.h, natural.w, natural.h, rot);
+  }
   // Tracks every currently-down pointer on the pan/pinch image by id, not
   // just the most recent one. The original code kept a single shared
   // panRef -- fine for a mouse (exactly one pointer, ever) but on a real
@@ -2822,14 +3003,6 @@ function AnnotationCropOverlay({
     startZoom: number;
     startOffset: { x: number; y: number };
   } | null>(null);
-
-  function clampOffset(next: { x: number; y: number }, z: number) {
-    const maxOffset = (z - 1) / 2;
-    return {
-      x: clamp(next.x, -maxOffset, maxOffset),
-      y: clamp(next.y, -maxOffset, maxOffset),
-    };
-  }
 
   function handleImagePointerDown(e: React.PointerEvent<HTMLImageElement>) {
     e.preventDefault();
@@ -2875,7 +3048,7 @@ function AnnotationCropOverlay({
       const dxFrac = (e.clientX - gesture.startX) / rect.width;
       const dyFrac = (e.clientY - gesture.startY) / rect.height;
       onOffsetChange(
-        clampOffset({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, zoom),
+        clampOffsetFrac({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, zoom, rotation),
       );
     } else if (gesture.mode === "pinch" && activePointersRef.current.size === 2) {
       const [p1, p2] = [...activePointersRef.current.values()];
@@ -2883,7 +3056,7 @@ function AnnotationCropOverlay({
       const midX = (p1.x + p2.x) / 2;
       const midY = (p1.y + p2.y) / 2;
       const ratio = gesture.startDist > 0 ? dist / gesture.startDist : 1;
-      const nextZoom = clamp(gesture.startZoom * ratio, CROP_MIN_ZOOM, CROP_MAX_ZOOM);
+      const nextZoom = clampNum(gesture.startZoom * ratio, minZoom(rotation), CROP_MAX_ZOOM);
       // Pans by the midpoint's own drift too, not just zooming in place --
       // matches how pinch-zoom behaves everywhere else on a phone (the
       // point between your fingers stays under your fingers).
@@ -2891,7 +3064,7 @@ function AnnotationCropOverlay({
       const dyFrac = (midY - gesture.startMidY) / rect.height;
       onZoomChange(nextZoom);
       onOffsetChange(
-        clampOffset({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, nextZoom),
+        clampOffsetFrac({ x: gesture.startOffset.x + dxFrac, y: gesture.startOffset.y + dyFrac }, nextZoom, rotation),
       );
     }
   }
@@ -2946,9 +3119,9 @@ function AnnotationCropOverlay({
     const cy = rect.top + rect.height / 2;
     const dist = Math.hypot(e.clientX - cx, e.clientY - cy);
     const ratio = dist / handleDragRef.current.startDist;
-    const nextZoom = clamp(handleDragRef.current.startZoom * ratio, CROP_MIN_ZOOM, CROP_MAX_ZOOM);
+    const nextZoom = clampNum(handleDragRef.current.startZoom * ratio, minZoom(rotation), CROP_MAX_ZOOM);
     onZoomChange(nextZoom);
-    onOffsetChange(clampOffset(handleDragRef.current.startOffset, nextZoom));
+    onOffsetChange(clampOffsetFrac(handleDragRef.current.startOffset, nextZoom, rotation));
   }
 
   function handleCornerPointerUp(e: React.PointerEvent<HTMLDivElement>) {
@@ -2962,28 +3135,75 @@ function AnnotationCropOverlay({
     handleDragRef.current = null;
   }
 
-  const imageStyle: React.CSSProperties = {
-    transform: `translate(${offset.x * 100}%, ${offset.y * 100}%) scale(${zoom})`,
-  };
+  // Freeform rotation -- same angle-accumulation approach as Grid's own
+  // rotate handle (grid-crop-overlay.tsx): each move adds the INCREMENTAL
+  // step (not an absolute-angle diff from gesture start) so continuous
+  // rotation never snaps at atan2's own +-180-degree wrap boundary.
+  function handleRotateHandlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    rotateGestureRef.current = { lastAngle: pointerAngleDeg(e.clientX, e.clientY, rect.left + rect.width / 2, rect.top + rect.height / 2) };
+  }
 
-  return (
-    <div ref={containerRef} className="absolute inset-0">
-      {/* Dimmed, unclipped copy shows the full image so the part outside the
-          frame stays visible as context, exactly like Grid's crop tool. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={imageUrl}
-        alt=""
-        draggable={false}
-        onPointerDown={handleImagePointerDown}
-        onPointerMove={handleImagePointerMove}
-        onPointerUp={handleImagePointerUp}
-        onPointerCancel={handleImagePointerUp}
-        className="absolute inset-0 h-full w-full cursor-move touch-none object-cover opacity-40"
-        style={imageStyle}
-      />
-      {/* Full-opacity copy, clipped to the frame -- this is the actual crop. */}
-      <div className="absolute inset-0 overflow-hidden">
+  function handleRotateHandlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!rotateGestureRef.current || !containerRef.current || !ready) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const angle = pointerAngleDeg(e.clientX, e.clientY, cx, cy);
+    let step = angle - rotateGestureRef.current.lastAngle;
+    if (step > 180) step -= 360;
+    if (step <= -180) step += 360;
+    rotateGestureRef.current.lastAngle = angle;
+    const nextRotation = rotation + step;
+    // Only ever bumped UP to whatever the new angle requires, never
+    // ratcheted back down -- a zoom the user chose above the old floor
+    // stays exactly as chosen when rotating back toward a less
+    // restrictive angle. Same rule as Grid's own handle.
+    const nextZoom = Math.max(zoom, minZoom(nextRotation));
+    onRotationChange(nextRotation);
+    onZoomChange(nextZoom);
+    onOffsetChange(clampOffsetFrac(offset, nextZoom, nextRotation));
+  }
+
+  function handleRotateHandlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (rotateGestureRef.current) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Already released/gone.
+      }
+    }
+    rotateGestureRef.current = null;
+  }
+
+  // The container itself (holding containerRef) is ALWAYS rendered, never
+  // gated behind `ready` -- ready depends on measuring THIS element's own
+  // size, so conditionally rendering the element it measures would be a
+  // deadlock (the ref would never attach, frameSize would never resolve,
+  // ready would never become true). Only the contents inside it wait for
+  // `ready`.
+  let contents: React.ReactNode = null;
+  if (ready) {
+    const imgW = natural.w * coverBaseScale(frameSize.w, frameSize.h, natural.w, natural.h);
+    const imgH = natural.h * coverBaseScale(frameSize.w, frameSize.h, natural.w, natural.h);
+    const normalizedRotation = normalizeRotationDeg(rotation);
+    const imageStyle: React.CSSProperties = {
+      position: "absolute",
+      top: "50%",
+      left: "50%",
+      width: imgW,
+      height: imgH,
+      transform: `translate(-50%, -50%) translate(${offset.x * frameSize.w}px, ${offset.y * frameSize.h}px) rotate(${normalizedRotation}deg) scale(${zoom})`,
+    };
+    contents = (
+      <>
+        {/* Dimmed, unclipped copy shows the full image so the part outside
+            the frame stays visible as context, exactly like Grid's crop
+            tool. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={imageUrl}
@@ -2993,21 +3213,58 @@ function AnnotationCropOverlay({
           onPointerMove={handleImagePointerMove}
           onPointerUp={handleImagePointerUp}
           onPointerCancel={handleImagePointerUp}
-          className="absolute inset-0 h-full w-full cursor-move touch-none object-cover"
+          className="cursor-move touch-none opacity-40"
           style={imageStyle}
         />
-      </div>
-      <div className="pointer-events-none absolute inset-0 border-2 border-foreground" />
-      {(["tl", "tr", "bl", "br"] as const).map((corner) => (
-        <CropCornerHandle
-          key={corner}
-          corner={corner}
-          onPointerDown={handleCornerPointerDown}
-          onPointerMove={handleCornerPointerMove}
-          onPointerUp={handleCornerPointerUp}
-          onPointerCancel={handleCornerPointerUp}
-        />
-      ))}
+        {/* Full-opacity copy, clipped to the frame -- this is the actual crop. */}
+        <div className="absolute inset-0 overflow-hidden">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imageUrl}
+            alt=""
+            draggable={false}
+            onPointerDown={handleImagePointerDown}
+            onPointerMove={handleImagePointerMove}
+            onPointerUp={handleImagePointerUp}
+            onPointerCancel={handleImagePointerUp}
+            className="cursor-move touch-none"
+            style={imageStyle}
+          />
+        </div>
+        <div className="pointer-events-none absolute inset-0 border-2 border-foreground" />
+        {(["tl", "tr", "bl", "br"] as const).map((corner) => (
+          <CropCornerHandle
+            key={corner}
+            corner={corner}
+            onPointerDown={handleCornerPointerDown}
+            onPointerMove={handleCornerPointerMove}
+            onPointerUp={handleCornerPointerUp}
+            onPointerCancel={handleCornerPointerUp}
+          />
+        ))}
+        {/* Freeform rotation handle -- a small chip inside the frame's own
+            top edge (not floated above it like Grid's own handle) since
+            this editor has no portal escaping its own layout to guarantee
+            room above the frame; keeps this a minimal, contained addition
+            rather than a second positioning system to get right. */}
+        <div
+          onPointerDown={handleRotateHandlePointerDown}
+          onPointerMove={handleRotateHandlePointerMove}
+          onPointerUp={handleRotateHandlePointerUp}
+          onPointerCancel={handleRotateHandlePointerUp}
+          title="Drag to rotate"
+          className="absolute left-1/2 top-2 z-10 flex h-7 w-7 -translate-x-1/2 touch-none cursor-grab items-center justify-center rounded-full bg-background/85 text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)] active:cursor-grabbing"
+        >
+          <CropRotateHandleIcon className="h-3.5 w-3.5" />
+          <span className="sr-only">Rotate</span>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="absolute inset-0">
+      {contents}
     </div>
   );
 }
@@ -3323,9 +3580,12 @@ function LayerIcon({ variant }: { variant: "front" | "forward" | "backward" | "b
 
 // Curved arrow around a partial circle, arrowhead pointing the turn
 // direction -- "left" mirrors "right" horizontally via scaleX.
-function RotateIcon({ direction }: { direction: "left" | "right" }) {
+// Repurposed from the old 90-degree Rotate toolbar button's own icon (that
+// button is gone -- see applyBaseTransform/rotateBasePhoto's removal) for
+// the new freeform crop-rotation handle below.
+function CropRotateHandleIcon({ className }: { className?: string }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style={{ transform: direction === "left" ? "scaleX(-1)" : undefined }}>
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className={className}>
       <path
         d="M3 5.5A5 5 0 1 1 2.2 8.8"
         stroke="currentColor"

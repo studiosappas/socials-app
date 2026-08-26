@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useOptimisticOverride } from "@/lib/hooks/use-optimistic-override";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
-import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
+import { downloadAsset, filenameFromUrl, shareOrDownloadAsset } from "@/lib/download-zip";
 import {
   addBriefTaskFrame,
   addBriefTaskImage,
@@ -1706,12 +1706,17 @@ function ImageItemChip({
   // layer (see onEdit below), never what a user clicking or downloading
   // the chip should land on.
   const currentUrl = item.thumbnailUrl ?? item.originalUrl;
+  // Same feature-detected (not UA-sniffed) signal as Post Editor's own
+  // approved "Save Media".
+  const isTouchDevice = useIsTouchDevice();
 
   function handleDownload() {
     setMenuOpen(false);
     if (!currentUrl) return;
     setDownloading(true);
-    downloadAsset(currentUrl, filenameFromUrl(currentUrl, label || "image")).finally(() => setDownloading(false));
+    shareOrDownloadAsset(currentUrl, filenameFromUrl(currentUrl, label || "image"), isTouchDevice).finally(() =>
+      setDownloading(false),
+    );
   }
 
   function startRename() {
@@ -1842,7 +1847,7 @@ function ImageItemChip({
             disabled={downloading}
             className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.07] disabled:opacity-60"
           >
-            {downloading ? "Downloading..." : "Download Image"}
+            {downloading ? "Downloading..." : isTouchDevice ? "Save Media" : "Download Image"}
           </button>
           <button
             type="button"
