@@ -60,6 +60,14 @@ const labelClass = "text-xs tracking-wide text-muted uppercase";
 // row's grid cell (and the popup itself on narrow screens).
 const fieldClass =
   "block w-full min-w-0 max-w-full box-border rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+// Not enough on its own for input[type=date] on real iOS Safari (confirmed
+// against real-device screenshots, not just Chromium testing, which never
+// reproduces this) -- WebKit gives these native controls their own
+// intrinsic min-content width (wider still for locales like Hebrew) and
+// ignores author width/box-sizing while their default chrome is active.
+// -webkit-appearance: none turns that chrome off, the standard fix for
+// this, without removing the tap-to-open-picker behavior itself.
+const dateTimeFieldClass = `${fieldClass} appearance-none [-webkit-appearance:none]`;
 
 export function StoryEditor({
   projectId,
@@ -682,7 +690,7 @@ function StoryMainForm({
               value={scheduledDate}
               onChange={(e) => setScheduledDate(e.target.value)}
               disabled={!canManage}
-              className={fieldClass}
+              className={dateTimeFieldClass}
             />
           </label>
         </div>

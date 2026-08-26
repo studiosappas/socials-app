@@ -112,6 +112,20 @@ const labelClass = "text-xs tracking-wide text-muted uppercase";
 // Schedule row's grid cell (and the popup itself on narrow screens).
 const fieldClass =
   "block w-full min-w-0 max-w-full box-border rounded-none border border-foreground bg-transparent px-3 py-2 text-sm focus:outline-none";
+// The width chain above (block/w-full/min-w-0/max-w-full/box-border) isn't
+// actually enough for input[type=date]/[type=time] on real iOS Safari --
+// confirmed against real-device screenshots, not just this project's own
+// Chromium testing, which never reproduces this. WebKit treats these two
+// input types as native controls with their own internal shadow-DOM parts
+// (-webkit-datetime-edit-*) that keep an intrinsic min-content width driven
+// by the rendered date/time text -- wider still for locales like Hebrew --
+// and ignores author `width`/`box-sizing` for that box entirely as long as
+// its default native chrome is active. `-webkit-appearance: none` turns
+// that native chrome off (the standard, documented fix for this exact
+// overflow), which is what makes WebKit fall back to normal CSS box
+// layout -- it does not remove type=date/time's own tap-to-open-picker
+// behavior, only its default visual rendering.
+const dateTimeFieldClass = `${fieldClass} appearance-none [-webkit-appearance:none]`;
 
 export function PostEditor({
   projectId,
@@ -1465,7 +1479,7 @@ function PostMainForm({
               value={scheduledDate}
               onChange={(e) => setScheduledDate(e.target.value)}
               disabled={!canManage}
-              className={fieldClass}
+              className={dateTimeFieldClass}
             />
           </label>
           <label className="flex min-w-0 flex-col gap-1.5">
@@ -1476,7 +1490,7 @@ function PostMainForm({
               value={scheduledTime}
               onChange={(e) => setScheduledTime(e.target.value)}
               disabled={!canManage}
-              className={fieldClass}
+              className={dateTimeFieldClass}
             />
           </label>
         </div>
