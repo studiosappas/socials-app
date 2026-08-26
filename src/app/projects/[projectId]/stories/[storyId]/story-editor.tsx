@@ -37,9 +37,11 @@ import { canSubmitClientReview } from "@/lib/role-permissions";
 import { Button } from "@/components/ui/button";
 import { ItemComments } from "@/components/ui/item-comments";
 import { useToast } from "@/lib/hooks/use-toast";
+import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem, StoryLinkItem } from "@/lib/data/stories";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
+import type { WorkspaceSettings } from "@/lib/account-settings";
 import type { ProjectRole, ReviewStatus, StoryStatus } from "@/types/database";
 
 type StoryRecord = {
@@ -67,8 +69,6 @@ const fieldClass =
 // ignores author width/box-sizing while their default chrome is active.
 // -webkit-appearance: none turns that chrome off, the standard fix for
 // this, without removing the tap-to-open-picker behavior itself.
-const dateTimeFieldClass = `${fieldClass} appearance-none [-webkit-appearance:none]`;
-
 export function StoryEditor({
   projectId,
   story,
@@ -79,6 +79,7 @@ export function StoryEditor({
   role,
   currentUserId,
   members,
+  dateFormat,
   hideBackLink = false,
 }: {
   projectId: string;
@@ -92,6 +93,10 @@ export function StoryEditor({
   role: ProjectRole;
   currentUserId: string;
   members: ProjectMemberOption[];
+  // The viewer's own saved Settings > Workspace date-format preference,
+  // already defaulted server-side (lib/data/stories.ts) -- see
+  // ScheduleDateField, PostEditor's identical prop.
+  dateFormat: WorkspaceSettings["date_format"];
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
@@ -331,7 +336,14 @@ export function StoryEditor({
         </section>
       )}
 
-      <StoryMainForm projectId={projectId} story={story} links={links} canManage={canManage} role={role} />
+      <StoryMainForm
+        projectId={projectId}
+        story={story}
+        links={links}
+        canManage={canManage}
+        role={role}
+        dateFormat={dateFormat}
+      />
 
       <ItemComments
         itemId={story.id}
@@ -483,12 +495,14 @@ function StoryMainForm({
   links,
   canManage,
   role,
+  dateFormat,
 }: {
   projectId: string;
   story: StoryRecord;
   links: StoryLinkItem[];
   canManage: boolean;
   role: ProjectRole;
+  dateFormat: WorkspaceSettings["date_format"];
 }) {
   const isClient = canSubmitClientReview(role);
 
@@ -684,13 +698,13 @@ function StoryMainForm({
           </label>
           <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>
-            <input
-              type="date"
-              name="scheduled_date"
+            <ScheduleDateField
               value={scheduledDate}
-              onChange={(e) => setScheduledDate(e.target.value)}
+              onChange={setScheduledDate}
               disabled={!canManage}
-              className={dateTimeFieldClass}
+              dateFormat={dateFormat}
+              fieldClassName={fieldClass}
+              ariaLabel="Schedule date"
             />
           </label>
         </div>

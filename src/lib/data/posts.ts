@@ -5,6 +5,7 @@ import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/po
 import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@/lib/data/brand-moodboard";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { canEditContent } from "@/lib/role-permissions";
+import { mergeWorkspaceSettings, type WorkspaceSettings } from "@/lib/account-settings";
 import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 
 export type PostCoreData = {
@@ -33,6 +34,10 @@ export type PostCoreData = {
   currentUserId: string;
   members: ProjectMemberOption[];
   customFonts: CustomFontFace[];
+  // The viewer's own saved Settings > Workspace preference (account-settings.ts),
+  // already defaulted -- not project-scoped, so this is the same value
+  // regardless of which post/project is open.
+  dateFormat: WorkspaceSettings["date_format"];
 };
 
 // Everything the primary editing surface actually needs to render and
@@ -95,14 +100,13 @@ export async function getPostCoreData(
 
   if (!post) return null;
 
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
+  const [{ data: membership }, { data: profile }] = await Promise.all([
+    supabase.from("project_members").select("role").eq("project_id", projectId).eq("user_id", user!.id).single(),
+    supabase.from("profiles").select("workspace_settings").eq("id", user!.id).single(),
+  ]);
   const role: ProjectRole = membership?.role ?? "viewer";
   const canManage = canEditContent(role);
+  const { date_format: dateFormat } = mergeWorkspaceSettings(profile?.workspace_settings);
 
   // Isolated from the select above -- preview_storage_path/annotation_json/
   // poster_storage_path are newer columns that may not exist yet on a
@@ -197,6 +201,7 @@ export async function getPostCoreData(
     currentUserId: user!.id,
     members,
     customFonts,
+    dateFormat,
   };
 }
 

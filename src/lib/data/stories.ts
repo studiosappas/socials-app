@@ -3,6 +3,7 @@ import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-boar
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { canEditContent } from "@/lib/role-permissions";
+import { mergeWorkspaceSettings, type WorkspaceSettings } from "@/lib/account-settings";
 import type { StoryStatus, MediaType, ProjectRole, ReviewStatus } from "@/types/database";
 
 export type StoryFrameItem = {
@@ -33,6 +34,9 @@ export type StoryPageData = {
   role: ProjectRole;
   currentUserId: string;
   members: ProjectMemberOption[];
+  // The viewer's own saved Settings > Workspace preference (account-settings.ts),
+  // already defaulted -- see PostCoreData's identical field.
+  dateFormat: WorkspaceSettings["date_format"];
 };
 
 export async function getStoryPageData(
@@ -94,14 +98,16 @@ export async function getStoryPageData(
   // wiping out the whole library instead of just not filtering archived
   // assets out yet.
   const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
-  const [{ data: membership }, { data: archivedRows }] = await Promise.all([
+  const [{ data: membership }, { data: archivedRows }, { data: profile }] = await Promise.all([
     supabase.from("project_members").select("role").eq("project_id", projectId).eq("user_id", user!.id).single(),
     allMediaIdsForArchiveCheck.length
       ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
       : Promise.resolve({ data: [] }),
+    supabase.from("profiles").select("workspace_settings").eq("id", user!.id).single(),
   ]);
   const role: ProjectRole = membership?.role ?? "viewer";
   const canManage = canEditContent(role);
+  const { date_format: dateFormat } = mergeWorkspaceSettings(profile?.workspace_settings);
   const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
@@ -152,5 +158,5 @@ export async function getStoryPageData(
 
   const links: StoryLinkItem[] = (storyLinks ?? []).map((l) => ({ id: l.id, url: l.url, label: l.label }));
 
-  return { story, frames: frameItems, links, mediaLibrary, canManage, role, currentUserId: user!.id, members };
+  return { story, frames: frameItems, links, mediaLibrary, canManage, role, currentUserId: user!.id, members, dateFormat };
 }

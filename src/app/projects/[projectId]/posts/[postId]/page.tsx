@@ -29,6 +29,7 @@ export default async function PostPage({
       currentUserId={data.currentUserId}
       members={data.members}
       customFonts={data.customFonts}
+      dateFormat={data.dateFormat}
     />
   );
 }

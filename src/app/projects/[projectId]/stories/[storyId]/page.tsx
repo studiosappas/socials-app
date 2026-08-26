@@ -23,6 +23,7 @@ export default async function StoryPage({
       role={data.role}
       currentUserId={data.currentUserId}
       members={data.members}
+      dateFormat={data.dateFormat}
     />
   );
 }

@@ -72,6 +72,7 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           currentUserId={result.data.currentUserId}
           members={result.data.members}
           customFonts={result.data.customFonts}
+          dateFormat={result.data.dateFormat}
           hideBackLink
         />
       )}
@@ -86,6 +87,7 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           role={result.data.role}
           currentUserId={result.data.currentUserId}
           members={result.data.members}
+          dateFormat={result.data.dateFormat}
           hideBackLink
         />
       )}
