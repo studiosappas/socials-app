@@ -394,17 +394,16 @@ export function PostEditor({
       // originals here doesn't silently drop anything meaningful for the
       // common multi-image case this path exists for.
       //
-      // Deliberately not gated on isTouchDevice -- shareOriginalAssets'
-      // own canShareFiles check is what decides. On a desktop browser
-      // (which essentially never supports canShare({files}) as of
-      // current browser support) this returns false immediately and
-      // falls through to the exact same server-export zip download it
-      // always has.
+      // Gated on isTouchDevice -- some desktop browsers do support
+      // canShare({files}), so shareOriginalAssets' own preferMobileUx
+      // parameter is what actually keeps the OS share dialog off desktop
+      // "Download Media" clicks; on desktop this falls straight through
+      // to the exact same server-export zip download it always has.
       const shareable = orderedAssets
         .map((a) => a.originalUrl ?? a.url)
         .filter((url): url is string => !!url)
         .map((url) => ({ url, filename: filenameFromUrl(url, "asset") }));
-      if (shareable.length > 0 && (await shareOriginalAssets(shareable))) return;
+      if (shareable.length > 0 && (await shareOriginalAssets(shareable, isTouchDevice))) return;
 
       // Falls back to the server-composited export (crop-applied cover,
       // canonical per-slide sizing) as a plain zip download -- unchanged

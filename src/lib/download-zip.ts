@@ -151,18 +151,17 @@ function logShareDiagnostic(diagnostic: {
 // share sheet themselves -- download must never be left completely broken
 // on a browser that doesn't support file sharing.
 //
-// `preferMobileUx` (the caller's own touch/device hint) is no longer a
-// hard precondition for attempting this -- capability detection
-// (canShareFiles) runs regardless of it and is the thing that actually
-// decides whether to share. It's still passed through so a confidently-
-// desktop caller can note that in the diagnostic, but a device this
-// hint misclassifies (or simply doesn't cover) is no longer silently
-// blocked from ever reaching navigator.canShare at all. In practice this
-// changes nothing on real desktop browsers (none of the mainstream ones
-// support canShare({files}) today, so they still fall through to
-// download exactly as before) while removing a whole class of "device
-// heuristic said no" false negatives on mobile.
+// `preferMobileUx` (the caller's own touch/device hint) IS a hard
+// precondition for attempting native share: some desktop browsers do
+// support canShare({files}) despite the assumption this comment used to
+// make, which was opening the OS share dialog on desktop "Save Media"
+// clicks. Capability detection alone is not enough to tell mobile and
+// desktop apart, so the caller's own device hint gates it.
 export async function shareOrDownloadAsset(url: string, filename: string, preferMobileUx: boolean) {
+  if (!preferMobileUx) {
+    await downloadAsset(url, filename);
+    return;
+  }
   const diag = {
     preferMobileUx,
     shareAvailable: typeof navigator !== "undefined" && typeof navigator.share === "function",
@@ -224,13 +223,19 @@ export async function shareOrDownloadAsset(url: string, filename: string, prefer
 // Returns true if this fully handled the request (shared successfully,
 // or the user dismissed the share sheet themselves) -- the caller should
 // do nothing further. Returns false if native file sharing isn't
-// supported/available for these files, or a non-abort error occurred, so
-// the caller can fall back to its own existing (server-export ZIP)
-// download path -- see post-editor.tsx's own call site.
-export async function shareOriginalAssets(assets: { url: string; filename: string }[]): Promise<boolean> {
-  if (assets.length === 0) return false;
+// supported/available for these files, a non-abort error occurred, or
+// `preferMobileUx` is false, so the caller can fall back to its own
+// existing (server-export ZIP) download path -- see post-editor.tsx's
+// own call site.
+//
+// `preferMobileUx` gates this the same way shareOrDownloadAsset's own
+// does (see that function's comment) -- some desktop browsers do
+// support canShare({files}), so capability detection alone isn't enough
+// to keep the OS share dialog off desktop "Save Media"/"Download" clicks.
+export async function shareOriginalAssets(assets: { url: string; filename: string }[], preferMobileUx: boolean): Promise<boolean> {
+  if (assets.length === 0 || !preferMobileUx) return false;
   const diag = {
-    preferMobileUx: true,
+    preferMobileUx,
     shareAvailable: typeof navigator !== "undefined" && typeof navigator.share === "function",
     canShareAvailable: typeof navigator !== "undefined" && typeof navigator.canShare === "function",
     fileCount: assets.length,

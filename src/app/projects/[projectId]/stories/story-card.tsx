@@ -140,7 +140,7 @@ export const StoryCard = memo(function StoryCard({
       // a mixed/video set keeps the existing zip download untouched.
       if (files.every((f) => f.mediaType === "image")) {
         const assets = files.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `file-${i + 1}`) }));
-        if (await shareOriginalAssets(assets)) return;
+        if (await shareOriginalAssets(assets, isTouchDevice)) return;
       }
       const zipAssets = files.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `file-${i + 1}`) }));
       await downloadAssetsAsZip(zipAssets, `${name || "content"}.zip`);

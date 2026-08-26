@@ -142,7 +142,7 @@ export function StoryEditor({
       // mixed/video story keeps the existing zip download untouched.
       if (framesWithUrl.length > 0 && framesWithUrl.every((f) => f.mediaType === "image")) {
         const assets = framesWithUrl.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `frame-${i + 1}`) }));
-        if (await shareOriginalAssets(assets)) return;
+        if (await shareOriginalAssets(assets, isTouchDevice)) return;
       }
       const zipAssets = framesWithUrl.map((f, i) => ({ url: f.url, filename: filenameFromUrl(f.url, `frame-${i + 1}`) }));
       await downloadAssetsAsZip(zipAssets, `story-${story.id}-frames.zip`);
