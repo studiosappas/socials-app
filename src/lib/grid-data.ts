@@ -2,7 +2,12 @@ import type { createClient } from "@/lib/supabase/server";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
-export type CoverTransform = { scale: number; x: number; y: number };
+// Kept in sync with grid-reducer.ts's GridCoverTransform and
+// image-crop.ts's own CoverTransform (three separate declarations of the
+// same shape, pre-existing -- not consolidated into one shared import this
+// round to avoid a client/server import-boundary change unrelated to this
+// task). rotation optional, defaults to 0 -- no migration needed.
+export type CoverTransform = { scale: number; x: number; y: number; rotation?: number };
 
 export type GridSlotWithPath = {
   slotId: string;

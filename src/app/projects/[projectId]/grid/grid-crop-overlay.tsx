@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { GridCoverTransform } from "./grid-board";
+import { GRID_SLOT_ASPECT_RATIO } from "./grid-constants";
 
-const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 
 const CORNERS = ["tl", "tr", "bl", "br"] as const;
@@ -11,6 +11,47 @@ type Corner = (typeof CORNERS)[number];
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeRotation(rotation: number | undefined): 0 | 90 | 180 | 270 {
+  const r = (((rotation ?? 0) % 360) + 360) % 360;
+  return r === 90 || r === 180 || r === 270 ? r : 0;
+}
+
+// The minimum zoom that still guarantees full coverage of the (non-square,
+// 4:5) crop viewport, for a given rotation. At 0/180 the image's own
+// object-fit:cover sizing already exactly covers the box at zoom=1 (the
+// existing, unchanged behavior). At 90/270 the image's effective footprint
+// is rotated 90 degrees relative to the box -- a rectangle that exactly
+// covers a W x H box at zoom 1 does NOT cover that same box once rotated
+// 90 degrees around its own center (its short side is now aligned with the
+// box's long side); the exact scale-up needed to close that gap is the
+// box's own aspect ratio inverted. Derived, not approximated: for a 4:5 box
+// this is exactly 1.25.
+function minZoomForRotation(rotation: number): number {
+  const r = normalizeRotation(rotation);
+  return r === 90 || r === 270 ? 1 / GRID_SLOT_ASPECT_RATIO : 1;
+}
+
+// Converts a raw screen-space pan delta (as a fraction of the container)
+// into the delta to apply to the image's OWN local (pre-rotation) offset.
+// The CSS transform applies scale+translate in the image's local space
+// FIRST, then rotate around the box center LAST (see imageStyle below) --
+// so at 90/270, a local-space translate ends up pointing sideways on
+// screen unless it's first rotated by the inverse of the current rotation.
+// Only ever called with rotation in {0,90,180,270}, so this is an exact
+// lookup, not trig with floating-point error.
+function rotateScreenDeltaToLocal(dxFrac: number, dyFrac: number, rotation: number) {
+  switch (normalizeRotation(rotation)) {
+    case 90:
+      return { dx: dyFrac, dy: -dxFrac };
+    case 180:
+      return { dx: -dxFrac, dy: -dyFrac };
+    case 270:
+      return { dx: -dyFrac, dy: dxFrac };
+    default:
+      return { dx: dxFrac, dy: dyFrac };
+  }
 }
 
 // Offsets are stored as fractions of the tile's own width/height (not raw
@@ -27,7 +68,10 @@ export function GridCropOverlay({
   onSave: (transform: GridCoverTransform) => void;
   onCancel: () => void;
 }) {
-  const [zoom, setZoom] = useState(initialTransform?.scale ?? 1);
+  const [rotation, setRotation] = useState<number>(normalizeRotation(initialTransform?.rotation));
+  const [zoom, setZoom] = useState(
+    Math.max(initialTransform?.scale ?? 1, minZoomForRotation(normalizeRotation(initialTransform?.rotation))),
+  );
   const [offset, setOffset] = useState({ x: initialTransform?.x ?? 0, y: initialTransform?.y ?? 0 });
   const containerRef = useRef<HTMLDivElement>(null);
   // containerWidth/Height and cx/cy below are captured once per gesture
@@ -56,11 +100,11 @@ export function GridCropOverlay({
   // document-level "click outside commits" listener (registered once on
   // mount) always reads current values without needing to re-subscribe on
   // every drag update.
-  const latestTransformRef = useRef<GridCoverTransform>({ scale: zoom, x: offset.x, y: offset.y });
+  const latestTransformRef = useRef<GridCoverTransform>({ scale: zoom, x: offset.x, y: offset.y, rotation });
   const onSaveRef = useRef(onSave);
   const onCancelRef = useRef(onCancel);
   useEffect(() => {
-    latestTransformRef.current = { scale: zoom, x: offset.x, y: offset.y };
+    latestTransformRef.current = { scale: zoom, x: offset.x, y: offset.y, rotation };
     onSaveRef.current = onSave;
     onCancelRef.current = onCancel;
   });
@@ -94,7 +138,26 @@ export function GridCropOverlay({
   }, []);
 
   function commit() {
-    onSave({ scale: zoom, x: offset.x, y: offset.y });
+    onSave({ scale: zoom, x: offset.x, y: offset.y, rotation });
+  }
+
+  // Rotates 90 degrees clockwise, cycling 0->90->180->270->0. Free/
+  // arbitrary rotation was deliberately not implemented: it would need the
+  // cover-fit scale, the minimum-zoom-to-avoid-corners, AND the pan-bounds
+  // clamp to all become real trigonometry, reproduced IDENTICALLY on the
+  // server (lib/image-crop.ts, sharp) for exports -- a real correctness
+  // risk to get pixel-perfect and bug-free versus a fixed 90-degree step,
+  // where sharp's own `.rotate(90|180|270)` is exact and lossless with no
+  // interpolation, and the client math is a clean 4-value lookup instead
+  // of floating-point sin/cos. A reliable rotation interaction beats a
+  // fragile arbitrary-angle one -- see this file's own header comment.
+  function handleRotate() {
+    const next = normalizeRotation(rotation + 90);
+    const nextMinZoom = minZoomForRotation(next);
+    const nextZoom = Math.max(zoom, nextMinZoom);
+    setRotation(next);
+    setZoom(nextZoom);
+    setOffset((current) => clampOffset(current, nextZoom));
   }
 
   function handleImagePointerDown(e: React.PointerEvent<HTMLImageElement>) {
@@ -115,9 +178,10 @@ export function GridCropOverlay({
     if (!panRef.current) return;
     const dxFrac = (e.clientX - panRef.current.startX) / panRef.current.containerWidth;
     const dyFrac = (e.clientY - panRef.current.startY) / panRef.current.containerHeight;
+    const local = rotateScreenDeltaToLocal(dxFrac, dyFrac, rotation);
     setOffset(
       clampOffset(
-        { x: panRef.current.startOffset.x + dxFrac, y: panRef.current.startOffset.y + dyFrac },
+        { x: panRef.current.startOffset.x + local.dx, y: panRef.current.startOffset.y + local.dy },
         zoom,
       ),
     );
@@ -131,6 +195,8 @@ export function GridCropOverlay({
   // Corner handles scale the image uniformly around the tile's center --
   // dragging outward enlarges it, dragging inward shrinks it, exactly like
   // Canva's image-crop handles (the frame itself never moves or resizes).
+  // Radial distance-from-center is rotation-agnostic, so this needs no
+  // rotation-aware adjustment the way panning does.
   function handleCornerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
@@ -148,7 +214,7 @@ export function GridCropOverlay({
     const { cx, cy } = handleDragRef.current;
     const dist = Math.hypot(e.clientX - cx, e.clientY - cy);
     const ratio = dist / handleDragRef.current.startDist;
-    const nextZoom = clamp(handleDragRef.current.startZoom * ratio, MIN_ZOOM, MAX_ZOOM);
+    const nextZoom = clamp(handleDragRef.current.startZoom * ratio, minZoomForRotation(rotation), MAX_ZOOM);
     setZoom(nextZoom);
     setOffset(clampOffset(handleDragRef.current.startOffset, nextZoom));
   }
@@ -158,8 +224,13 @@ export function GridCropOverlay({
     handleDragRef.current = null;
   }
 
+  // rotate() is the OUTERMOST transform (applied last, around the box's own
+  // center by default) -- scale+translate happen first, in the image's own
+  // local space, exactly matching lib/image-crop.ts's server-side order
+  // (rotate the source pixels first, then run the existing crop math
+  // against the rotated buffer).
   const imageStyle: React.CSSProperties = {
-    transform: `translate(${offset.x * 100}%, ${offset.y * 100}%) scale(${zoom})`,
+    transform: `rotate(${rotation}deg) translate(${offset.x * 100}%, ${offset.y * 100}%) scale(${zoom})`,
   };
 
   return (
@@ -209,7 +280,7 @@ export function GridCropOverlay({
           onPointerUp={handleCornerPointerUp}
         />
       ))}
-      {/* Explicit, visible Confirm/Cancel -- double-click-to-save and
+      {/* Explicit, visible Confirm/Cancel/Rotate -- double-click-to-save and
           click-outside-to-save/Escape-to-cancel all still work (kept for
           anyone used to that gesture), but neither was ever a DISCOVERABLE
           way to exit this editor, and this tile's own kebab menu -- the one
@@ -240,6 +311,17 @@ export function GridCropOverlay({
         </button>
         <button
           type="button"
+          title="Rotate 90°"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleRotate();
+          }}
+          className="flex items-center justify-center rounded-none border border-background/40 bg-background/90 p-1.5 text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)] transition-colors duration-150 hover:bg-background"
+        >
+          <RotateIcon className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
           onClick={(e) => {
             e.stopPropagation();
             commit();
@@ -250,6 +332,15 @@ export function GridCropOverlay({
         </button>
       </div>
     </div>
+  );
+}
+
+function RotateIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <path d="M3 12a9 9 0 1 1 3 6.7" strokeLinecap="round" />
+      <path d="M3 17v-5h5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -294,7 +385,8 @@ function CornerHandle({
 
 export function coverTransformStyle(transform: GridCoverTransform | null): React.CSSProperties {
   if (!transform) return {};
+  const rotation = normalizeRotation(transform.rotation);
   return {
-    transform: `translate(${transform.x * 100}%, ${transform.y * 100}%) scale(${transform.scale})`,
+    transform: `rotate(${rotation}deg) translate(${transform.x * 100}%, ${transform.y * 100}%) scale(${transform.scale})`,
   };
 }

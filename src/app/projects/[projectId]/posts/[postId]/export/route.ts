@@ -1,10 +1,11 @@
 import JSZip from "jszip";
 import { createClient } from "@/lib/supabase/server";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
+import { GRID_EXPORT_WIDTH, GRID_EXPORT_HEIGHT } from "@/app/projects/[projectId]/grid/grid-constants";
 
-const SLIDE_W = 1080;
-const COVER_H = 1350; // 4:5, position 0 (the post's cover)
-const SLIDE_H = 1440; // 3:4, every other carousel slide
+const SLIDE_W = GRID_EXPORT_WIDTH;
+const COVER_H = GRID_EXPORT_HEIGHT; // 4:5, position 0 (the post's cover) -- same canonical Grid ratio, since this literally is the Grid tile's own image
+const SLIDE_H = 1440; // 3:4, every other carousel slide -- a genuinely different, unrelated ratio (not the Grid tile), intentionally left as its own literal
 
 // Server-side per-post export ("Download Media"): unlike the full-feed
 // export (which only ever needs each post's single cover), this needs to

@@ -32,8 +32,10 @@ import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { downloadAsset, filenameFromUrl } from "@/lib/download-zip";
+import { filenameFromUrl, shareOrDownloadAsset, shareOrDownloadZipEntries } from "@/lib/download-zip";
 import { saveAs } from "file-saver";
+import JSZip from "jszip";
+import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
@@ -162,6 +164,12 @@ export function PostEditor({
     setOverrideCoverTransform(undefined);
   }
   const effectiveCoverTransform = overrideCoverTransform !== undefined ? overrideCoverTransform : post.coverTransform;
+
+  // Feature-detected (pointer: coarse), never user-agent sniffed -- gates
+  // whether "Download Media" prefers the native OS share sheet (Web Share
+  // API Level 2) over a plain file download. See shareOrDownloadZipEntries'
+  // own comment for the full reasoning.
+  const isTouchDevice = useIsTouchDevice();
 
   // Optimistic insert -- item.url/mediaType are already known client-side
   // (picked from the already-loaded media library, not a fresh upload), so
@@ -322,8 +330,35 @@ export function PostEditor({
       // client-side byte-for-byte zip (downloadAssetsAsZip) can do.
       const response = await fetch(`/projects/${projectId}/posts/${post.id}/export`);
       if (!response.ok) return;
-      const blob = await response.blob();
-      saveAs(blob, `post-${post.id}-export.zip`);
+      const zipBlob = await response.blob();
+      // On a touch device, unzip the export CLIENT-SIDE (still the same
+      // server-composited, crop-applied bytes -- the zip is only ever the
+      // transport format between server and client here, never something
+      // the mobile user is meant to see or manage) and hand the individual
+      // image(s) to the native share sheet instead, so the user gets a
+      // real "Save Image"/"Save to Photos" action rather than a .zip
+      // landing in Files. Desktop is completely unaffected: preferShare is
+      // false there, so this always takes the exact same saveAs(zipBlob,
+      // ...) path it always has.
+      if (isTouchDevice) {
+        try {
+          const zip = await JSZip.loadAsync(zipBlob);
+          const entries = await Promise.all(
+            Object.values(zip.files)
+              .filter((f) => !f.dir)
+              .map(async (f) => ({ filename: f.name, blob: await f.async("blob") })),
+          );
+          if (entries.length > 0) {
+            await shareOrDownloadZipEntries(zipBlob, entries, `post-${post.id}-export.zip`, true);
+            return;
+          }
+        } catch (error) {
+          console.error("Failed to unzip export for sharing, falling back to zip download:", error);
+          // Falls through to the plain zip save below -- download must
+          // never end up completely broken because the share path failed.
+        }
+      }
+      saveAs(zipBlob, `post-${post.id}-export.zip`);
     } finally {
       setDownloading(false);
     }
@@ -443,7 +478,7 @@ export function PostEditor({
           disabled={downloading}
           className="w-fit self-start px-6 py-3 text-xs tracking-wide uppercase"
         >
-          {downloading ? "Preparing…" : "Download Media"}
+          {downloading ? "Preparing…" : isTouchDevice ? "Share / Save Media" : "Download Media"}
         </Button>
       ) : (
         <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
@@ -653,6 +688,9 @@ function SortableAsset({
   const [cropMode, setCropMode] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
+  // Same feature-detected (not UA-sniffed) signal as PostEditor's own
+  // "Download Media" -- see shareOrDownloadAsset's own comment.
+  const isTouchDevice = useIsTouchDevice();
 
   // Optimistic override so a fresh crop renders immediately instead of
   // waiting for router.refresh() to land -- same "reset when the server
@@ -674,9 +712,16 @@ function SortableAsset({
     setMenuOpen(false);
     if (!asset.originalUrl) return;
     setDownloading(true);
-    downloadAsset(asset.originalUrl, filenameFromUrl(asset.originalUrl, "asset")).finally(() =>
-      setDownloading(false),
-    );
+    // Same bytes as before (asset.originalUrl, the true original -- this
+    // single-asset action has always been the raw file, distinct from
+    // "Download Media"'s server-composited crop-applied export above);
+    // only the MECHANISM changes on a touch device, preferring the native
+    // share sheet over a plain file download.
+    shareOrDownloadAsset(
+      asset.originalUrl,
+      filenameFromUrl(asset.originalUrl, "asset"),
+      isTouchDevice,
+    ).finally(() => setDownloading(false));
   }
 
   async function handleSaveCrop(next: GridCoverTransform) {
@@ -771,7 +816,7 @@ function SortableAsset({
                 disabled={downloading}
                 className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
               >
-                {downloading ? "Downloading..." : "Download"}
+                {downloading ? "Downloading..." : isTouchDevice ? "Share / Save" : "Download"}
               </button>
               <button
                 type="button"

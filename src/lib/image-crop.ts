@@ -1,9 +1,19 @@
 import sharp, { type Sharp } from "sharp";
 
-export type CoverTransform = { scale: number; x: number; y: number };
+// rotation: degrees, one of 0/90/180/270 (see grid-crop-overlay.tsx for
+// why rotation is restricted to these four values rather than free/
+// arbitrary angles). Optional, defaults to 0 -- a transform saved before
+// rotation existed has no `rotation` key and must keep producing an
+// identical export.
+export type CoverTransform = { scale: number; x: number; y: number; rotation?: number };
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeRotation(rotation: number | undefined): 0 | 90 | 180 | 270 {
+  const r = ((rotation ?? 0) % 360 + 360) % 360;
+  return r === 90 || r === 180 || r === 270 ? r : 0;
 }
 
 // Reproduces the on-screen CSS crop exactly (coverTransformStyle in
@@ -42,7 +52,20 @@ export async function applyCoverTransform(
     return sharp(buffer).resize(targetW, targetH, { fit: "cover", position: "centre" });
   }
 
-  const { width: naturalW, height: naturalH } = await sharp(buffer).metadata();
+  // Physically rotate the pixels FIRST, into their own buffer, before any
+  // of the existing cover-fit/crop math runs -- for a 90/180/270 rotation
+  // sharp does this losslessly (no interpolation, dimensions cleanly
+  // swap at 90/270), so everything below can stay completely unaware that
+  // a rotation happened at all: it just operates on "the source image,"
+  // which happens to already be in its rotated orientation. This mirrors
+  // the client CSS side exactly (grid-crop-overlay.tsx applies `rotate()`
+  // as the outermost transform around the same scale/translate this
+  // reproduces), so a given transform produces the same crop server-side
+  // as it visually showed in the editor.
+  const rotation = normalizeRotation(transform.rotation);
+  const rotatedBuffer = rotation !== 0 ? await sharp(buffer).rotate(rotation).toBuffer() : buffer;
+
+  const { width: naturalW, height: naturalH } = await sharp(rotatedBuffer).metadata();
   if (!naturalW || !naturalH) {
     return sharp(buffer).resize(targetW, targetH, { fit: "cover", position: "centre" });
   }
@@ -64,7 +87,7 @@ export async function applyCoverTransform(
   const cropLeft = clamp(Math.round(naturalW / 2 - cropW / 2 - panX), 0, naturalW - cropW);
   const cropTop = clamp(Math.round(naturalH / 2 - cropH / 2 - panY), 0, naturalH - cropH);
 
-  const extracted = sharp(buffer).extract({
+  const extracted = sharp(rotatedBuffer).extract({
     left: cropLeft,
     top: cropTop,
     width: Math.round(cropW),

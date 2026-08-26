@@ -51,6 +51,7 @@ import {
 import { gridInteractionReducer, initialGridInteractionState } from "./grid-interaction";
 import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
+import { GRID_SLOT_ASPECT_CLASS } from "./grid-constants";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -70,6 +71,25 @@ export type { GridBoardRow, GridBoardSlot, GridCoverTransform };
 // comfortably inside typical OS double-click intervals without making a
 // genuine single click feel laggy.
 const DOUBLE_CLICK_WINDOW_MS = 400;
+
+// Resizable Library sidebar (desktop only -- the sidebar itself is already
+// `hidden lg:block`, mobile is untouched). Bounded by the project page's own
+// shared `max-w-6xl` container (layout.tsx, used by every /projects/[id]/*
+// route -- deliberately not touched here, that's a cross-page decision
+// outside this task's scope): at the max width below, the 3-column Grid
+// still gets a genuinely usable ~110-130px per tile at that container's
+// typical rendered width; MIN keeps a floor close to the previous fixed
+// 256px (lg:w-64) so resizing down never regresses below what already
+// shipped.
+const LIBRARY_WIDTH_MIN = 240;
+const LIBRARY_WIDTH_DEFAULT = 320;
+const LIBRARY_WIDTH_MAX = 420;
+const LIBRARY_WIDTH_STORAGE_KEY = "grid-library-width";
+
+function clampLibraryWidth(px: number): number {
+  return Math.min(LIBRARY_WIDTH_MAX, Math.max(LIBRARY_WIDTH_MIN, px));
+}
+
 // Upload concurrency now lives in use-library-items.ts, the one shared
 // owner of Library item data for both this dialog and the sidebar
 // MediaLibrary -- no longer a separate constant here to keep in sync.
@@ -306,6 +326,70 @@ export function GridBoard({
   // through one was invisible to the other until an unrelated refresh
   // happened to land.
   const libraryController = useLibraryItems(projectId, mediaLibrary, pushCommand, demoMode);
+
+  // Resizable Library sidebar width -- pure client UI preference, not
+  // project/database state (see LIBRARY_WIDTH_STORAGE_KEY's own comment
+  // for why localStorage, not a server column). Always starts at the
+  // static default on both server and first client render (SSR has no
+  // localStorage, and reading it during the initial render would mismatch
+  // the server-rendered HTML) -- the stored value, if any, is applied via
+  // the effect below immediately after mount, matching this codebase's
+  // existing dark-mode/preferences pattern for the same SSR-safety reason.
+  const [libraryWidth, setLibraryWidth] = useState(LIBRARY_WIDTH_DEFAULT);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(LIBRARY_WIDTH_STORAGE_KEY);
+      if (stored) {
+        const parsed = Number(stored);
+        // A one-time read of an external system (localStorage) applied
+        // once right after mount, not a state->state sync loop -- same
+        // established exception as this codebase's other mount-time
+        // preference reads.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        if (Number.isFinite(parsed)) setLibraryWidth(clampLibraryWidth(parsed));
+      }
+    } catch {
+      // Storage can throw in locked-down/private-browsing contexts --
+      // the default width is a perfectly fine fallback, never worth
+      // failing the page over.
+    }
+  }, []);
+  const resizingRef = useRef(false);
+  const resizeStartRef = useRef({ startX: 0, startWidth: LIBRARY_WIDTH_DEFAULT });
+  const [isResizingLibrary, setIsResizingLibrary] = useState(false);
+  const handleResizeHandlePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      resizingRef.current = true;
+      resizeStartRef.current = { startX: e.clientX, startWidth: libraryWidth };
+      setIsResizingLibrary(true);
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    },
+    [libraryWidth],
+  );
+  const handleResizeHandlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!resizingRef.current) return;
+    // The handle sits on the Library's LEFT edge (the boundary with the
+    // Grid) -- dragging it further left (negative delta) widens the
+    // sidebar, dragging it right narrows it, matching the direction a
+    // real Adobe-style panel divider moves.
+    const delta = e.clientX - resizeStartRef.current.startX;
+    setLibraryWidth(clampLibraryWidth(resizeStartRef.current.startWidth - delta));
+  }, []);
+  const handleResizeHandlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (!resizingRef.current) return;
+    resizingRef.current = false;
+    setIsResizingLibrary(false);
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    setLibraryWidth((current) => {
+      try {
+        window.localStorage.setItem(LIBRARY_WIDTH_STORAGE_KEY, String(current));
+      } catch {
+        // Same non-fatal reasoning as the read above.
+      }
+      return current;
+    });
+  }, []);
 
   // Share for Review: selecting posts happens inline on the grid itself
   // (same multi-select-circle pattern as Media Library) instead of in a
@@ -934,16 +1018,38 @@ export function GridBoard({
           // drag-and-drop to make sense, which only fits once there's room
           // for both side by side -- below that, tapping an empty slot
           // opens MediaPickerDialog instead (also has its own upload entry
-          // point, so nothing is lost on mobile).
-          <div className="hidden lg:block lg:w-64 lg:shrink-0">
-            <MediaLibrary
-              projectId={projectId}
-              items={mediaLibrary}
-              folders={mediaFolders}
-              pushCommand={pushCommand}
-              demoMode={demoMode}
-              sharedLibrary={libraryController}
+          // point, so nothing is lost on mobile). Desktop-only resize
+          // handle sits on the sidebar's own left edge (the boundary with
+          // the Grid) -- `hidden lg:flex` mirrors the sidebar's own
+          // existing `hidden lg:block` gate exactly, so mobile is
+          // completely unaffected (no resize UI, no width state applied --
+          // the whole wrapper only renders at `lg`+ to begin with).
+          <div className="relative hidden lg:flex lg:shrink-0" style={{ width: libraryWidth }}>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize media library"
+              title="Drag to resize"
+              onPointerDown={handleResizeHandlePointerDown}
+              onPointerMove={handleResizeHandlePointerMove}
+              onPointerUp={handleResizeHandlePointerUp}
+              onPointerCancel={handleResizeHandlePointerUp}
+              className={`absolute -left-2.5 top-0 z-10 h-full w-3 cursor-col-resize touch-none select-none ${
+                isResizingLibrary ? "bg-foreground/10" : "hover:bg-foreground/[.06]"
+              }`}
             />
+            <div className="min-w-0 flex-1">
+              <MediaLibrary
+                projectId={projectId}
+                items={mediaLibrary}
+                folders={mediaFolders}
+                pushCommand={pushCommand}
+                demoMode={demoMode}
+                sharedLibrary={libraryController}
+                wide
+                sidebarWidthPx={libraryWidth}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -974,7 +1080,7 @@ export function GridBoard({
           </div>
         )}
         {activeSlot && (
-          <div className="aspect-[4/5] w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
+          <div className={`${GRID_SLOT_ASPECT_CLASS} w-28 cursor-grabbing overflow-hidden rounded border border-foreground/20 shadow-[0_2px_10px_rgba(0,0,0,0.1)]`}>
             {activeSlot.thumbnailUrl ? (
               // Same coverTransformStyle the real tile renders with (see
               // GridSlotBody) -- without it, a cropped post's drag preview
@@ -1573,7 +1679,7 @@ const GridSlot = memo(function GridSlot({
       // the whole draggable tile (not just the cover image) so it can never
       // compete with dnd-kit's own long-press activation, regardless of
       // which element inside the tile the touch happens to land on.
-      className={`relative flex aspect-[4/5] items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
+      className={`relative flex ${GRID_SLOT_ASPECT_CLASS} items-center justify-center border transition-[outline-color,border-color] duration-150 select-none [-webkit-touch-callout:none] ${
         slot.postId && canManage && dragEnabled && interactionIdle
           ? "cursor-grab touch-none"
           : filled || canManage

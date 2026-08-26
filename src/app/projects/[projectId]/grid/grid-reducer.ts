@@ -33,7 +33,13 @@
 // pre-mutation value of the entities that operation began -- never a
 // snapshot of the whole board (Invariant 7).
 
-export type GridCoverTransform = { scale: number; x: number; y: number };
+// rotation is in degrees, one of 0/90/180/270 (see grid-crop-overlay.tsx's
+// own comment for why free/arbitrary rotation was deliberately NOT
+// implemented), optional and defaulting to 0 wherever absent -- every
+// crop saved before rotation existed has no `rotation` key at all, and
+// must keep loading identically. No migration: posts.cover_transform is
+// already a JSONB blob, so a new optional key needs no schema change.
+export type GridCoverTransform = { scale: number; x: number; y: number; rotation?: number };
 
 export type GridBoardSlot = {
   id: string;

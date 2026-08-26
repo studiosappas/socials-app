@@ -482,7 +482,9 @@ export async function reorderGridPosts(
 export async function updatePostCoverTransform(
   projectId: string,
   postId: string,
-  transform: { scale: number; x: number; y: number } | null,
+  // rotation optional, defaults to 0 -- no migration: cover_transform is
+  // already a JSONB column, a new optional key is stored as-is.
+  transform: { scale: number; x: number; y: number; rotation?: number } | null,
 ) {
   const supabase = await createClient();
 

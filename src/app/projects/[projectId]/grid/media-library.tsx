@@ -68,6 +68,8 @@ export function MediaLibrary({
   demoMode = false,
   onSelectionChange,
   sharedLibrary,
+  wide = false,
+  sidebarWidthPx,
 }: {
   projectId: string;
   items: MediaLibraryItem[];
@@ -95,6 +97,21 @@ export function MediaLibrary({
   // component still calls useLibraryItems() itself and is fully self-
   // contained, since that caller has no picker dialog to share with.
   sharedLibrary?: LibraryItemsController;
+  // Additive, default false -- the landing page's Chapter 01 demo omits
+  // this and renders byte-for-byte the same small square-tile grid it
+  // always has. Grid's own resizable sidebar (grid-board.tsx) is the only
+  // caller that passes it: 2 columns instead of 3, and a taller,
+  // portrait-biased tile height instead of square, so thumbnails are
+  // actually big enough to make out faces/composition/text -- see the
+  // tile grid's own comment below for why this stays a fixed EXPLICIT
+  // pixel height (never CSS `aspect-ratio` derived from content) even
+  // though it's now portrait-shaped and width-responsive.
+  wide?: boolean;
+  // The sidebar's own current (possibly user-resized) width in px --
+  // only meaningful alongside `wide`, used to compute a tile height that
+  // tracks the resize live (see the tile grid's own comment). Falls back
+  // to grid-board.tsx's own LIBRARY_WIDTH_DEFAULT (320) if omitted.
+  sidebarWidthPx?: number;
 }) {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
@@ -211,31 +228,41 @@ export function MediaLibrary({
         </button>
       ) : null}
 
-      {/* Capped to roughly 9 rows (grid-cols-3, ~82px square cells at this
-          sidebar's w-64 width, plus gaps) so a project with hundreds of
-          uploads doesn't grow the sidebar unboundedly -- scrolls internally
-          for anything past that instead. Uncapped in demoMode: the landing
+      {/* Capped to roughly 9 rows so a project with hundreds of uploads
+          doesn't grow the sidebar unboundedly -- scrolls internally for
+          anything past that instead. Uncapped in demoMode: the landing
           page's demo library is small and deliberately rendered much wider
           than the real sidebar, where this cap would just crop the hero
           panel oddly.
 
-          --tile-row-h/auto-rows, not each tile's own aspect-square, is what
-          actually sizes every row here -- same root cause and same fix as
-          story-editor.tsx's/post-editor.tsx's own "Add from library" grids:
-          an aspect-square tile's height is DERIVED from its resolved width
-          only after layout, so a burst of many tiles landing in the DOM at
-          once (a real batch upload's optimistic placeholders, all inserted
-          in a single setState) can get measured/painted before that
-          derivation settles, especially on WebKit -- confirmed live via
-          Playwright screenshots at 50-item batches: every tile collapsed to
-          a thin horizontal strip in WebKit, and the below-the-fold tiles did
-          the same in Chromium. An explicit, fixed row height has no
-          dependency on any child's aspect-ratio or load state at all, so
-          that race can't recur regardless of batch size or browser. 83px
-          measured live against this exact sidebar's real lg:w-64 width
-          (82.66px), not guessed. */}
+          --tile-row-h/auto-rows, not each tile's own aspect-square/
+          aspect-ratio, is what actually sizes every row here -- same root
+          cause and same fix as story-editor.tsx's/post-editor.tsx's own
+          "Add from library" grids: an aspect-ratio tile's height is
+          DERIVED from its resolved width only after layout, so a burst of
+          many tiles landing in the DOM at once (a real batch upload's
+          optimistic placeholders, all inserted in a single setState) can
+          get measured/painted before that derivation settles, especially
+          on WebKit -- confirmed live via Playwright screenshots at 50-item
+          batches: every tile collapsed to a thin horizontal strip in
+          WebKit, and the below-the-fold tiles did the same in Chromium.
+          An explicit, JS-COMPUTED pixel row height has no dependency on
+          any child's aspect-ratio or load state at all, so that race
+          can't recur regardless of batch size, browser, or (now) sidebar
+          width -- `wide` mode's height is still a concrete px number
+          applied directly, exactly like the original fixed 83px was, just
+          recomputed from the current (possibly user-resized) sidebar
+          width instead of being a hardcoded constant. 83px itself was
+          measured live against the old fixed lg:w-64 width (82.66px), not
+          guessed; the `wide` formula below follows the identical
+          per-column-width * 4/3 derivation, just parameterized. */}
       <div
-        className={`grid grid-cols-3 gap-1 [--tile-row-h:83px] auto-rows-[var(--tile-row-h)] ${demoMode ? "" : "max-h-[620px] overflow-y-auto"}`}
+        className={`grid gap-1 auto-rows-[var(--tile-row-h)] ${wide ? "grid-cols-2 gap-2" : "grid-cols-3"} ${demoMode ? "" : "max-h-[620px] overflow-y-auto"}`}
+        style={{
+          ["--tile-row-h" as string]: wide
+            ? `${Math.round((((sidebarWidthPx ?? 320) - 8) / 2) * (4 / 3))}px`
+            : "83px",
+        }}
       >
         {!activeFolderId &&
           folders.map((folder) => (
