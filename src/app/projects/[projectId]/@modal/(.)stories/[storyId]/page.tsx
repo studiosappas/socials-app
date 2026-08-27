@@ -25,6 +25,7 @@ export default async function InterceptedStoryPage({
         role={data.role}
         currentUserId={data.currentUserId}
         members={data.members}
+        dateFormat={data.dateFormat}
         hideBackLink
       />
     </Modal>

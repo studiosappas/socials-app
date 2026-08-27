@@ -48,7 +48,7 @@ export type UserPreferences = {
 export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   language: "en",
   timezone: "UTC",
-  date_format: "MM/DD/YYYY",
+  date_format: "DD/MM/YYYY",
   week_starts_on: 0,
   default_landing_page: "projects",
 };
@@ -101,6 +101,24 @@ export const DATE_FORMAT_OPTIONS: { value: WorkspaceSettings["date_format"]; lab
   { value: "DD/MM/YYYY", label: "DD/MM/YYYY" },
   { value: "YYYY-MM-DD", label: "YYYY-MM-DD" },
 ];
+
+// Native input[type=date]'s own VISIBLE rendering is locale-controlled by
+// the browser/OS -- there is no attribute/CSS that makes it show
+// "DD/MM/YYYY" vs "MM/DD/YYYY" per this app-level preference, only the
+// underlying value stays a locale-independent YYYY-MM-DD string. This is
+// what actually formats a stored date for display per the saved
+// preference -- see components/ui/schedule-date-field.tsx for where it's
+// applied on top of a real (visually hidden) native date input. Plain
+// string slicing, not `new Date(...)`, since a YYYY-MM-DD calendar date
+// parsed as UTC and re-read in local time can shift by a day.
+export function formatScheduleDate(value: string, format: WorkspaceSettings["date_format"]): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return value;
+  const [, yyyy, mm, dd] = match;
+  if (format === "DD/MM/YYYY") return `${dd}/${mm}/${yyyy}`;
+  if (format === "MM/DD/YYYY") return `${mm}/${dd}/${yyyy}`;
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 export const LANDING_PAGE_OPTIONS: { value: WorkspaceSettings["default_landing_page"]; label: string }[] = [
   { value: "projects", label: "Projects" },

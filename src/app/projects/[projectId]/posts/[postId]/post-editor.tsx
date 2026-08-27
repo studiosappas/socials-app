@@ -44,9 +44,11 @@ import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { useToast } from "@/lib/hooks/use-toast";
 import { BrandWriterField } from "@/components/ai/brand-writer";
+import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { CroppedCoverImage, GridCropOverlay } from "../../grid/grid-crop-overlay";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
+import type { WorkspaceSettings } from "@/lib/account-settings";
 import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 import { canSubmitClientReview } from "@/lib/role-permissions";
 import { submitClientPostReview } from "@/lib/actions/posts";
@@ -138,6 +140,7 @@ export function PostEditor({
   currentUserId,
   members,
   customFonts = [],
+  dateFormat,
   hideBackLink = false,
 }: {
   projectId: string;
@@ -159,6 +162,10 @@ export function PostEditor({
   currentUserId: string;
   members: ProjectMemberOption[];
   customFonts?: CustomFontFace[];
+  // The viewer's own saved Settings > Workspace date-format preference,
+  // already defaulted server-side (lib/data/posts.ts) -- only Schedule
+  // date's display uses this, see ScheduleDateField.
+  dateFormat: WorkspaceSettings["date_format"];
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
@@ -576,6 +583,7 @@ export function PostEditor({
         links={links}
         canManage={canManage}
         role={role}
+        dateFormat={dateFormat}
       />
 
       <ItemComments
@@ -1216,12 +1224,14 @@ function PostMainForm({
   links,
   canManage,
   role,
+  dateFormat,
 }: {
   projectId: string;
   post: PostRecord;
   links: PostLinkItem[];
   canManage: boolean;
   role: ProjectRole;
+  dateFormat: WorkspaceSettings["date_format"];
 }) {
   const isClient = canSubmitClientReview(role);
   // Adding/replacing/removing media auto-suggests the right type (see
@@ -1473,13 +1483,13 @@ function PostMainForm({
           </label>
           <label className="flex min-w-0 flex-col gap-1.5">
             <span className={labelClass}>Schedule date</span>
-            <input
-              type="date"
-              name="scheduled_date"
+            <ScheduleDateField
               value={scheduledDate}
-              onChange={(e) => setScheduledDate(e.target.value)}
+              onChange={setScheduledDate}
               disabled={!canManage}
-              className={dateTimeFieldClass}
+              dateFormat={dateFormat}
+              fieldClassName={fieldClass}
+              ariaLabel="Schedule date"
             />
           </label>
           <label className="flex min-w-0 flex-col gap-1.5">

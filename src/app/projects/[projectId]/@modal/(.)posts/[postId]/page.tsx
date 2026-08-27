@@ -34,6 +34,7 @@ export default async function InterceptedPostPage({
         currentUserId={data.currentUserId}
         members={data.members}
         customFonts={data.customFonts}
+        dateFormat={data.dateFormat}
         hideBackLink
       />
     </Modal>
