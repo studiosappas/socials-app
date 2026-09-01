@@ -451,6 +451,42 @@ export async function placeMediaInSlot(
   return { postId };
 }
 
+// Persists a full drag-the-whole-row reorder. Reuses grid_rows' own existing
+// `position` column (already the field getGridRowsWithCoverPaths orders by,
+// and the same one addGridRow already writes to for "new row at the top")
+// -- no migration needed. Renumbers EVERY row in the new order as plain
+// sequential integers (0, 1, 2, ...) rather than trying to slot the moved
+// row into a gap between its new neighbors: `position` has no unique
+// constraint (unlike grid_slots.position), but integer gaps between two
+// adjacent rows still run out after enough repeated drops in the same
+// spot. Renumbering the whole list on every reorder keeps this simple and
+// correct indefinitely, and the row count is small enough (a handful to
+// low dozens) that this is cheap either way.
+//
+// One .update() per row, not a single RPC transaction like
+// reorder_grid_slots -- that one exists specifically because
+// grid_slots.post_id has a unique constraint a concurrent partial update
+// could violate; plain integer positions have no such constraint, so
+// there's no correctness reason to add a new RPC/migration for this. Run
+// concurrently (Promise.all): each targets a different row by id, so
+// there's no ordering dependency between them. RLS
+// (`project_role(project_id) in (...)`, see schema.sql) still enforces
+// per-row authorization regardless of what ids/positions are sent -- not
+// filtering by projectId here beyond that (the row ids only ever come from
+// this client's own already-authorized Grid load).
+export async function reorderGridRows(updates: { rowId: string; position: number }[]) {
+  if (updates.length === 0) return;
+
+  const supabase = await createClient();
+  const results = await Promise.all(
+    updates.map((u) => supabase.from("grid_rows").update({ position: u.position }).eq("id", u.rowId)),
+  );
+  const failed = results.find((r) => r.error);
+  if (failed?.error) {
+    throw new Error(failed.error.message);
+  }
+}
+
 export async function reorderGridPosts(
   updates: { slotId: string; postId: string | null }[],
 ) {

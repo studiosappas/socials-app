@@ -113,6 +113,14 @@ export type GridState = {
   // "undo a row removal" feature today (see grid-board.tsx's comment on
   // handleRemoveRow), so this sticky behavior costs nothing real.
   confirmedRemovedRowIds: Set<string>;
+  // Row-order (drag-the-whole-row) reorder in flight -- see ROW_REORDER_*
+  // below. Only one reorder is ever in flight at a time (drag-and-drop is
+  // inherently serial: you can't start a second row drag while one is
+  // still being dropped/settling), so a single global opId + rollback
+  // snapshot of the whole `rowIds` array is enough here, unlike the
+  // per-slot/per-row mutations above which can genuinely be concurrent
+  // and so need their own independent rollback target each.
+  rowOrder: { pendingOpId: string | null; rollbackRowIds: string[] | null };
 };
 
 export function newOpId(): string {
@@ -135,7 +143,7 @@ export function initGridState(rows: GridBoardRow[]): GridState {
       slots[slot.id] = { value: slot, pendingOpId: null, rollbackTo: null };
     }
   }
-  return { rowIds, rowMeta, slots, confirmedRemovedRowIds: new Set() };
+  return { rowIds, rowMeta, slots, confirmedRemovedRowIds: new Set(), rowOrder: { pendingOpId: null, rollbackRowIds: null } };
 }
 
 export function deriveRows(state: GridState): GridBoardRow[] {
@@ -162,6 +170,7 @@ export function deriveRows(state: GridState): GridBoardRow[] {
 // durably committed), so any subsequent read -- whenever it actually runs
 // server-side -- is guaranteed to see it.
 export function hasPendingWork(state: GridState): boolean {
+  if (state.rowOrder.pendingOpId) return true;
   for (const id of state.rowIds) {
     if (state.rowMeta[id]?.pendingOpId) return true;
   }
@@ -187,7 +196,15 @@ export type GridAction =
   | { type: "ROW_ADD_FAIL"; opId: string; tempRowId: string }
   | { type: "ROW_REMOVE_BEGIN"; opId: string; rowId: string }
   | { type: "ROW_REMOVE_COMMIT"; opId: string; rowId: string }
-  | { type: "ROW_REMOVE_FAIL"; opId: string; rowId: string };
+  | { type: "ROW_REMOVE_FAIL"; opId: string; rowId: string }
+  // Drag-the-whole-row reorder -- nextRowIds is the full, already-permuted
+  // display order (e.g. from dnd-kit's arrayMove), applied immediately on
+  // BEGIN so the drag feels instant. Narrow, not whole-board: this only
+  // ever touches `rowIds`/`rowOrder`, never any row's own slotIds/removed
+  // flag or any slot's own value (Invariant 2).
+  | { type: "ROW_REORDER_BEGIN"; opId: string; nextRowIds: string[] }
+  | { type: "ROW_REORDER_COMMIT"; opId: string }
+  | { type: "ROW_REORDER_FAIL"; opId: string };
 
 export function gridReducer(state: GridState, action: GridAction): GridState {
   switch (action.type) {
@@ -199,21 +216,12 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     case "SERVER_ROWS_RECEIVED": {
       const incoming = action.rows;
       const incomingIds = new Set(incoming.map((r) => r.id));
+      const incomingById = new Map(incoming.map((r) => [r.id, r]));
       const rowMeta: Record<string, RowMeta> = {};
       const slots = { ...state.slots };
       const nextRowIds: string[] = [];
 
-      for (const id of state.rowIds) {
-        if (!incomingIds.has(id) && state.rowMeta[id]?.pendingOpId) {
-          // A temp (not-yet-reconciled) row, or a real row whose own
-          // structural op hasn't been confirmed by THIS snapshot yet.
-          nextRowIds.push(id);
-          rowMeta[id] = state.rowMeta[id];
-        }
-      }
-      for (const row of incoming) {
-        if (state.confirmedRemovedRowIds.has(row.id)) continue;
-        nextRowIds.push(row.id);
+      function mergeRow(row: GridBoardRow) {
         const existing = state.rowMeta[row.id];
         rowMeta[row.id] = {
           clientKey: existing?.clientKey ?? row.clientKey ?? row.id,
@@ -230,11 +238,60 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
           // narrow skip, keep the local optimistic value (Invariant 4).
         }
       }
+
+      if (state.rowOrder.pendingOpId) {
+        // A row-order reorder is still in flight -- the local `rowIds`
+        // ARRAY ORDER is the source of truth until it settles (Invariant 4
+        // applied to order itself, not just individual row/slot values).
+        // Per-row/per-slot CONTENT still comes fresh from this snapshot;
+        // only the sequence they're displayed in is held. Any row this
+        // snapshot reports that isn't in the local order yet (added by
+        // another client concurrently) is appended at the end -- rare, and
+        // a safe default until the NEXT snapshot (after this reorder
+        // settles) resolves its real position.
+        for (const id of state.rowIds) {
+          const row = incomingById.get(id);
+          if (row) {
+            nextRowIds.push(id);
+            mergeRow(row);
+          } else if (state.rowMeta[id]?.pendingOpId) {
+            nextRowIds.push(id);
+            rowMeta[id] = state.rowMeta[id];
+          }
+          // else: existed locally, snapshot no longer has it, not pending
+          // -- drop it (e.g. removed by another client).
+        }
+        for (const row of incoming) {
+          if (nextRowIds.includes(row.id) || state.confirmedRemovedRowIds.has(row.id)) continue;
+          nextRowIds.push(row.id);
+          mergeRow(row);
+        }
+      } else {
+        for (const id of state.rowIds) {
+          if (!incomingIds.has(id) && state.rowMeta[id]?.pendingOpId) {
+            // A temp (not-yet-reconciled) row, or a real row whose own
+            // structural op hasn't been confirmed by THIS snapshot yet.
+            nextRowIds.push(id);
+            rowMeta[id] = state.rowMeta[id];
+          }
+        }
+        for (const row of incoming) {
+          if (state.confirmedRemovedRowIds.has(row.id)) continue;
+          nextRowIds.push(row.id);
+          mergeRow(row);
+        }
+      }
       for (const id of Object.keys(slots)) {
         if (!Object.values(rowMeta).some((m) => m.slotIds.includes(id))) delete slots[id];
       }
 
-      return { rowIds: nextRowIds, rowMeta, slots, confirmedRemovedRowIds: state.confirmedRemovedRowIds };
+      return {
+        rowIds: nextRowIds,
+        rowMeta,
+        slots,
+        confirmedRemovedRowIds: state.confirmedRemovedRowIds,
+        rowOrder: state.rowOrder,
+      };
     }
 
     case "SLOT_BEGIN": {
@@ -396,6 +453,39 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       return {
         ...state,
         rowMeta: { ...state.rowMeta, [action.rowId]: { ...meta, removed: false, pendingOpId: null } },
+      };
+    }
+
+    case "ROW_REORDER_BEGIN": {
+      return {
+        ...state,
+        rowIds: action.nextRowIds,
+        rowOrder: {
+          pendingOpId: action.opId,
+          // Chain of custody back to the last truly-settled order, same
+          // reasoning as SLOT_BEGIN's rollbackTo: if a second reorder
+          // starts before the first one resolved, keep the ORIGINAL
+          // rollback target, not the first reorder's own (still
+          // unconfirmed) optimistic order -- a FAIL must always be able to
+          // get back to real, committed order.
+          rollbackRowIds: state.rowOrder.pendingOpId ? state.rowOrder.rollbackRowIds : state.rowIds,
+        },
+      };
+    }
+
+    case "ROW_REORDER_COMMIT": {
+      // A newer reorder already took over -- an older completion must
+      // never overwrite it (Invariant 3).
+      if (state.rowOrder.pendingOpId !== action.opId) return state;
+      return { ...state, rowOrder: { pendingOpId: null, rollbackRowIds: null } };
+    }
+
+    case "ROW_REORDER_FAIL": {
+      if (state.rowOrder.pendingOpId !== action.opId) return state;
+      return {
+        ...state,
+        rowIds: state.rowOrder.rollbackRowIds ?? state.rowIds,
+        rowOrder: { pendingOpId: null, rollbackRowIds: null },
       };
     }
 
