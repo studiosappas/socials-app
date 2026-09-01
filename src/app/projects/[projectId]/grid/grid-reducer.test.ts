@@ -395,4 +395,83 @@ test("isSlotFilled: a video with no poster yet is filled (not empty)", () => {
   assert.equal(isSlotFilled(slot), true);
 });
 
+// ---------------------------------------------------------------------------
+// ROW_REORDER_*: drag-the-whole-row. Same BEGIN/COMMIT/FAIL shape as every
+// other mutation here, but scoped to `rowIds`/`rowOrder` alone -- never a
+// row's own slotIds/removed flag or any slot's own value (Invariant 2).
+// ---------------------------------------------------------------------------
+test("ROW_REORDER_BEGIN applies the new order immediately (optimistic)", () => {
+  let state = initGridState(baseRows());
+  const opId = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId, nextRowIds: ["row2", "row1"] });
+  assert.deepEqual(state.rowIds, ["row2", "row1"]);
+  assert.equal(state.rowOrder.pendingOpId, opId);
+  assert.equal(hasPendingWork(state), true);
+});
+
+test("ROW_REORDER_COMMIT keeps the new order and clears pending", () => {
+  let state = initGridState(baseRows());
+  const opId = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId, nextRowIds: ["row2", "row1"] });
+  state = gridReducer(state, { type: "ROW_REORDER_COMMIT", opId });
+  assert.deepEqual(state.rowIds, ["row2", "row1"]);
+  assert.equal(state.rowOrder.pendingOpId, null);
+  assert.equal(hasPendingWork(state), false);
+});
+
+test("ROW_REORDER_FAIL restores the exact pre-reorder order", () => {
+  let state = initGridState(baseRows());
+  const opId = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId, nextRowIds: ["row2", "row1"] });
+  state = gridReducer(state, { type: "ROW_REORDER_FAIL", opId });
+  assert.deepEqual(state.rowIds, ["row1", "row2"]);
+  assert.equal(state.rowOrder.pendingOpId, null);
+});
+
+test("ROW_REORDER_COMMIT/FAIL with a stale opId is a no-op (Invariant 3)", () => {
+  let state = initGridState(baseRows());
+  const staleOpId = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId: staleOpId, nextRowIds: ["row2", "row1"] });
+  const freshOpId = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId: freshOpId, nextRowIds: ["row1", "row2"] });
+  // The stale op's own COMMIT/FAIL arriving late must not touch anything.
+  const afterStaleCommit = gridReducer(state, { type: "ROW_REORDER_COMMIT", opId: staleOpId });
+  assert.deepEqual(afterStaleCommit.rowIds, ["row1", "row2"]);
+  assert.equal(afterStaleCommit.rowOrder.pendingOpId, freshOpId);
+  const afterStaleFail = gridReducer(state, { type: "ROW_REORDER_FAIL", opId: staleOpId });
+  assert.deepEqual(afterStaleFail.rowIds, ["row1", "row2"]);
+  assert.equal(afterStaleFail.rowOrder.pendingOpId, freshOpId);
+});
+
+test("a second reorder before the first settles rolls back to the ORIGINAL order on FAIL, not the first reorder's own optimistic order", () => {
+  let state = initGridState(baseRows());
+  const opId1 = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId: opId1, nextRowIds: ["row2", "row1"] });
+  const opId2 = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId: opId2, nextRowIds: ["row1", "row2"] });
+  state = gridReducer(state, { type: "ROW_REORDER_FAIL", opId: opId2 });
+  assert.deepEqual(state.rowIds, ["row1", "row2"], "must land on the real, pre-drag order, not opId1's still-unconfirmed one");
+});
+
+test("SERVER_ROWS_RECEIVED preserves local row order while a reorder is pending, but still refreshes row/slot content", () => {
+  let state = initGridState(baseRows());
+  const opId = newOpId();
+  state = gridReducer(state, { type: "ROW_REORDER_BEGIN", opId, nextRowIds: ["row2", "row1"] });
+  // Server snapshot arrives with the OLD order (its own read raced ahead of
+  // this reorder's write) but fresh slot content for row1.
+  const freshRows = baseRows();
+  freshRows[0].slots[0] = { ...freshRows[0].slots[0], postId: "post-new", thumbnailUrl: "url-post-new" };
+  state = gridReducer(state, { type: "SERVER_ROWS_RECEIVED", rows: freshRows });
+  assert.deepEqual(state.rowIds, ["row2", "row1"], "local optimistic order must survive a stale-order snapshot while the reorder is still in flight");
+  assert.equal(state.slots["s1"].value.postId, "post-new", "per-slot content still refreshes from the snapshot");
+  assert.equal(state.rowOrder.pendingOpId, opId, "the reorder itself is untouched by this snapshot");
+});
+
+test("SERVER_ROWS_RECEIVED adopts the snapshot's own order once no reorder is pending", () => {
+  let state = initGridState(baseRows());
+  const reversedRows = [...baseRows()].reverse();
+  state = gridReducer(state, { type: "SERVER_ROWS_RECEIVED", rows: reversedRows });
+  assert.deepEqual(state.rowIds, ["row2", "row1"]);
+});
+
 console.log(`\n${passed} passed`);

@@ -9,16 +9,24 @@ import {
   closestCenter,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
-import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  verticalListSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
   addGridRow,
   removeGridRow,
   placeMediaInSlot,
   reorderGridPosts,
+  reorderGridRows,
   updatePostCoverTransform,
 } from "@/lib/actions/grid";
 import { deletePost } from "@/lib/actions/posts";
@@ -256,6 +264,7 @@ export function GridBoard({
   const { showError } = useToast();
   const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
   const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
+  const [activeRow, setActiveRow] = useState<GridBoardRow | null>(null);
   // The single authoritative owner of "what interaction mode is the Grid in
   // right now" -- see grid-interaction.ts for the full reasoning. Replaces
   // this component's own standalone `pickerSlotId` state and GridSlot's own
@@ -314,6 +323,26 @@ export function GridBoard({
       activationConstraint: isTouchDevice ? { delay: 200, tolerance: 8 } : { distance: 4 },
     }),
   );
+
+  // A row's own bounding box fully CONTAINS its 3 slots' boxes, so without
+  // this, plain closestCenter (which only compares droppable CENTERS, not
+  // containment) could occasionally resolve a slot-drag's `over` target to
+  // the enclosing ROW instead of the specific slot under the pointer near a
+  // row boundary -- and vice versa for a row drag hovering close to one of
+  // its own slots. Filtering candidates by matching `data.type` first
+  // (row-drag -> only row droppables; slot/library-item drag -> only slot
+  // droppables, library items carry no `type` at all so they fall in this
+  // same bucket) makes the two drag kinds structurally unable to collide,
+  // rather than relying on closestCenter to happen to pick right.
+  const collisionDetectionStrategy: CollisionDetection = useCallback((args) => {
+    const activeType = args.active.data.current?.type;
+    const wantRow = activeType === "row";
+    const filtered = args.droppableContainers.filter((container) => {
+      const containerType = container.data.current?.type;
+      return wantRow ? containerType === "row" : containerType !== "row";
+    });
+    return closestCenter({ ...args, droppableContainers: filtered });
+  }, []);
 
   const { push: pushCommand, undo, redo, canUndo, canRedo, isBusy: undoRedoBusy } = useUndoStack();
   useUndoRedoShortcuts(undo, redo);
@@ -589,6 +618,32 @@ export function GridBoard({
     },
     [opBegin, opEnd],
   );
+  // Drag-the-whole-row reorder. Same shape as mutateAddRow/mutateRemoveRow:
+  // BEGIN applies the already-permuted `nextRowIds` optimistically, run()
+  // persists it, FAIL rolls back to exactly the pre-drag order (never the
+  // whole board -- see grid-reducer.ts's ROW_REORDER_* comments).
+  const mutateReorderRows = useCallback(
+    async (nextRowIds: string[], run: () => Promise<void>) => {
+      const opId = newOpId();
+      logGridDataEvent("row_reorder_begin", { opId, rowIds: nextRowIds });
+      dispatch({ type: "ROW_REORDER_BEGIN", opId, nextRowIds });
+      opBegin();
+      try {
+        await run();
+        logGridDataEvent("row_reorder_commit", { opId });
+        dispatch({ type: "ROW_REORDER_COMMIT", opId });
+        return true;
+      } catch (error) {
+        console.error("Failed to reorder rows:", error);
+        logGridDataEvent("row_reorder_fail", { opId });
+        dispatch({ type: "ROW_REORDER_FAIL", opId });
+        return false;
+      } finally {
+        opEnd();
+      }
+    },
+    [opBegin, opEnd],
+  );
 
   // Add Row's own in-flight flag -- separate from the generic pending-op
   // tracking above (that one's ref-based and deliberately invisible to
@@ -599,11 +654,16 @@ export function GridBoard({
 
   const flatSlots = effectiveRows.flatMap((row) => row.slots);
   const flatSlotIds = flatSlots.map((slot) => slot.id);
+  const rowSortIds = effectiveRows.map((row) => row.id);
 
   function handleDragStart(event: DragStartEvent) {
     logGridInteraction("drag_start", { activeId: event.active.id });
     dispatchInteraction({ type: "DRAG_START" });
     const data = event.active.data.current;
+    if (data?.type === "row") {
+      setActiveRow((data.row as GridBoardRow | undefined) ?? null);
+      return;
+    }
     if (data?.type === "slot") {
       setActiveSlot((data.slot as GridBoardSlot | undefined) ?? null);
       return;
@@ -616,10 +676,45 @@ export function GridBoard({
     dispatchInteraction({ type: "DRAG_END" });
     setActiveMedia(null);
     setActiveSlot(null);
+    setActiveRow(null);
     const { active, over } = event;
     if (!over) return;
 
     const activeData = active.data.current;
+
+    if (activeData?.type === "row") {
+      const rowIds = effectiveRows.map((r) => r.id);
+      const oldIndex = rowIds.indexOf(active.id as string);
+      const newIndex = rowIds.indexOf(over.id as string);
+      if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+
+      const nextRowIds = arrayMove(rowIds, oldIndex, newIndex);
+      const previousRowIds = rowIds;
+
+      async function applyRowReorder(order: string[]) {
+        const ok = await mutateReorderRows(order, async () => {
+          // The visual reorder is real and final either way -- demoMode
+          // just skips persistence, same convention as every other
+          // mutation in this file.
+          if (demoMode) return;
+          await reorderGridRows(order.map((rowId, i) => ({ rowId, position: i })));
+        });
+        if (!ok) {
+          showError("Couldn't save that row move. Please try again.");
+          requestIdleRefresh();
+        }
+      }
+
+      applyRowReorder(nextRowIds);
+      if (demoMode) return;
+
+      pushCommand({
+        label: "Reorder row",
+        undo: () => applyRowReorder(previousRowIds),
+        redo: () => applyRowReorder(nextRowIds),
+      });
+      return;
+    }
 
     if (activeData?.type === "slot") {
       const oldIndex = flatSlotIds.indexOf(active.id as string);
@@ -872,7 +967,7 @@ export function GridBoard({
     <DndContext
       id={`grid-dnd-${projectId}`}
       sensors={sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={collisionDetectionStrategy}
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
       onDragCancel={() => {
@@ -880,6 +975,7 @@ export function GridBoard({
         dispatchInteraction({ type: "DRAG_END" });
         setActiveMedia(null);
         setActiveSlot(null);
+        setActiveRow(null);
       }}
     >
       <div className="flex flex-col gap-10 lg:flex-row">
@@ -970,43 +1066,66 @@ export function GridBoard({
               </div>
             </div>
           )}
-          <SortableContext items={flatSlotIds} strategy={rectSortingStrategy}>
-            {effectiveRows.map((row) => (
-              <GridRow
-                key={row.clientKey ?? row.id}
-                row={row}
-                projectId={projectId}
-                canManage={canManage}
-                onOpenPicker={setPickerSlotId}
-                pushCommand={pushCommand}
-                mutateSlot={mutateSlot}
-                mutateRemoveRow={mutateRemoveRow}
-                requestIdleRefresh={requestIdleRefresh}
-                cropTargetSlotId={interaction.mode === "crop" ? interaction.cropTargetSlotId : null}
-                requestOpenCrop={requestOpenCrop}
-                requestCloseCrop={requestCloseCrop}
-                interactionIdle={interaction.mode === "idle"}
-                // Deliberately a DIFFERENT condition from interactionIdle,
-                // for a real bug found this round: dnd-kit's own
-                // `disabled.droppable` had been gated on interactionIdle
-                // too, which is backwards -- handleDragStart dispatches
-                // DRAG_START the instant ANY drag begins (including
-                // dragging an asset in from the Library sidebar), which
-                // flips interaction.mode away from "idle" immediately, so
-                // every Grid slot became a NON-droppable target for the
-                // full duration of the very drag that needs somewhere to
-                // drop. Slots must stay droppable exactly while a drag is
-                // in progress -- only Library/Crop being open should
-                // disable dropping.
-                dropEligible={interaction.mode === "idle" || interaction.mode === "dragging"}
-                selectionMode={selectionMode}
-                selectedPostIds={selectedPostIds}
-                onToggleSelectPost={handleToggleSelectPost}
-                demoMode={demoMode}
-                dragEnabled={dragEnabled}
-                reorderMode={reorderMode}
-              />
-            ))}
+          {/* Nested inside the ONE grid-dnd DndContext above, not a second
+              drag/state system -- see collisionDetectionStrategy's own
+              comment for why row vs. slot droppables can't ambiguously
+              collide despite a row's box fully containing its 3 slots'
+              boxes. verticalListSortingStrategy (rows stack in a single
+              column) vs. the slot SortableContext's own rectSortingStrategy
+              (a 2D grid) -- two different strategies is exactly why this
+              needs its own SortableContext rather than merging into
+              flatSlotIds' one. */}
+          <SortableContext items={rowSortIds} strategy={verticalListSortingStrategy}>
+            <SortableContext items={flatSlotIds} strategy={rectSortingStrategy}>
+              {effectiveRows.map((row) => (
+                <GridRow
+                  key={row.clientKey ?? row.id}
+                  row={row}
+                  projectId={projectId}
+                  canManage={canManage}
+                  onOpenPicker={setPickerSlotId}
+                  pushCommand={pushCommand}
+                  mutateSlot={mutateSlot}
+                  mutateRemoveRow={mutateRemoveRow}
+                  requestIdleRefresh={requestIdleRefresh}
+                  cropTargetSlotId={interaction.mode === "crop" ? interaction.cropTargetSlotId : null}
+                  requestOpenCrop={requestOpenCrop}
+                  requestCloseCrop={requestCloseCrop}
+                  interactionIdle={interaction.mode === "idle"}
+                  // Deliberately a DIFFERENT condition from interactionIdle,
+                  // for a real bug found this round: dnd-kit's own
+                  // `disabled.droppable` had been gated on interactionIdle
+                  // too, which is backwards -- handleDragStart dispatches
+                  // DRAG_START the instant ANY drag begins (including
+                  // dragging an asset in from the Library sidebar), which
+                  // flips interaction.mode away from "idle" immediately, so
+                  // every Grid slot became a NON-droppable target for the
+                  // full duration of the very drag that needs somewhere to
+                  // drop. Slots must stay droppable exactly while a drag is
+                  // in progress -- only Library/Crop being open should
+                  // disable dropping.
+                  dropEligible={interaction.mode === "idle" || interaction.mode === "dragging"}
+                  selectionMode={selectionMode}
+                  selectedPostIds={selectedPostIds}
+                  onToggleSelectPost={handleToggleSelectPost}
+                  demoMode={demoMode}
+                  dragEnabled={dragEnabled}
+                  reorderMode={reorderMode}
+                  // Row dragging is always available via its own explicit
+                  // handle (not gated behind touch's "Edit Grid" mode the
+                  // way whole-tile slot dragging is) -- the handle itself
+                  // is the deliberate, small activation surface, same
+                  // reasoning as why it needs no separate reorderMode gate.
+                  // Not gated on demoMode either -- matches GridSlot's own
+                  // draggable/droppable conditions, which don't check it
+                  // either: the optimistic drag stays fully real/
+                  // interactive in demoMode, only the actual persistence
+                  // (applyRowReorder's own demoMode check, above) is
+                  // skipped, same split as every other mutation here.
+                  rowDragDisabled={!canManage}
+                />
+              ))}
+            </SortableContext>
           </SortableContext>
           {effectiveRows.length === 0 && (
             <p className="text-sm text-muted">No rows yet — add one to start building the feed.</p>
@@ -1110,6 +1229,22 @@ export function GridBoard({
             ) : null}
           </div>
         )}
+        {activeRow && (
+          // The whole row as one floating unit while it's being dragged --
+          // "whole row clearly moves as one" -- same shadow/border language
+          // as activeSlot's own preview above, just three of them side by
+          // side at a fixed small width (this preview never needs to match
+          // the real tile's own responsive size, only to read clearly).
+          <div className="grid w-56 grid-cols-3 overflow-hidden rounded border border-foreground/20 shadow-[0_4px_16px_rgba(0,0,0,0.15)]" style={{ gap: "2px" }}>
+            {activeRow.slots.map((slot) => (
+              <div key={slot.clientKey ?? slot.id} className={`${GRID_COVER_ASPECT_CLASS} cursor-grabbing overflow-hidden bg-black/[.04]`}>
+                {slot.thumbnailUrl ? (
+                  <CroppedCoverImage src={slot.thumbnailUrl} transform={slot.coverTransform} className="h-full w-full" />
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
       </DragOverlay>
 
       {selectionMode && (
@@ -1164,6 +1299,7 @@ function GridRow({
   demoMode = false,
   dragEnabled = true,
   reorderMode = false,
+  rowDragDisabled = false,
 }: {
   row: GridBoardRow;
   projectId: string;
@@ -1196,6 +1332,7 @@ function GridRow({
   demoMode?: boolean;
   dragEnabled?: boolean;
   reorderMode?: boolean;
+  rowDragDisabled?: boolean;
 }) {
   // Row visibility is now entirely GridBoard's reducer's call (a removed
   // row is simply absent from deriveRows' output) -- no local "removed"
@@ -1203,33 +1340,78 @@ function GridRow({
   // for a row that's gone. No dedicated "remove row" bar between rows --
   // the grid stays tight like desktop, and "Remove Row" lives in each
   // slot's own ⋮ menu instead.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: row.id,
+    data: { type: "row", row },
+    // Boolean form so a view-only (non-canManage) row stays a valid *drop*
+    // target for other rows (droppable) while never being pick-uppable
+    // itself (draggable) -- same split GridSlot's own useSortable uses.
+    disabled: { draggable: rowDragDisabled, droppable: rowDragDisabled },
+    // No transition -- same reasoning as GridSlot's own useSortable
+    // (verified against @dnd-kit/sortable's source): passing one here
+    // would put a live CSS transition on every row's transform for the
+    // whole drag, competing with the DragOverlay's own per-frame cursor
+    // tracking for the same compositor time. Rows snap to their new slot
+    // instead of sliding, matching every other drag on this board.
+    transition: null,
+  });
+
+  const style = { transform: CSS.Transform.toString(transform), transition };
+
   return (
-    <div className="grid grid-cols-3" style={{ gap: "2px" }}>
-      {row.slots.map((slot) => (
-        <GridSlot
-          key={slot.clientKey ?? slot.id}
-          slot={slot}
-          rowId={row.id}
-          projectId={projectId}
-          canManage={canManage}
-          onOpenPicker={onOpenPicker}
-          pushCommand={pushCommand}
-          mutateSlot={mutateSlot}
-          mutateRemoveRow={mutateRemoveRow}
-          requestIdleRefresh={requestIdleRefresh}
-          cropOpen={cropTargetSlotId === slot.id}
-          requestOpenCrop={requestOpenCrop}
-          requestCloseCrop={requestCloseCrop}
-          interactionIdle={interactionIdle}
-          dropEligible={dropEligible}
-          selectionMode={selectionMode}
-          selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
-          onToggleSelectPost={onToggleSelectPost}
-          demoMode={demoMode}
-          dragEnabled={dragEnabled}
-          reorderMode={reorderMode}
-        />
-      ))}
+    <div ref={setNodeRef} data-row-id={row.id} style={style} className={`group/row relative ${isDragging ? "opacity-30" : ""}`}>
+      {!rowDragDisabled && (
+        // Explicit, dedicated activation surface -- NOT the row itself, so
+        // grabbing an image still only ever does what it always did (open
+        // Post Editor / start a slot drag). touch-action:none is scoped to
+        // just this small handle, not the whole row, so it can't block
+        // ordinary page/grid scrolling the way it would on a full tile --
+        // no "Edit Grid" mode gate needed for it, unlike whole-tile slot
+        // dragging (see dragEnabled's own comment above). Centered at the
+        // row's own top edge -- every per-slot corner badge/menu already
+        // claims a SLOT's own corner, this claims none of them.
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          title="Drag to reorder row"
+          aria-label="Drag to reorder row"
+          className="absolute left-1/2 top-0.5 z-10 flex h-4 w-10 -translate-x-1/2 cursor-grab touch-none items-center justify-center rounded-full border border-border/70 bg-background/80 opacity-70 shadow-sm transition-opacity duration-150 hover:opacity-100 active:cursor-grabbing lg:opacity-0 lg:group-hover/row:opacity-100"
+        >
+          <span className="flex gap-[3px]">
+            <span className="h-[3px] w-[3px] rounded-full bg-foreground/60" />
+            <span className="h-[3px] w-[3px] rounded-full bg-foreground/60" />
+            <span className="h-[3px] w-[3px] rounded-full bg-foreground/60" />
+          </span>
+        </button>
+      )}
+      <div className="grid grid-cols-3" style={{ gap: "2px" }}>
+        {row.slots.map((slot) => (
+          <GridSlot
+            key={slot.clientKey ?? slot.id}
+            slot={slot}
+            rowId={row.id}
+            projectId={projectId}
+            canManage={canManage}
+            onOpenPicker={onOpenPicker}
+            pushCommand={pushCommand}
+            mutateSlot={mutateSlot}
+            mutateRemoveRow={mutateRemoveRow}
+            requestIdleRefresh={requestIdleRefresh}
+            cropOpen={cropTargetSlotId === slot.id}
+            requestOpenCrop={requestOpenCrop}
+            requestCloseCrop={requestCloseCrop}
+            interactionIdle={interactionIdle}
+            dropEligible={dropEligible}
+            selectionMode={selectionMode}
+            selected={slot.postId ? selectedPostIds.has(slot.postId) : false}
+            onToggleSelectPost={onToggleSelectPost}
+            demoMode={demoMode}
+            dragEnabled={dragEnabled}
+            reorderMode={reorderMode}
+          />
+        ))}
+      </div>
     </div>
   );
 }
