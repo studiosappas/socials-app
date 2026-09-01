@@ -11,6 +11,7 @@ import {
   useSensors,
   type CollisionDetection,
   type DragStartEvent,
+  type DragOverEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
 import {
@@ -264,7 +265,17 @@ export function GridBoard({
   const { showError } = useToast();
   const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
   const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
-  const [activeRow, setActiveRow] = useState<GridBoardRow | null>(null);
+  // No activeRow/DragOverlay for rows (unlike activeMedia/activeSlot above)
+  // -- rows deliberately use dnd-kit's OTHER supported pattern: with no
+  // DragOverlay portalling a copy elsewhere, useSortable's own `transform`
+  // on the real row node carries the full pointer-tracking translation, so
+  // the row you see moving IS the actual row at its actual size, not a
+  // fixed-size copy. Same choice Brief's own SortableItemRow already makes
+  // for its item drag -- reused here instead of inventing a second
+  // "shrink to a preview" drag language for something this wide.
+  const [rowDropIndicator, setRowDropIndicator] = useState<{ rowId: string; position: "before" | "after" } | null>(
+    null,
+  );
   // The single authoritative owner of "what interaction mode is the Grid in
   // right now" -- see grid-interaction.ts for the full reasoning. Replaces
   // this component's own standalone `pickerSlotId` state and GridSlot's own
@@ -661,7 +672,7 @@ export function GridBoard({
     dispatchInteraction({ type: "DRAG_START" });
     const data = event.active.data.current;
     if (data?.type === "row") {
-      setActiveRow((data.row as GridBoardRow | undefined) ?? null);
+      // No activeRow to set -- see its own declaration comment.
       return;
     }
     if (data?.type === "slot") {
@@ -671,12 +682,44 @@ export function GridBoard({
     setActiveMedia((data?.item as MediaLibraryItem | undefined) ?? null);
   }
 
+  // Row-only: figures out exactly where a drop would land -- above or
+  // below whichever row the pointer is currently over -- purely for the
+  // insertion-line indicator below. Compares the dragged row's own live
+  // (pointer-translated) rect against the hovered row's rect midpoint,
+  // the standard dnd-kit pattern for this; drives no reducer/persistence
+  // logic at all, only local UI state.
+  function handleDragOver(event: DragOverEvent) {
+    const { active, over } = event;
+    if (active.data.current?.type !== "row" || !over || over.id === active.id) {
+      setRowDropIndicator(null);
+      return;
+    }
+    // Mirrors arrayMove's own actual behavior exactly (the same call
+    // handleDragEnd below makes) rather than an independent "which half of
+    // the hovered row is the cursor over" heuristic -- those two disagreed
+    // in real testing (a rect-midpoint guess doesn't match how arrayMove
+    // actually splices the array): dragging DOWN past a row lands AFTER
+    // it, dragging UP past a row lands BEFORE it, purely a function of
+    // direction (old index vs. the hovered row's index), never cursor
+    // position within that row. Keeping this identical to handleDragEnd's
+    // own math is what guarantees the line never shows a position the
+    // drop doesn't actually honor.
+    const rowIds = effectiveRows.map((r) => r.id);
+    const oldIndex = rowIds.indexOf(active.id as string);
+    const overIndex = rowIds.indexOf(over.id as string);
+    if (oldIndex === -1 || overIndex === -1) {
+      setRowDropIndicator(null);
+      return;
+    }
+    setRowDropIndicator({ rowId: over.id as string, position: oldIndex < overIndex ? "after" : "before" });
+  }
+
   function handleDragEnd(event: DragEndEvent) {
     logGridInteraction("drag_end", { activeId: event.active.id, overId: event.over?.id ?? null });
     dispatchInteraction({ type: "DRAG_END" });
     setActiveMedia(null);
     setActiveSlot(null);
-    setActiveRow(null);
+    setRowDropIndicator(null);
     const { active, over } = event;
     if (!over) return;
 
@@ -969,13 +1012,14 @@ export function GridBoard({
       sensors={sensors}
       collisionDetection={collisionDetectionStrategy}
       onDragStart={handleDragStart}
+      onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
       onDragCancel={() => {
         logGridInteraction("drag_cancel", {});
         dispatchInteraction({ type: "DRAG_END" });
         setActiveMedia(null);
         setActiveSlot(null);
-        setActiveRow(null);
+        setRowDropIndicator(null);
       }}
     >
       <div className="flex flex-col gap-10 lg:flex-row">
@@ -1123,6 +1167,7 @@ export function GridBoard({
                   // (applyRowReorder's own demoMode check, above) is
                   // skipped, same split as every other mutation here.
                   rowDragDisabled={!canManage}
+                  dropIndicator={rowDropIndicator?.rowId === row.id ? rowDropIndicator.position : null}
                 />
               ))}
             </SortableContext>
@@ -1229,22 +1274,6 @@ export function GridBoard({
             ) : null}
           </div>
         )}
-        {activeRow && (
-          // The whole row as one floating unit while it's being dragged --
-          // "whole row clearly moves as one" -- same shadow/border language
-          // as activeSlot's own preview above, just three of them side by
-          // side at a fixed small width (this preview never needs to match
-          // the real tile's own responsive size, only to read clearly).
-          <div className="grid w-56 grid-cols-3 overflow-hidden rounded border border-foreground/20 shadow-[0_4px_16px_rgba(0,0,0,0.15)]" style={{ gap: "2px" }}>
-            {activeRow.slots.map((slot) => (
-              <div key={slot.clientKey ?? slot.id} className={`${GRID_COVER_ASPECT_CLASS} cursor-grabbing overflow-hidden bg-black/[.04]`}>
-                {slot.thumbnailUrl ? (
-                  <CroppedCoverImage src={slot.thumbnailUrl} transform={slot.coverTransform} className="h-full w-full" />
-                ) : null}
-              </div>
-            ))}
-          </div>
-        )}
       </DragOverlay>
 
       {selectionMode && (
@@ -1300,6 +1329,7 @@ function GridRow({
   dragEnabled = true,
   reorderMode = false,
   rowDragDisabled = false,
+  dropIndicator = null,
 }: {
   row: GridBoardRow;
   projectId: string;
@@ -1333,6 +1363,9 @@ function GridRow({
   dragEnabled?: boolean;
   reorderMode?: boolean;
   rowDragDisabled?: boolean;
+  // Which edge of THIS row to paint the insertion line on, if any -- see
+  // GridBoard's own handleDragOver/rowDropIndicator.
+  dropIndicator?: "before" | "after" | null;
 }) {
   // Row visibility is now entirely GridBoard's reducer's call (a removed
   // row is simply absent from deriveRows' output) -- no local "removed"
@@ -1347,19 +1380,27 @@ function GridRow({
     // target for other rows (droppable) while never being pick-uppable
     // itself (draggable) -- same split GridSlot's own useSortable uses.
     disabled: { draggable: rowDragDisabled, droppable: rowDragDisabled },
-    // No transition -- same reasoning as GridSlot's own useSortable
-    // (verified against @dnd-kit/sortable's source): passing one here
-    // would put a live CSS transition on every row's transform for the
-    // whole drag, competing with the DragOverlay's own per-frame cursor
-    // tracking for the same compositor time. Rows snap to their new slot
-    // instead of sliding, matching every other drag on this board.
-    transition: null,
+    // Default transition (not null) -- deliberately unlike GridSlot's own
+    // useSortable. There's no row-level DragOverlay to compete with (see
+    // GridBoard's own activeRow/rowDropIndicator comment), and rows are
+    // wide enough that a hard snap instead of Brief's own smooth slide
+    // reads as an abrupt jump, not a natural shift. Matches Brief's
+    // SortableItemRow, which doesn't override this either.
   });
 
-  const style = { transform: CSS.Transform.toString(transform), transition };
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    // Lets the dragged row visually pass over its neighbors instead of
+    // being clipped behind them -- it's now the real content moving (no
+    // overlay portal), so it needs its own stacking context while active.
+    zIndex: isDragging ? 10 : undefined,
+    position: "relative",
+  };
 
   return (
-    <div ref={setNodeRef} data-row-id={row.id} style={style} className={`group/row relative ${isDragging ? "opacity-30" : ""}`}>
+    <div ref={setNodeRef} data-row-id={row.id} style={style} className={`group/row ${isDragging ? "opacity-40" : ""}`}>
+      {dropIndicator && <RowDropIndicator position={dropIndicator} />}
       {!rowDragDisabled && (
         // Explicit, dedicated activation surface -- NOT the row itself, so
         // grabbing an image still only ever does what it always did (open
@@ -1370,19 +1411,28 @@ function GridRow({
         // dragging (see dragEnabled's own comment above). Centered at the
         // row's own top edge -- every per-slot corner badge/menu already
         // claims a SLOT's own corner, this claims none of them.
+        //
+        // Visual language reused from Brief's own row-drag handle
+        // (brief-board.tsx's SortableItemRow/GripIcon), not invented fresh:
+        // the same 6-dot grip glyph, the same fine-pointer-only
+        // grab/grabbing cursor, the same touch press feedback -- plus this
+        // app's own standard icon-button hover treatment (hover:bg-black/
+        // [.06]) for the chip itself, since Brief's own handle has no chip
+        // background to match (its handle sits inline in a flex row, not
+        // floating over image content that needs a legible backdrop).
+        // Always visible, not hover-gated -- deliberately more discoverable
+        // than the previous version, whose main complaint was being too
+        // subtle to notice at all.
         <button
           type="button"
           {...attributes}
           {...listeners}
           title="Drag to reorder row"
           aria-label="Drag to reorder row"
-          className="absolute left-1/2 top-0.5 z-10 flex h-4 w-10 -translate-x-1/2 cursor-grab touch-none items-center justify-center rounded-full border border-border/70 bg-background/80 opacity-70 shadow-sm transition-opacity duration-150 hover:opacity-100 active:cursor-grabbing lg:opacity-0 lg:group-hover/row:opacity-100"
+          className="absolute left-1/2 top-1 z-20 flex h-6 w-9 -translate-x-1/2 touch-none items-center justify-center rounded-full border border-border/70 bg-background/90 text-muted shadow-sm transition-colors duration-150 hover:border-foreground/40 hover:bg-black/[.06] hover:text-foreground active:scale-95 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
+          style={{ WebkitTouchCallout: "none" }}
         >
-          <span className="flex gap-[3px]">
-            <span className="h-[3px] w-[3px] rounded-full bg-foreground/60" />
-            <span className="h-[3px] w-[3px] rounded-full bg-foreground/60" />
-            <span className="h-[3px] w-[3px] rounded-full bg-foreground/60" />
-          </span>
+          <GripIcon className="h-3.5 w-2.5" />
         </button>
       )}
       <div className="grid grid-cols-3" style={{ gap: "2px" }}>
@@ -1412,6 +1462,51 @@ function GridRow({
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+// Same glyph as Brief's own GripIcon (brief-board.tsx's SortableItemRow) --
+// duplicated, not imported: it's a tiny, dependency-free SVG, and pulling it
+// in would mean either exporting it out of a file this pass isn't otherwise
+// touching or a shared-icons module neither file currently has, for a
+// six-line function. Reusing the same VISUAL language (this exact glyph)
+// is what actually matters for consistency, not the module boundary.
+function GripIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 10 16" fill="currentColor" className={className}>
+      <circle cx="2.5" cy="2" r="1.3" />
+      <circle cx="7.5" cy="2" r="1.3" />
+      <circle cx="2.5" cy="8" r="1.3" />
+      <circle cx="7.5" cy="8" r="1.3" />
+      <circle cx="2.5" cy="14" r="1.3" />
+      <circle cx="7.5" cy="14" r="1.3" />
+    </svg>
+  );
+}
+
+// The insertion-line indicator itself. Brief has no direct equivalent to
+// extract (its own reorder feedback is purely the natural reflow every
+// sortable list gets for free -- see brief-board.tsx's own isOver treatment
+// for its ONE explicit indicator, which is a whole-zone highlight for
+// dropping into an empty section, not a between-items line) -- built new,
+// but styled from the same palette Brief already uses for its own drag-
+// adjacent state (border-foreground/40) plus this file's own established
+// small-dot grip vocabulary (the library resize handle above), rather than
+// inventing new colors/weights. Absolutely positioned right on the row's
+// own edge (no reserved height) so it never shifts layout the way a real
+// placeholder row would -- "before" sits on the top edge, "after" on the
+// bottom, both overlapping the tight 2px inter-row gap where they don't
+// collide with anything.
+function RowDropIndicator({ position }: { position: "before" | "after" }) {
+  return (
+    <div
+      aria-hidden
+      className={`pointer-events-none absolute inset-x-0 z-30 flex items-center ${position === "before" ? "-top-px" : "-bottom-px"}`}
+    >
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
+      <span className="h-0.5 flex-1 bg-foreground" />
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
     </div>
   );
 }
