@@ -1088,6 +1088,7 @@ export function GridBoard({
                     canManage={canManage}
                     tableMissing={shareTableMissing}
                     onEnterSelectionMode={() => setSelectionMode(true)}
+                    showLabel
                     exportLinks={[
                       { href: `/projects/${projectId}/grid/export`, label: "Export Full Feed" },
                       {
