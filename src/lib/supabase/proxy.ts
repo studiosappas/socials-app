@@ -37,8 +37,17 @@ export async function updateSession(request: NextRequest) {
   // both must never bounce to /login the way every other route does.
   // "/"'s own page.tsx still redirects an ALREADY-authenticated visitor on
   // to /projects; this just lets an anonymous one reach it at all.
+  // "/auth" (the password-recovery callback + set-new-password screen) is
+  // public for the same "must always be reachable" reason, but deliberately
+  // NOT part of isAuthRoute below -- a password-recovery link intentionally
+  // leaves the visitor authenticated (that's what authorizes updating their
+  // password), and isAuthRoute's own "authenticated -> bounce to /projects"
+  // rule would otherwise redirect them away before they ever see the form.
   const isPublicRoute =
-    isAuthRoute || request.nextUrl.pathname.startsWith("/preview") || request.nextUrl.pathname === "/";
+    isAuthRoute ||
+    request.nextUrl.pathname.startsWith("/preview") ||
+    request.nextUrl.pathname.startsWith("/auth") ||
+    request.nextUrl.pathname === "/";
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();

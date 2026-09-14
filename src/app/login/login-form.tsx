@@ -30,6 +30,9 @@ export function LoginForm() {
           className="border-0 border-b border-border bg-transparent py-1.5 text-sm focus:border-foreground focus:outline-none"
         />
       </label>
+      <Link href="/login/forgot-password" className="-mt-3 self-end text-xs text-muted underline underline-offset-2 hover:text-foreground">
+        Forgot password?
+      </Link>
       {state?.message && <p className="text-sm text-error">{state.message}</p>}
       <Button type="submit" variant="primary" disabled={pending} className="w-full">
         {pending ? "Logging in..." : "Log in"}
