@@ -1940,6 +1940,12 @@ const GridSlot = memo(function GridSlot({
   // whether one or both are selected.
   const handleCopyStyle = useCallback(
     (categories: StyleCategory[]) => {
+      // Closes immediately, synchronously -- the actual copy (which may
+      // need a small server round-trip for Text/Adjustments, see below)
+      // finishes in the background and reports itself via toast, exactly
+      // like every other optimistic mutation in this file. The user should
+      // never be stuck looking at the popover waiting on it.
+      setCopyStyleOpen(false);
       if (!slot.postId) return;
       const sourcePostId = slot.postId;
       void (async () => {

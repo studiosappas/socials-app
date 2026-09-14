@@ -5,6 +5,7 @@ import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
 import { useCustomFonts } from "@/lib/use-custom-fonts";
+import { useRecentColors, commitRecentColor } from "@/lib/hooks/use-recent-colors";
 import {
   NEUTRAL_ADJUSTMENTS,
   applyAdjustments,
@@ -78,11 +79,6 @@ const ALIGN_OPTIONS: { label: string; value: TextAlign }[] = [
   { label: "Center", value: "center" },
   { label: "Right", value: "right" },
 ];
-// A small fixed set of common picks, not a brand/preset system -- just
-// enough to cover "white text on a photo" and "black text" (the two most
-// common cases) plus a handful of accents, without needing a whole palette
-// UI or any new data model.
-const TEXT_COLOR_SWATCHES = ["#ffffff", "#171412", "#e11d48", "#f59e0b", "#16a34a", "#2563eb", "#7c3aed"];
 
 // Compact list -- label + slider + reset, per control, matching a Canva-
 // style adjustments panel rather than a full Photoshop-style one. Hue is
@@ -362,6 +358,7 @@ export function AnnotationEditor({
   // effect further down that corrects any text painted before its font
   // finished loading.
   const { familyNames: customFontFamilies, readyVersion: customFontsReady } = useCustomFonts(customFonts);
+  const recentTextColors = useRecentColors();
   const fontOptions = useMemo(
     () => [...FONT_OPTIONS, ...customFontFamilies.map((f) => ({ label: f, value: f }))],
     [customFontFamilies],
@@ -1918,6 +1915,13 @@ export function AnnotationEditor({
   function handleTextColorChange(color: string) {
     setTextColor(color);
     applyTextStyle({ fill: color });
+    // Safe to treat every call here as a real commit: with the native OS
+    // picker hidden for Text (showNativePicker=false below), the only two
+    // paths that reach this are a hex field blur/Enter and a recent-swatch
+    // click -- both already discrete "the user chose this" actions, never
+    // a live drag/hover preview. Re-committing an already-recent color is
+    // exactly what moves it back to the front.
+    commitRecentColor(color);
   }
 
   // Deterministic: typing a number always becomes the new effective size.
@@ -2490,7 +2494,12 @@ export function AnnotationEditor({
               Edit text
             </Button>
           )}
-          <ColorPicker value={textColor} onChange={handleTextColorChange} swatches={TEXT_COLOR_SWATCHES} />
+          <ColorPicker
+            value={textColor}
+            onChange={handleTextColorChange}
+            recentColors={recentTextColors}
+            showNativePicker={false}
+          />
           <input
             type="number"
             inputMode="numeric"
@@ -3535,14 +3544,21 @@ function IconToolButton({
 function ColorPicker({
   value,
   onChange,
-  swatches,
+  recentColors,
+  showNativePicker = true,
 }: {
   value: string;
   onChange: (hex: string) => void;
-  // Optional -- omitted call sites (Draw) render exactly as before; passed
-  // only from the Text toolbar, which is the one this task asked to give a
-  // "palette + hex" treatment.
-  swatches?: string[];
+  // Optional -- omitted call sites (Draw) show no swatch row at all, same
+  // as before recent colors existed. Passed only from the Text toolbar,
+  // the one this control was asked to add a recent-colors palette to.
+  // Empty/undefined renders nothing here (no arbitrary starter palette).
+  recentColors?: string[];
+  // Draw keeps the OS-native color swatch (its RGB/HSL/etc. panel and all)
+  // unchanged -- only Text was asked for a HEX-only control, so this
+  // defaults to true and is set false from the Text toolbar's call site
+  // only.
+  showNativePicker?: boolean;
 }) {
   const [hexInput, setHexInput] = useState(value);
   const [prevValue, setPrevValue] = useState(value);
@@ -3554,7 +3570,10 @@ function ColorPicker({
   function commitHexInput() {
     // normalizeHex already accepts an optional leading "#", 3- or 6-digit,
     // any case -- covers a value typed by hand or pasted straight out of
-    // Photoshop's own hex field.
+    // Photoshop's own hex field. This IS the one commit point for typed/
+    // pasted input (fires on blur/Enter, never on every keystroke), so
+    // callers can safely treat onChange as "the user committed this color"
+    // when showNativePicker is off.
     const normalized = normalizeHex(hexInput);
     if (normalized) {
       onChange(normalized);
@@ -3565,9 +3584,9 @@ function ColorPicker({
 
   return (
     <div className="flex items-center gap-1.5">
-      {swatches && (
+      {recentColors && recentColors.length > 0 && (
         <div className="flex items-center gap-1">
-          {swatches.map((swatch) => (
+          {recentColors.map((swatch) => (
             <button
               key={swatch}
               type="button"
@@ -3581,13 +3600,15 @@ function ColorPicker({
           ))}
         </div>
       )}
-      <input
-        type="color"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        title="Pick a color"
-        className="h-6 w-6 cursor-pointer rounded-full border border-border bg-transparent p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch-wrapper]:rounded-full [&::-webkit-color-swatch-wrapper]:p-0"
-      />
+      {showNativePicker && (
+        <input
+          type="color"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          title="Pick a color"
+          className="h-6 w-6 cursor-pointer rounded-full border border-border bg-transparent p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch-wrapper]:rounded-full [&::-webkit-color-swatch-wrapper]:p-0"
+        />
+      )}
       <input
         type="text"
         value={hexInput}
