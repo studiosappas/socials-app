@@ -43,6 +43,7 @@ export function ShareMenuButton({
   exportLinks = [],
   onEnterSelectionMode,
   onEnterBulkSelectionMode,
+  showLabel = false,
 }: {
   projectId: string;
   links: ShareLinkItem[];
@@ -56,6 +57,14 @@ export function ShareMenuButton({
   // enter-a-board-level-selection-mode shape as onEnterSelectionMode
   // above, just for a different picker.
   onEnterBulkSelectionMode?: () => void;
+  // Grid-only opt-in (discoverability fix): an unlabeled icon was the
+  // reported "can't find where to share" problem, but Content's own
+  // trigger has proven, carefully-tuned mobile positioning (see this
+  // file's own history) that a visual change here has no reason to
+  // disturb -- defaults to false so every other caller is byte-for-byte
+  // unaffected. Widening the button doesn't move the dropdown panel below
+  // it, which anchors to the wrapper div, not the button's own edge.
+  showLabel?: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
@@ -67,24 +76,42 @@ export function ShareMenuButton({
         type="button"
         onClick={() => setMenuOpen((v) => !v)}
         title="Share & export"
-        className="rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+        className={
+          showLabel
+            ? "flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs tracking-wide text-foreground uppercase transition-colors duration-150 hover:border-foreground/40 hover:bg-black/[.03]"
+            : "rounded p-1.5 text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
+        }
       >
         <ShareIcon />
+        {showLabel && "Share"}
       </button>
       {menuOpen && (
         <div className="absolute right-0 top-8 z-20 w-56 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg">
-          {exportLinks.map((link) => (
-            <a
-              key={link.href}
-              href={link.href}
-              download
-              title={link.title}
-              onClick={() => setMenuOpen(false)}
-              className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
-            >
-              {link.label}
-            </a>
-          ))}
+          {exportLinks.length > 0 && (
+            <>
+              <div className="px-2 pt-1.5 pb-1">
+                <p className="text-[10px] tracking-wide text-muted uppercase">Share feed</p>
+                <p className="text-[10px] text-muted">Share the visual feed with a client</p>
+              </div>
+              {exportLinks.map((link) => (
+                <a
+                  key={link.href}
+                  href={link.href}
+                  download
+                  title={link.title}
+                  onClick={() => setMenuOpen(false)}
+                  className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                >
+                  {link.label}
+                </a>
+              ))}
+              <div className="my-1 border-t border-border" />
+            </>
+          )}
+          <div className="px-2 pt-1.5 pb-1">
+            <p className="text-[10px] tracking-wide text-muted uppercase">Share review</p>
+            <p className="text-[10px] text-muted">Send content for approval and feedback</p>
+          </div>
           <button
             type="button"
             onClick={() => {
