@@ -1,15 +1,22 @@
 "use client";
 
 import { useActionState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { login } from "@/lib/actions/auth";
 import { Button } from "@/components/ui/button";
 
 export function LoginForm() {
   const [state, action, pending] = useActionState(login, undefined);
+  // Set by updateRecoveryPassword's own redirect on a successful password
+  // reset (see auth.ts) -- read here rather than building any new
+  // notification system, matching this form's existing plain-<p> message
+  // convention (state?.message below) for everything else it shows.
+  const justReset = useSearchParams().get("reset") === "success";
 
   return (
     <form action={action} className="flex w-full max-w-sm flex-col gap-6">
+      {justReset && <p className="text-sm text-success">Password updated. You can now log in.</p>}
       <label className="flex flex-col gap-1.5">
         <span className="text-xs tracking-wide text-muted uppercase">Email</span>
         <input

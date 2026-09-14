@@ -141,7 +141,10 @@ const NewPasswordSchema = z
     path: ["confirmPassword"],
   });
 
-export type UpdatePasswordState = { status: "idle" | "success" | "error"; message?: string };
+// No "success" status -- a successful update redirects away (see below)
+// rather than returning a state for the client to render, so this only
+// ever needs to describe the states the form actually renders itself.
+export type UpdatePasswordState = { status: "idle" | "error"; message?: string };
 
 // Operates on whatever session the /auth/callback route already established
 // (the recovery link's own code exchange) -- updateUser reads that session
@@ -154,6 +157,20 @@ export type UpdatePasswordState = { status: "idle" | "success" | "error"; messag
 // in this product (a real login), and it can't produce a redirect loop the
 // way silently keeping an ambiguous "authenticated at /auth/reset-password"
 // state could.
+//
+// Redirects to /login on success instead of returning a state for the
+// client to render inline -- this used to return {status:"success"} and
+// let ResetPasswordForm swap in a confirmation message while staying on
+// /auth/reset-password, but signOut()'s own cookie mutation makes Next.js
+// treat this action as invalidating the current route's Router Cache,
+// which refetches /auth/reset-password's server component (the page.tsx
+// session check) on the next paint -- by then the session is already
+// gone, so it re-evaluated to the expired-link state and replaced the
+// client component (discarding its own "success" state) with "Link
+// expired." right after a successful update. redirect() sidesteps this
+// entirely: it's a real navigation away from /auth/reset-password, so
+// that page's own session check never runs again after this action
+// completes. Same redirect() pattern login()/signup() already use above.
 export async function updateRecoveryPassword(
   _state: UpdatePasswordState,
   formData: FormData,
@@ -181,7 +198,7 @@ export async function updateRecoveryPassword(
   }
 
   await supabase.auth.signOut();
-  return { status: "success" };
+  redirect("/login?reset=success");
 }
 
 export async function logout() {
