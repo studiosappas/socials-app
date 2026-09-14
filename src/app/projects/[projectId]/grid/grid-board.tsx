@@ -31,10 +31,20 @@ import {
   updatePostCoverTransform,
 } from "@/lib/actions/grid";
 import { deletePost } from "@/lib/actions/posts";
-import { saveRegeneratedPoster } from "@/lib/actions/media";
+import { saveRegeneratedPoster, getMediaAssetAnnotationJson } from "@/lib/actions/media";
 import { MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
 import { CroppedCoverImage, GridCropOverlay } from "./grid-crop-overlay";
+import { CopyStyleDialog } from "./copy-style-dialog";
+import {
+  useCopiedStyle,
+  setCopiedStyle,
+  stagePendingStylePaste,
+  extractTextStyleFromAnnotationJson,
+  extractAdjustmentsFromAnnotationJson,
+  type StyleCategory,
+  type CopiedPostStyle,
+} from "@/lib/style-clipboard";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
@@ -1589,7 +1599,9 @@ const GridSlot = memo(function GridSlot({
   reorderMode?: boolean;
 }) {
   const router = useRouter();
-  const { showError } = useToast();
+  const { showError, showSuccess } = useToast();
+  const copiedStyle = useCopiedStyle();
+  const [copyStyleOpen, setCopyStyleOpen] = useState(false);
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
     useSortable({
       id: slot.id,
@@ -1915,6 +1927,121 @@ const GridSlot = memo(function GridSlot({
     requestOpenCrop(slot.id);
   }, [requestOpenCrop, slot.id]);
 
+  const handleOpenCopyStyle = useCallback(() => {
+    setContentMenuOpen(false);
+    setCopyStyleOpen(true);
+  }, []);
+
+  // Crop is copied straight from this slot's own already-loaded state.
+  // Text/Adjustments have no equivalent lightweight field -- both live only
+  // inside the cover asset's own annotation_json (see
+  // saveMediaAssetAnnotation's comment), so copying either means a small
+  // server round-trip to read that blob, done once here regardless of
+  // whether one or both are selected.
+  const handleCopyStyle = useCallback(
+    (categories: StyleCategory[]) => {
+      if (!slot.postId) return;
+      const sourcePostId = slot.postId;
+      void (async () => {
+        const payload: CopiedPostStyle = { sourcePostId, categories };
+        if (categories.includes("crop")) {
+          payload.crop = slot.coverTransform;
+        }
+        const needsAnnotation = categories.includes("text") || categories.includes("adjustments");
+        if (needsAnnotation && slot.coverMediaAssetId) {
+          const result = await getMediaAssetAnnotationJson(slot.coverMediaAssetId);
+          if (categories.includes("text")) {
+            const text = extractTextStyleFromAnnotationJson(result.annotationJson);
+            if (text) payload.text = text;
+          }
+          if (categories.includes("adjustments")) {
+            const adjustments = extractAdjustmentsFromAnnotationJson(result.annotationJson);
+            if (adjustments) payload.adjustments = adjustments;
+          }
+        }
+        setCopiedStyle(payload);
+
+        const parts: string[] = [];
+        if (categories.includes("crop")) parts.push("crop");
+        if (categories.includes("text")) parts.push(payload.text ? "text" : "text (none found)");
+        if (categories.includes("adjustments")) parts.push(payload.adjustments ? "adjustments" : "adjustments (none found)");
+        showSuccess(`Copied style: ${parts.join(", ")}.`);
+      })();
+    },
+    [slot, showSuccess],
+  );
+
+  // Crop applies instantly (same mutateSlot/pushCommand pattern as
+  // handleSaveCrop above -- it's a small, independent, already-optimistic-
+  // safe per-post value). Text/Adjustments defer to the next time this
+  // post's cover is opened in the Image Editor -- see style-clipboard.ts's
+  // own comment on why an instant background paste isn't safe for those
+  // two categories (no independent storage, no headless render pipeline,
+  // and a cover asset can be shared by more than one post).
+  const handlePasteStyle = useCallback(() => {
+    setContentMenuOpen(false);
+    if (!copiedStyle || !slot.postId) return;
+    const postId = slot.postId;
+    const appliedNow: string[] = [];
+    const deferred: string[] = [];
+
+    if (copiedStyle.categories.includes("crop")) {
+      const previousTransform = slot.coverTransform;
+      const nextTransform = copiedStyle.crop ?? null;
+      appliedNow.push("crop");
+      mutateSlot(slot.id, { ...slot, coverTransform: nextTransform }, async () => {
+        if (demoMode) return;
+        await updatePostCoverTransform(projectId, postId, nextTransform);
+      }).then((ok) => {
+        if (!ok) {
+          showError("Couldn't paste that crop. Please try again.");
+          requestIdleRefresh();
+          return;
+        }
+        if (demoMode) return;
+        pushCommand({
+          label: "Paste style (crop)",
+          undo: () =>
+            mutateSlot(slot.id, { ...slot, coverTransform: previousTransform }, async () => {
+              await updatePostCoverTransform(projectId, postId, previousTransform);
+            }).then((undoOk) => {
+              if (!undoOk) requestIdleRefresh();
+            }),
+          redo: () =>
+            mutateSlot(slot.id, { ...slot, coverTransform: nextTransform }, async () => {
+              await updatePostCoverTransform(projectId, postId, nextTransform);
+            }).then((redoOk) => {
+              if (!redoOk) requestIdleRefresh();
+            }),
+        });
+      });
+    }
+
+    const pending: { text?: typeof copiedStyle.text; adjustments?: typeof copiedStyle.adjustments } = {};
+    if (copiedStyle.categories.includes("text") && copiedStyle.text) {
+      pending.text = copiedStyle.text;
+      deferred.push("text");
+    }
+    if (copiedStyle.categories.includes("adjustments") && copiedStyle.adjustments) {
+      pending.adjustments = copiedStyle.adjustments;
+      deferred.push("adjustments");
+    }
+    if (!demoMode && (pending.text || pending.adjustments)) {
+      stagePendingStylePaste(postId, pending);
+    }
+
+    if (appliedNow.length === 0 && deferred.length === 0) {
+      showError("Nothing to paste from the copied style.");
+      return;
+    }
+    const parts: string[] = [];
+    if (appliedNow.length) parts.push(`Applied ${appliedNow.join(", ")}`);
+    if (deferred.length && !demoMode) {
+      parts.push(`${deferred.join(" & ")} will apply next time you open Image Editor for this post`);
+    }
+    showSuccess(`${parts.join(". ")}.`);
+  }, [copiedStyle, slot, demoMode, projectId, mutateSlot, pushCommand, showError, showSuccess, requestIdleRefresh]);
+
   const handleDeletePost = useCallback(() => {
     if (!slot.postId) return;
     const postId = slot.postId;
@@ -2027,11 +2154,15 @@ const GridSlot = memo(function GridSlot({
         onToggleMenu={handleToggleMenu}
         onEditContent={handleEditContent}
         onOpenCropFromMenu={handleOpenCropFromMenu}
+        onOpenCopyStyle={handleOpenCopyStyle}
+        onPasteStyle={handlePasteStyle}
+        pasteStyleEnabled={copiedStyle !== null}
         onDeletePost={handleDeletePost}
         onRemoveRow={handleRemoveRow}
         onSaveCrop={handleSaveCrop}
         onCancelCrop={handleCancelCrop}
       />
+      <CopyStyleDialog open={copyStyleOpen} onClose={() => setCopyStyleOpen(false)} onCopy={handleCopyStyle} />
     </div>
   );
 });
@@ -2062,6 +2193,9 @@ const GridSlotBody = memo(function GridSlotBody({
   onToggleMenu,
   onEditContent,
   onOpenCropFromMenu,
+  onOpenCopyStyle,
+  onPasteStyle,
+  pasteStyleEnabled,
   onDeletePost,
   onRemoveRow,
   onSaveCrop,
@@ -2080,6 +2214,9 @@ const GridSlotBody = memo(function GridSlotBody({
   onToggleMenu: () => void;
   onEditContent: () => void;
   onOpenCropFromMenu: () => void;
+  onOpenCopyStyle: () => void;
+  onPasteStyle: () => void;
+  pasteStyleEnabled: boolean;
   onDeletePost: () => void;
   onRemoveRow: () => void;
   onSaveCrop: (next: GridCoverTransform) => void;
@@ -2231,6 +2368,25 @@ const GridSlotBody = memo(function GridSlotBody({
                   className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
                   Crop Image
+                </button>
+              )}
+              {slot.postId && !demoMode && (
+                <button
+                  type="button"
+                  onClick={onOpenCopyStyle}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                >
+                  Copy style
+                </button>
+              )}
+              {slot.postId && !demoMode && (
+                <button
+                  type="button"
+                  onClick={onPasteStyle}
+                  disabled={!pasteStyleEnabled}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:pointer-events-none disabled:opacity-40"
+                >
+                  Paste style
                 </button>
               )}
               {slot.postId && !demoMode && (

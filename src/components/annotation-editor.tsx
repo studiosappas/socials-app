@@ -78,6 +78,11 @@ const ALIGN_OPTIONS: { label: string; value: TextAlign }[] = [
   { label: "Center", value: "center" },
   { label: "Right", value: "right" },
 ];
+// A small fixed set of common picks, not a brand/preset system -- just
+// enough to cover "white text on a photo" and "black text" (the two most
+// common cases) plus a handful of accents, without needing a whole palette
+// UI or any new data model.
+const TEXT_COLOR_SWATCHES = ["#ffffff", "#171412", "#e11d48", "#f59e0b", "#16a34a", "#2563eb", "#7c3aed"];
 
 // Compact list -- label + slider + reset, per control, matching a Canva-
 // style adjustments panel rather than a full Photoshop-style one. Hue is
@@ -374,6 +379,19 @@ export function AnnotationEditor({
   const [textItalic, setTextItalic] = useState(false);
   const [textFont, setTextFont] = useState(FONT_OPTIONS[0].value);
   const [textAlign, setTextAlign] = useState<TextAlign>("left");
+  // Effective on-canvas size (fontSize * scaleY) of the selected text
+  // object -- a real, always-accurate numeric control, kept in sync with
+  // drag-resize (see the object:scaling listener below) rather than only
+  // ever being set by typing into it.
+  const [textFontSize, setTextFontSize] = useState(22);
+  // The last real text-range selection Fabric reported (via
+  // text:selection:changed) for the CURRENTLY selected IText -- deliberately
+  // NOT cleared when editing exits (e.g. clicking a toolbar control blurs
+  // the canvas's hidden textarea, which ends editing), since that's exactly
+  // the moment a style needs to still apply to the range the user just
+  // highlighted. Cleared only when a genuinely different object becomes
+  // selected (see syncSelection) or the selection is cleared entirely.
+  const lastTextRangeRef = useRef<{ object: fabric.IText; start: number; end: number } | null>(null);
   const [cropping, setCropping] = useState(false);
   // Same pan/zoom-within-a-fixed-frame model as Grid's own crop tool
   // (grid-crop-overlay.tsx): the frame (current canvas size) never changes,
@@ -654,7 +672,7 @@ export function AnnotationEditor({
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
         const basePhoto = findBasePhoto(canvas);
-        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+        setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         setReady(true);
       }
 
@@ -838,6 +856,9 @@ export function AnnotationEditor({
 
     function syncSelection() {
       const active = canvas.getActiveObject();
+      // A genuinely different object (or none) is now selected -- any
+      // in-progress range on the PREVIOUS text object no longer applies.
+      if (active !== lastTextRangeRef.current?.object) lastTextRangeRef.current = null;
       setSelectedObject(active ?? null);
       if (active instanceof fabric.IText) {
         setSelectedText(active);
@@ -846,6 +867,7 @@ export function AnnotationEditor({
         setTextItalic(active.fontStyle === "italic");
         setTextFont((active.fontFamily as string) ?? FONT_OPTIONS[0].value);
         setTextAlign((active.textAlign as TextAlign) ?? "left");
+        setTextFontSize(Math.round((active.fontSize ?? 22) * (active.scaleY ?? 1)));
       } else {
         setSelectedText(null);
       }
@@ -858,6 +880,7 @@ export function AnnotationEditor({
       setSelectedImage(null);
       setSelectedObject(null);
       setTextEditing(false);
+      lastTextRangeRef.current = null;
     });
     // See textEditing's own comment -- these fire regardless of whether
     // editing was entered via the "Edit Text" button, a real double-click/
@@ -865,6 +888,29 @@ export function AnnotationEditor({
     // stay in sync with the same two-state toolbar.
     canvas.on("text:editing:entered", () => setTextEditing(true));
     canvas.on("text:editing:exited", () => setTextEditing(false));
+    // Fabric fires this on every caret move/selection change while editing
+    // (IText._fireSelectionChanged) -- the one place selectionStart/
+    // selectionEnd for the ACTIVE range are read, since a toolbar control's
+    // own click can blur the canvas's hidden textarea (ending editing)
+    // before its onClick handler runs otherwise.
+    canvas.on("text:selection:changed", (opt) => {
+      const active = opt.target;
+      if (!(active instanceof fabric.IText)) return;
+      lastTextRangeRef.current = {
+        object: active,
+        start: active.selectionStart ?? 0,
+        end: active.selectionEnd ?? 0,
+      };
+    });
+    // Read-only sync so the font-size field reflects a drag-resize live --
+    // never writes back to the object (fontSize/scaleY stay exactly what
+    // Fabric's own resize already produced), so this can't fight or
+    // duplicate Fabric's normal resize handling.
+    canvas.on("object:scaling", (opt) => {
+      if (opt.target instanceof fabric.IText) {
+        setTextFontSize(Math.round((opt.target.fontSize ?? 22) * (opt.target.scaleY ?? 1)));
+      }
+    });
     }
 
     return () => {
@@ -1504,7 +1550,7 @@ export function AnnotationEditor({
           if (fabricRef.current !== canvas) return;
           canvas.requestRenderAll();
           const basePhoto = findBasePhoto(canvas);
-          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         } finally {
           restoringRef.current = false;
           historyOperationRef.current = false;
@@ -1526,7 +1572,7 @@ export function AnnotationEditor({
           if (fabricRef.current !== canvas) return;
           canvas.requestRenderAll();
           const basePhoto = findBasePhoto(canvas);
-          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         } finally {
           restoringRef.current = false;
           historyOperationRef.current = false;
@@ -1829,13 +1875,40 @@ export function AnnotationEditor({
     });
   }
 
+  // The active text RANGE, if any, for the currently selected object --
+  // null whenever there's no real highlighted substring (just a caret, or
+  // the object is selected but not being edited at all), in which case
+  // every control below falls back to whole-object formatting.
+  function getActiveRange(): { start: number; end: number } | null {
+    if (!selectedText || !lastTextRangeRef.current) return null;
+    if (lastTextRangeRef.current.object !== selectedText) return null;
+    const { start, end } = lastTextRangeRef.current;
+    if (start === end) return null;
+    return { start: Math.min(start, end), end: Math.max(start, end) };
+  }
+
   // Direct .set() calls on a fabric object don't fire "object:modified" on
   // their own (that only fires after a user drag/resize gesture completes),
   // so re-fire it manually -- that's the event the history stack listens on,
   // and reusing it keeps style edits undo-able the same way moves/resizes are.
+  //
+  // When a text range is highlighted, every control (color/font/weight/
+  // style) applies to just that range via Fabric's own native per-character
+  // `styles` map (setSelectionStyles) instead of the whole object -- this is
+  // stock Fabric IText/Text behavior, already round-tripped for free through
+  // this editor's existing canvas.toJSON()/loadFromJSON()/toBlob() save,
+  // reopen, and export paths (styles is one of Text's own additionalProps).
+  // textAlign is excluded on purpose: Fabric treats it as a paragraph-level
+  // property, not a per-character style (it's absent from Text's own
+  // styleProperties list), so it always applies to the whole object.
   function applyTextStyle(props: Partial<fabric.ITextProps>) {
     if (!selectedText) return;
-    selectedText.set(props);
+    const range = "textAlign" in props ? null : getActiveRange();
+    if (range) {
+      selectedText.setSelectionStyles(props, range.start, range.end);
+    } else {
+      selectedText.set(props);
+    }
     withCanvas((canvas) => {
       canvas.requestRenderAll();
       canvas.fire("object:modified", { target: selectedText });
@@ -1845,6 +1918,25 @@ export function AnnotationEditor({
   function handleTextColorChange(color: string) {
     setTextColor(color);
     applyTextStyle({ fill: color });
+  }
+
+  // Deterministic: typing a number always becomes the new effective size.
+  // Outside an active range, scaleX/scaleY reset to 1 so a previously drag-
+  // resized object's fontSize IS the full new size, not multiplied again by
+  // whatever scale a prior resize left behind. Inside a range, only the
+  // range's own fontSize changes -- the object's overall scale (if any)
+  // still applies uniformly on top, same as it does for every other
+  // character, which is the one honest limitation of combining a whole-
+  // object transform with per-character sizing.
+  function handleFontSizeChange(nextSize: number) {
+    if (!selectedText || !Number.isFinite(nextSize) || nextSize <= 0) return;
+    const clamped = Math.round(clamp(nextSize, 6, 400));
+    setTextFontSize(clamped);
+    if (getActiveRange()) {
+      applyTextStyle({ fontSize: clamped });
+    } else {
+      applyTextStyle({ fontSize: clamped, scaleX: 1, scaleY: 1 });
+    }
   }
 
   function handleTextBoldToggle() {
@@ -2398,7 +2490,17 @@ export function AnnotationEditor({
               Edit text
             </Button>
           )}
-          <ColorPicker value={textColor} onChange={handleTextColorChange} />
+          <ColorPicker value={textColor} onChange={handleTextColorChange} swatches={TEXT_COLOR_SWATCHES} />
+          <input
+            type="number"
+            inputMode="numeric"
+            min={6}
+            max={400}
+            value={textFontSize}
+            onChange={(e) => handleFontSizeChange(Number(e.target.value))}
+            title="Font size"
+            className="w-14 rounded border border-border bg-transparent px-1.5 py-1 text-xs focus:border-foreground focus:outline-none"
+          />
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -3430,7 +3532,18 @@ function IconToolButton({
 // input (same pairing Google Drive's own color picker uses) so a color code
 // can be typed/pasted directly; only commits on blur/Enter, and reverts to
 // the last valid value on an invalid entry instead of erroring.
-function ColorPicker({ value, onChange }: { value: string; onChange: (hex: string) => void }) {
+function ColorPicker({
+  value,
+  onChange,
+  swatches,
+}: {
+  value: string;
+  onChange: (hex: string) => void;
+  // Optional -- omitted call sites (Draw) render exactly as before; passed
+  // only from the Text toolbar, which is the one this task asked to give a
+  // "palette + hex" treatment.
+  swatches?: string[];
+}) {
   const [hexInput, setHexInput] = useState(value);
   const [prevValue, setPrevValue] = useState(value);
   if (value !== prevValue) {
@@ -3439,6 +3552,9 @@ function ColorPicker({ value, onChange }: { value: string; onChange: (hex: strin
   }
 
   function commitHexInput() {
+    // normalizeHex already accepts an optional leading "#", 3- or 6-digit,
+    // any case -- covers a value typed by hand or pasted straight out of
+    // Photoshop's own hex field.
     const normalized = normalizeHex(hexInput);
     if (normalized) {
       onChange(normalized);
@@ -3449,6 +3565,22 @@ function ColorPicker({ value, onChange }: { value: string; onChange: (hex: strin
 
   return (
     <div className="flex items-center gap-1.5">
+      {swatches && (
+        <div className="flex items-center gap-1">
+          {swatches.map((swatch) => (
+            <button
+              key={swatch}
+              type="button"
+              onClick={() => onChange(swatch)}
+              title={swatch}
+              className={`h-5 w-5 rounded-full border transition-[border-color] duration-150 ${
+                value.toLowerCase() === swatch.toLowerCase() ? "border-foreground" : "border-border"
+              }`}
+              style={{ backgroundColor: swatch }}
+            />
+          ))}
+        </div>
+      )}
       <input
         type="color"
         value={value}

@@ -43,6 +43,7 @@ import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { useToast } from "@/lib/hooks/use-toast";
+import { takePendingStylePaste, applyPendingStyleToAnnotationJson } from "@/lib/style-clipboard";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
@@ -169,7 +170,7 @@ export function PostEditor({
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
-  const { showError } = useToast();
+  const { showError, showSuccess } = useToast();
   const [prevAssets, setPrevAssets] = useState(assets);
   const [orderedAssets, setOrderedAssets] = useState(assets);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
@@ -507,17 +508,34 @@ export function PostEditor({
                   postId={post.id}
                   onRemove={() => handleRemoveAsset(asset.postAssetId)}
                   onChooseFromLibrary={handleChooseFromLibrary}
-                  onEditImage={() =>
-                    asset.mediaAssetId &&
-                    asset.originalUrl &&
+                  onEditImage={() => {
+                    if (!asset.mediaAssetId || !asset.originalUrl) return;
+                    const isCover = index === 0;
+                    // A staged Copy/Paste Style paste (see style-clipboard.ts)
+                    // only ever targets this post's COVER asset -- Grid's
+                    // Copy Style reads the cover, so it's only meaningful to
+                    // blend it in when the cover is what's being opened, not
+                    // an unrelated carousel slide. "Take" (not "get") so it's
+                    // consumed exactly once, the first time the cover is
+                    // opened after a paste.
+                    const pending = isCover ? takePendingStylePaste(post.id) : null;
+                    const annotationJson = pending
+                      ? applyPendingStyleToAnnotationJson(asset.annotationJson, pending)
+                      : asset.annotationJson;
+                    if (pending) {
+                      const applied = [pending.text && "text", pending.adjustments && "adjustments"]
+                        .filter(Boolean)
+                        .join(" & ");
+                      showSuccess(`Applied pasted ${applied} style — Save to keep it.`);
+                    }
                     setEditingImage({
                       mediaAssetId: asset.mediaAssetId,
                       imageUrl: asset.originalUrl,
-                      annotationJson: asset.annotationJson,
+                      annotationJson,
                       mediaType: asset.mediaType,
-                      isCover: index === 0,
-                    })
-                  }
+                      isCover,
+                    });
+                  }}
                 />
               ))}
               {canManage && (
