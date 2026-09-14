@@ -43,7 +43,7 @@ import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { useToast } from "@/lib/hooks/use-toast";
-import { takePendingStylePaste, applyPendingStyleToAnnotationJson } from "@/lib/style-clipboard";
+import { takePendingStylePaste, type PendingStylePaste } from "@/lib/style-clipboard";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
@@ -90,6 +90,12 @@ type EditingImage = {
   // position is a carousel slide -- the two get different export targets
   // (3:4 cover vs 4:5 slide), see targetAspect below.
   isCover: boolean;
+  // Set only when this editor session was opened by consuming a queued
+  // Grid "Paste style" (see the mount effect below) -- annotationJson/
+  // imageUrl above are ALWAYS this asset's real, unmodified saved state;
+  // AnnotationEditor applies these values itself, after its own normal
+  // load finishes, never by pre-patching the JSON handed to it.
+  pendingStyleToApply?: PendingStylePaste | null;
 };
 
 type PostRecord = {
@@ -182,13 +188,23 @@ export function PostEditor({
   // (see style-clipboard.ts / grid-board.tsx's handlePasteStyle) -- Grid
   // navigates straight here immediately after queuing it, so this fires as
   // soon as the destination post's own editor page mounts, opening the
-  // cover asset's Image Editor with the pasted Text/Adjustments already
-  // blended in. Deliberately NOT tied to the "Edit Image" click handler:
-  // that would make ANY later, unrelated editor-open silently consume a
-  // stale queue entry -- a "next editor opened" behavior explicitly not
-  // wanted here. The ref guards against StrictMode's double-invoke (a
-  // second call would just find nothing, since takePendingStylePaste
-  // already deleted the entry, but there's no reason to even try twice).
+  // cover asset's Image Editor EXACTLY the way a normal "Edit Image" click
+  // would (same mediaAssetId/imageUrl/annotationJson/mediaType/isCover,
+  // untouched) plus the queued style attached separately as
+  // pendingStyleToApply -- AnnotationEditor applies it itself, after its
+  // own normal load finishes (see that component's own comment on why: an
+  // earlier version of this pre-patched annotationJson before handing it
+  // to the editor, which broke the common case of an asset with no prior
+  // annotation_json at all -- turning `null` into a non-null-but-empty
+  // object made the editor think there WAS saved state to restore, loading
+  // a blank canvas with no base photo instead of the real image).
+  //
+  // Deliberately NOT tied to the "Edit Image" click handler: that would
+  // make ANY later, unrelated editor-open silently consume a stale queue
+  // entry -- a "next editor opened" behavior explicitly not wanted here.
+  // The ref guards against StrictMode's double-invoke (a second call would
+  // just find nothing, since takePendingStylePaste already deleted the
+  // entry, but there's no reason to even try twice).
   const consumedPendingPasteRef = useRef(false);
   useEffect(() => {
     if (consumedPendingPasteRef.current) return;
@@ -205,9 +221,10 @@ export function PostEditor({
     setEditingImage({
       mediaAssetId: coverAsset.mediaAssetId,
       imageUrl: coverAsset.originalUrl,
-      annotationJson: applyPendingStyleToAnnotationJson(coverAsset.annotationJson, pending),
+      annotationJson: coverAsset.annotationJson,
       mediaType: coverAsset.mediaType,
       isCover: true,
+      pendingStyleToApply: pending,
     });
     // orderedAssets/post.id intentionally the only deps that matter here --
     // this is a one-shot mount action (guarded above), not something that
@@ -644,6 +661,7 @@ export function PostEditor({
         onSaved={handleAnnotationSaved}
         saveAction={editingImage?.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}
         customFonts={customFonts}
+        pendingStyleToApply={editingImage?.pendingStyleToApply ?? null}
       />
     </div>
   );

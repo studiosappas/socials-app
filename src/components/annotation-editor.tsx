@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
 import { useCustomFonts } from "@/lib/use-custom-fonts";
 import { useRecentColors, commitRecentColor } from "@/lib/hooks/use-recent-colors";
+import type { PendingStylePaste } from "@/lib/style-clipboard";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import {
   NEUTRAL_ADJUSTMENTS,
@@ -216,6 +217,7 @@ export function AnnotationEditor({
   onSaved,
   saveAction,
   customFonts = [],
+  pendingStyleToApply = null,
 }: {
   projectId: string;
   attachmentId: string | null;
@@ -249,6 +251,20 @@ export function AnnotationEditor({
   // lib/data/brand-moodboard.ts's deriveCustomFontFaces) -- merged into the
   // font picker below, alongside the built-in generic stacks.
   customFonts?: CustomFontFace[];
+  // Grid's Copy/Paste Style feature (see style-clipboard.ts) -- applied
+  // once, right after the canvas finishes its own NORMAL load (whichever
+  // branch that is: restoring saved JSON, or a fresh load from imageUrl),
+  // never by pre-mutating initialAnnotationJson before this component ever
+  // sees it. That earlier approach broke a real, common case: an asset
+  // with no prior annotation_json (initialAnnotationJson === null, the
+  // signal this component uses to take the "fresh load from imageUrl"
+  // path) turned into a non-null-but-empty {objects: []} once patched,
+  // which this component's own shouldRestoreAnnotation check reads as
+  // "there IS saved state" -- loadFromJSON-ing that produced a genuinely
+  // blank canvas with no base photo at all. Applying the pending values
+  // AFTER the normal load instead means Paste Style can never diverge from
+  // Edit Content/Crop Image's own image-loading behavior.
+  pendingStyleToApply?: PendingStylePaste | null;
 }) {
   const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -667,9 +683,26 @@ export function AnnotationEditor({
       canvas.setDimensions({ width: canvasW, height: canvasH });
 
       function finish() {
+        const basePhoto = findBasePhoto(canvas);
+        // Applied here, after the canvas has ALREADY finished loading via
+        // whichever normal path this asset actually needed -- never as a
+        // reason to alter what got loaded or how. A pending Text style is a
+        // no-op when there's no existing text object to restyle (see this
+        // prop's own comment: never invents a placeholder), and a pending
+        // Adjustments value only makes sense once a real base photo exists,
+        // which it now always does by this point.
+        if (pendingStyleToApply?.adjustments && basePhoto) {
+          applyAdjustments(basePhoto, pendingStyleToApply.adjustments);
+        }
+        if (pendingStyleToApply?.text) {
+          const firstText = canvas.getObjects().find((o): o is fabric.IText => o instanceof fabric.IText);
+          if (firstText) {
+            firstText.set({ ...pendingStyleToApply.text, styles: {} });
+          }
+        }
+        canvas.requestRenderAll();
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
-        const basePhoto = findBasePhoto(canvas);
         setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         setReady(true);
       }
@@ -972,7 +1005,7 @@ export function AnnotationEditor({
     // canvasNonce forces this effect to rerun (disposing the stale
     // instance via disposePromiseRef, then constructing fresh) against
     // whichever canvas node is actually live.
-  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce]);
+  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce, pendingStyleToApply]);
 
   // See visualViewportBox's own declaration. `resize` fires when the
   // visible area's SIZE changes (keyboard opening/closing, pinch-zoom);

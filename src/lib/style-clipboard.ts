@@ -21,7 +21,7 @@
 // preset/brand-style store.
 
 import { useSyncExternalStore } from "react";
-import { buildFilters, readAdjustments, type AdjustmentValues } from "@/lib/image-adjustments";
+import { readAdjustments, type AdjustmentValues } from "@/lib/image-adjustments";
 import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-reducer";
 
 export type StyleCategory = "crop" | "text" | "adjustments";
@@ -178,39 +178,16 @@ export function extractTextStyleFromAnnotationJson(json: object | null): CopiedT
   return style;
 }
 
-// The paste-side counterpart, applied to the DESTINATION post's cover
-// annotation_json right before it's handed to AnnotationEditor as
-// initialAnnotationJson -- the editor itself needs no changes at all; it
-// just loads whatever JSON it's given, same as every other open. Returns a
-// new object; never mutates `json`.
-export function applyPendingStyleToAnnotationJson(json: object | null, pending: PendingStylePaste): object {
-  const source = (json as RawAnnotationJson | null) ?? { objects: [] };
-  const objects = (source.objects ?? []).map((obj) => ({ ...obj }));
-
-  if (pending.adjustments) {
-    const basePhotoIndex = objects.findIndex((o) => o.appRole === "basePhoto");
-    if (basePhotoIndex !== -1) {
-      objects[basePhotoIndex] = {
-        ...objects[basePhotoIndex],
-        filters: buildFilters(pending.adjustments).map((f) => f.toObject()),
-      };
-    }
-  }
-
-  if (pending.text) {
-    const textIndex = objects.findIndex((o) => o.type === "IText");
-    if (textIndex !== -1) {
-      objects[textIndex] = {
-        ...objects[textIndex],
-        ...pending.text,
-        // A whole-object style paste should produce one predictable look --
-        // clear any pre-existing per-character overrides so a stale
-        // highlighted-word color/size from before the paste can't silently
-        // keep winning over the newly pasted base style.
-        styles: {},
-      };
-    }
-  }
-
-  return { ...source, objects };
-}
+// NOTE: the paste-side "apply" step deliberately does NOT live here.
+// AnnotationEditor itself applies a PendingStylePaste (see its own
+// pendingStyleToApply prop), once, right after its own normal load
+// finishes -- never by pre-mutating a post's annotation_json before the
+// editor ever sees it. An earlier version of this file did exactly that,
+// and it broke a common, ordinary case: an asset with no prior
+// annotation_json at all (json === null, the signal AnnotationEditor uses
+// to take its "fresh load from imageUrl" path) turned into a non-null-but-
+// empty {objects: []} once "patched" -- which the editor's own
+// initialization reads as "there IS saved state to restore," loading a
+// blank canvas with no base photo at all instead of the real image. Never
+// reintroduce a JSON-patching version of this function; extend
+// AnnotationEditor's own post-load application instead.
