@@ -1400,43 +1400,14 @@ function GridRow({
   };
 
   return (
-    <div ref={setNodeRef} data-row-id={row.id} style={style} className={`group/row ${isDragging ? "opacity-40" : ""}`}>
+    <div
+      ref={setNodeRef}
+      data-row-id={row.id}
+      style={style}
+      className={`group/row flex items-stretch gap-0.5 ${isDragging ? "opacity-40" : ""}`}
+    >
       {dropIndicator && <RowDropIndicator position={dropIndicator} />}
-      {!rowDragDisabled && (
-        // Explicit, dedicated activation surface -- NOT the row itself, so
-        // grabbing an image still only ever does what it always did (open
-        // Post Editor / start a slot drag). touch-action:none is scoped to
-        // just this small handle, not the whole row, so it can't block
-        // ordinary page/grid scrolling the way it would on a full tile --
-        // no "Edit Grid" mode gate needed for it, unlike whole-tile slot
-        // dragging (see dragEnabled's own comment above). Centered at the
-        // row's own top edge -- every per-slot corner badge/menu already
-        // claims a SLOT's own corner, this claims none of them.
-        //
-        // Visual language reused from Brief's own row-drag handle
-        // (brief-board.tsx's SortableItemRow/GripIcon), not invented fresh:
-        // the same 6-dot grip glyph, the same fine-pointer-only
-        // grab/grabbing cursor, the same touch press feedback -- plus this
-        // app's own standard icon-button hover treatment (hover:bg-black/
-        // [.06]) for the chip itself, since Brief's own handle has no chip
-        // background to match (its handle sits inline in a flex row, not
-        // floating over image content that needs a legible backdrop).
-        // Always visible, not hover-gated -- deliberately more discoverable
-        // than the previous version, whose main complaint was being too
-        // subtle to notice at all.
-        <button
-          type="button"
-          {...attributes}
-          {...listeners}
-          title="Drag to reorder row"
-          aria-label="Drag to reorder row"
-          className="absolute left-1/2 top-1 z-20 flex h-6 w-9 -translate-x-1/2 touch-none items-center justify-center rounded-full border border-border/70 bg-background/90 text-muted shadow-sm transition-colors duration-150 hover:border-foreground/40 hover:bg-black/[.06] hover:text-foreground active:scale-95 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
-          style={{ WebkitTouchCallout: "none" }}
-        >
-          <GripIcon className="h-3.5 w-2.5" />
-        </button>
-      )}
-      <div className="grid grid-cols-3" style={{ gap: "2px" }}>
+      <div className="grid min-w-0 flex-1 grid-cols-3" style={{ gap: "2px" }}>
         {row.slots.map((slot) => (
           <GridSlot
             key={slot.clientKey ?? slot.id}
@@ -1463,6 +1434,42 @@ function GridRow({
           />
         ))}
       </div>
+      {!rowDragDisabled && (
+        // Moved out of the image content entirely -- the previous version
+        // floated a white pill dead-center over the middle tile, covering
+        // real image content and reading as an editor chrome element
+        // rather than part of a clean feed preview. This is a narrow
+        // (w-4/16px) column belonging to the ROW, immediately right of the
+        // third tile, never overlapping any tile. Its own width comes out
+        // of the row's total (not an external float), but 16px + the 2px
+        // gap next to it is negligible against real tile widths -- the
+        // "do not significantly shrink the grid" tradeoff the brief asked
+        // for. touch-action:none stays scoped to just this column, same
+        // reasoning as before: an ordinary scroll/swipe starting anywhere
+        // else on the row (including now-uncovered image content) is
+        // untouched.
+        //
+        // Rest is deliberately low-contrast (text-muted on touch, dropping
+        // to the even fainter text-border on a fine pointer, where hover
+        // exists to reveal it instead) -- discoverable without permanently
+        // competing with the feed, per the brief's own "very subtle at
+        // rest, clearly visible on hover" split. group-hover/row (not just
+        // a direct :hover on the handle itself) means hovering ANYWHERE on
+        // the row reveals it, not just the 16px strip itself. Still the
+        // same 6-dot glyph reused from Brief's own row-drag handle
+        // (brief-board.tsx's SortableItemRow/GripIcon).
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          title="Drag to reorder row"
+          aria-label="Drag to reorder row"
+          className={`flex w-4 shrink-0 touch-none items-center justify-center text-muted transition-colors duration-150 [@media(pointer:fine)]:text-border group-hover/row:text-foreground active:scale-95 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing ${isDragging ? "text-foreground" : ""}`}
+          style={{ WebkitTouchCallout: "none" }}
+        >
+          <GripIcon className="h-4 w-2.5" />
+        </button>
+      )}
     </div>
   );
 }
