@@ -641,6 +641,48 @@ function AddFromLibrarySection({
   const mediaLibrary = use(mediaLibraryPromise);
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
+  // Fixes the SAME bug at sm:+ widths that media-library.tsx's own
+  // --tile-row-h/wide-mode comment documents (and that THIS grid's own
+  // now-removed sm:auto-rows-auto + sm:aspect-[3/4] never actually fixed,
+  // despite that other file's comment claiming this one already had "the
+  // same fix"): grid-auto-rows: auto has to MEASURE every item's resolved
+  // height to size the row, and a burst of tiles landing in the DOM at
+  // once can get measured/painted before an aspect-ratio child's height
+  // has settled -- confirmed live (that same file) to collapse tiles into
+  // thin horizontal strips in WebKit, and in Chromium for below-the-fold
+  // items, regardless of how "correct" aspect-ratio is on its own. An
+  // explicit pixel row height has no dependency on any child at all, so
+  // that race can't recur -- this is that same fix, extended to the
+  // desktop (sm:grid-cols-6) case the mobile-only version left uncovered.
+  // Container width, not viewport width, drives the formula (via
+  // ResizeObserver, not per-image measurement) because this popup's own
+  // width isn't a single constant: below its max-w-3xl cap it tracks the
+  // viewport continuously, so a fixed guess would be wrong in that range.
+  // Left at null on mobile (<640px) so the already-tuned, already-shipped
+  // min-[Npx]: breakpoint values below are the only thing driving it
+  // there, completely untouched.
+  const desktopGridRef = useRef<HTMLDivElement>(null);
+  const [desktopTileRowH, setDesktopTileRowH] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const el = desktopGridRef.current;
+    if (!el) return;
+    function measure() {
+      if (window.innerWidth < 640) {
+        setDesktopTileRowH(null);
+        return;
+      }
+      const width = el!.clientWidth;
+      if (width <= 0) return;
+      const gapPx = 8; // gap-2, same at every breakpoint this grid uses
+      const tileWidth = (width - gapPx * 5) / 6; // sm:grid-cols-6
+      setDesktopTileRowH(Math.round(tileWidth * (4 / 3)));
+    }
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   // Scrolls this section into view the instant replace mode activates --
   // scrollIntoView's own "nearest" block option is a no-op when the
   // element is already fully visible, so this never yanks the page around
@@ -666,39 +708,38 @@ function AddFromLibrarySection({
       }`}
     >
       <span className={labelClass}>{replaceActive ? "Choose a replacement" : "Add from library"}</span>
-      {/* grid-cols-4 (mobile) vs sm:grid-cols-6 (unchanged -- desktop stays
-          exactly as it was). Row height stays an EXPLICIT value (no
-          per-item aspect-ratio on mobile) for the same reason established
-          last round: a real device's async image loading made
-          `auto`-sized rows driven by a child's aspect-ratio collapse,
-          which read as tiles splitting into repeated horizontal strips --
-          an explicit grid-auto-rows value has zero dependency on any
-          child's content/load state, so that failure class can't recur.
-          What's new this round is making that fixed height a 3:4-ratio
-          match for the tile's own (also fixed, track-driven) width at
-          each of the four widths this was asked to be tuned against --
-          320/375/390/414px measured out to ~60/73/77/83px tile widths, so
-          --tile-row-h below is each of those times 4/3. Both auto-rows and
-          the container's own max-height (roughly one row + a 1/3-height
-          peek of the next, the scroll affordance) derive from that same
-          custom property via var()/calc(), instead of two separately
-          hand-computed numbers that could drift out of sync with each
-          other. sm: reverts both to their original desktop values --
-          auto-rows-auto + sm:aspect-[3/4] on the tile, max-h-48 on the
-          container -- untouched by any of this. */}
+      {/* grid-cols-4 (mobile) vs sm:grid-cols-6 (desktop). Row height is an
+          EXPLICIT value at EVERY breakpoint (no per-item aspect-ratio
+          anywhere, mobile or desktop) -- see desktopTileRowH's own comment
+          above for why: grid-auto-rows: auto sizing itself from a child's
+          aspect-ratio is what actually causes the thin-horizontal-strip
+          bug, at any width, not just mobile. Below 640px, --tile-row-h is
+          the same hand-tuned per-breakpoint pixel values as before
+          (320/375/390/414px measured out to ~60/73/77/83px tile widths,
+          this times 4/3) -- untouched. At sm:+, --tile-row-h falls back to
+          151px (the exact value for this popup's own max-w-3xl cap, i.e.
+          almost every real desktop view) until desktopTileRowH's own
+          ResizeObserver measures the actual container and overrides it via
+          inline style, which also correctly handles the popup's own
+          narrower-than-768px range below that cap. auto-rows and the
+          container's own max-height both derive from the same custom
+          property via var()/calc(), so they can't drift out of sync with
+          each other. */}
       <div
-        className={`grid grid-cols-4 gap-2 overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:80px] min-[375px]:[--tile-row-h:98px] min-[390px]:[--tile-row-h:103px] min-[414px]:[--tile-row-h:111px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 sm:auto-rows-auto ${
+        ref={desktopGridRef}
+        className={`grid grid-cols-4 gap-2 overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:80px] min-[375px]:[--tile-row-h:98px] min-[390px]:[--tile-row-h:103px] min-[414px]:[--tile-row-h:111px] sm:[--tile-row-h:151px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 ${
           hideBackLink
             ? "max-h-[calc(var(--tile-row-h)*4/3+0.5rem)] sm:max-h-48"
             : "max-h-[min(1000px,65vh)]"
         }`}
+        style={desktopTileRowH !== null ? { ["--tile-row-h" as string]: `${desktopTileRowH}px` } : undefined}
       >
         {availableMedia.map((item) => (
           <button
             key={item.id}
             type="button"
             onClick={() => onAdd(item)}
-            className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[3/4]"
+            className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
           >
             {item.url && item.mediaType === "image" && (
               // eslint-disable-next-line @next/next/no-img-element
