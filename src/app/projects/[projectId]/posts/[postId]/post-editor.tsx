@@ -170,13 +170,50 @@ export function PostEditor({
   hideBackLink?: boolean;
 }) {
   const router = useRouter();
-  const { showError, showSuccess } = useToast();
+  const { showError } = useToast();
   const [prevAssets, setPrevAssets] = useState(assets);
   const [orderedAssets, setOrderedAssets] = useState(assets);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [editingImage, setEditingImage] = useState<EditingImage | null>(null);
   const [, startTransition] = useTransition();
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Consumes a Grid "Paste style" queued specifically against THIS post
+  // (see style-clipboard.ts / grid-board.tsx's handlePasteStyle) -- Grid
+  // navigates straight here immediately after queuing it, so this fires as
+  // soon as the destination post's own editor page mounts, opening the
+  // cover asset's Image Editor with the pasted Text/Adjustments already
+  // blended in. Deliberately NOT tied to the "Edit Image" click handler:
+  // that would make ANY later, unrelated editor-open silently consume a
+  // stale queue entry -- a "next editor opened" behavior explicitly not
+  // wanted here. The ref guards against StrictMode's double-invoke (a
+  // second call would just find nothing, since takePendingStylePaste
+  // already deleted the entry, but there's no reason to even try twice).
+  const consumedPendingPasteRef = useRef(false);
+  useEffect(() => {
+    if (consumedPendingPasteRef.current) return;
+    consumedPendingPasteRef.current = true;
+    const pending = takePendingStylePaste(post.id);
+    if (!pending) return;
+    const coverAsset = orderedAssets[0];
+    if (!coverAsset?.mediaAssetId || !coverAsset.originalUrl) return;
+    // Synchronizing with an external, one-shot queue (sessionStorage via
+    // takePendingStylePaste) on mount, not cascading off other React state
+    // -- same justified case as grid-crop-overlay.tsx's own use of this
+    // disable.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEditingImage({
+      mediaAssetId: coverAsset.mediaAssetId,
+      imageUrl: coverAsset.originalUrl,
+      annotationJson: applyPendingStyleToAnnotationJson(coverAsset.annotationJson, pending),
+      mediaType: coverAsset.mediaType,
+      isCover: true,
+    });
+    // orderedAssets/post.id intentionally the only deps that matter here --
+    // this is a one-shot mount action (guarded above), not something that
+    // should re-run just because the asset list is later reordered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [post.id]);
 
   // Replace's "choose from library" option targets THIS asset for
   // replacement, then puts the existing "Add from library" section below
@@ -508,34 +545,17 @@ export function PostEditor({
                   postId={post.id}
                   onRemove={() => handleRemoveAsset(asset.postAssetId)}
                   onChooseFromLibrary={handleChooseFromLibrary}
-                  onEditImage={() => {
-                    if (!asset.mediaAssetId || !asset.originalUrl) return;
-                    const isCover = index === 0;
-                    // A staged Copy/Paste Style paste (see style-clipboard.ts)
-                    // only ever targets this post's COVER asset -- Grid's
-                    // Copy Style reads the cover, so it's only meaningful to
-                    // blend it in when the cover is what's being opened, not
-                    // an unrelated carousel slide. "Take" (not "get") so it's
-                    // consumed exactly once, the first time the cover is
-                    // opened after a paste.
-                    const pending = isCover ? takePendingStylePaste(post.id) : null;
-                    const annotationJson = pending
-                      ? applyPendingStyleToAnnotationJson(asset.annotationJson, pending)
-                      : asset.annotationJson;
-                    if (pending) {
-                      const applied = [pending.text && "text", pending.adjustments && "adjustments"]
-                        .filter(Boolean)
-                        .join(" & ");
-                      showSuccess(`Applied pasted ${applied} style — Save to keep it.`);
-                    }
+                  onEditImage={() =>
+                    asset.mediaAssetId &&
+                    asset.originalUrl &&
                     setEditingImage({
                       mediaAssetId: asset.mediaAssetId,
                       imageUrl: asset.originalUrl,
-                      annotationJson,
+                      annotationJson: asset.annotationJson,
                       mediaType: asset.mediaType,
-                      isCover,
-                    });
-                  }}
+                      isCover: index === 0,
+                    })
+                  }
                 />
               ))}
               {canManage && (

@@ -134,6 +134,87 @@ export function UndoIcon({ redo = false }: { redo?: boolean }) {
   );
 }
 
+// Small ⋮-menu action icons -- same hand-drawn, single-stroke convention as
+// UndoIcon above (viewBox 0 0 15 15, strokeWidth 1.2, round caps/joins), one
+// per action so the now-longer slot menu scans by shape, not just by
+// reading every label.
+function EditContentIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <path
+        d="M10.5 2L13 4.5L5 12.5H2.5V10L10.5 2Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CropMenuIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <path d="M4 1.5V9.5C4 10.6 4.9 11.5 6 11.5H13.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M11 13.5V5.5C11 4.4 10.1 3.5 9 3.5H1.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CopyStyleIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <rect x="5.5" y="5.5" width="7" height="7" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M9.5 5.5V3.5C9.5 2.95 9.05 2.5 8.5 2.5H3.5C2.95 2.5 2.5 2.95 2.5 3.5V8.5C2.5 9.05 2.95 9.5 3.5 9.5H5.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PasteStyleIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <rect x="3" y="2.5" width="9" height="11" rx="1" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M5.5 2.5V1.8C5.5 1.36 5.86 1 6.3 1H8.7C9.14 1 9.5 1.36 9.5 1.8V2.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M5.5 7H9.5M5.5 9.5H9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function DeleteContentIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <path
+        d="M3 4.5H12M6 4.5V3C6 2.45 6.45 2 7 2H8C8.55 2 9 2.45 9 3V4.5M4.5 4.5V12C4.5 12.55 4.95 13 5.5 13H9.5C10.05 13 10.5 12.55 10.5 12V4.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function RemoveRowIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <rect x="1.5" y="5.5" width="12" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5 7.5H10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function PlusIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
@@ -1984,17 +2065,24 @@ const GridSlot = memo(function GridSlot({
   // own comment on why an instant background paste isn't safe for those
   // two categories (no independent storage, no headless render pipeline,
   // and a cover asset can be shared by more than one post).
+  // `postId` below is captured from THIS slot's own `slot.postId` -- i.e.
+  // whichever tile's ⋮ menu "Paste style" was actually clicked on -- and is
+  // the only identifier used anywhere in this function to decide the paste
+  // target. `copiedStyle.sourcePostId` (the post Copy Style was run against)
+  // is read only for the earlier extraction step, never referenced here: the
+  // clipboard is pure style data by the time it reaches this function, and
+  // the destination comes exclusively from this slot's own props, never
+  // from the source or from any other stale/closed-over state.
   const handlePasteStyle = useCallback(() => {
     setContentMenuOpen(false);
     if (!copiedStyle || !slot.postId) return;
     const postId = slot.postId;
-    const appliedNow: string[] = [];
-    const deferred: string[] = [];
+    let appliedCrop = false;
 
     if (copiedStyle.categories.includes("crop")) {
       const previousTransform = slot.coverTransform;
       const nextTransform = copiedStyle.crop ?? null;
-      appliedNow.push("crop");
+      appliedCrop = true;
       mutateSlot(slot.id, { ...slot, coverTransform: nextTransform }, async () => {
         if (demoMode) return;
         await updatePostCoverTransform(projectId, postId, nextTransform);
@@ -2024,29 +2112,46 @@ const GridSlot = memo(function GridSlot({
     }
 
     const pending: { text?: typeof copiedStyle.text; adjustments?: typeof copiedStyle.adjustments } = {};
-    if (copiedStyle.categories.includes("text") && copiedStyle.text) {
-      pending.text = copiedStyle.text;
-      deferred.push("text");
-    }
+    if (copiedStyle.categories.includes("text") && copiedStyle.text) pending.text = copiedStyle.text;
     if (copiedStyle.categories.includes("adjustments") && copiedStyle.adjustments) {
       pending.adjustments = copiedStyle.adjustments;
-      deferred.push("adjustments");
     }
-    if (!demoMode && (pending.text || pending.adjustments)) {
-      stagePendingStylePaste(postId, pending);
-    }
+    const needsEditor = !demoMode && (pending.text || pending.adjustments);
 
-    if (appliedNow.length === 0 && deferred.length === 0) {
+    if (!appliedCrop && !needsEditor) {
       showError("Nothing to paste from the copied style.");
       return;
     }
-    const parts: string[] = [];
-    if (appliedNow.length) parts.push(`Applied ${appliedNow.join(", ")}`);
-    if (deferred.length && !demoMode) {
-      parts.push(`${deferred.join(" & ")} will apply next time you open Image Editor for this post`);
+
+    if (needsEditor) {
+      // Text/Adjustments have no independent, safely-instant-writable
+      // storage (see style-clipboard.ts) -- rather than silently staging
+      // this for "whenever an editor next happens to open" (which is what
+      // made the destination ambiguous), queue it against THIS specific
+      // postId and navigate straight to THAT post's editor right now. It
+      // picks the queued entry up on mount and clears it immediately after
+      // (see post-editor.tsx's own pending-paste effect) -- a one-shot
+      // action tied directly to this click, never a global "next editor
+      // opened" behavior, and never able to land on the source post since
+      // `postId` here is this slot's own, not copiedStyle.sourcePostId.
+      stagePendingStylePaste(postId, pending);
+      if (!demoMode) router.push(`/projects/${projectId}/posts/${postId}`);
+      return;
     }
-    showSuccess(`${parts.join(". ")}.`);
-  }, [copiedStyle, slot, demoMode, projectId, mutateSlot, pushCommand, showError, showSuccess, requestIdleRefresh]);
+
+    showSuccess("Style pasted.");
+  }, [
+    copiedStyle,
+    slot,
+    demoMode,
+    projectId,
+    mutateSlot,
+    pushCommand,
+    showError,
+    showSuccess,
+    requestIdleRefresh,
+    router,
+  ]);
 
   const handleDeletePost = useCallback(() => {
     if (!slot.postId) return;
@@ -2356,14 +2461,16 @@ const GridSlotBody = memo(function GridSlotBody({
           {contentMenuOpen && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-7 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
+              className="absolute right-0 top-7 w-40 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
+              {/* EDIT group */}
               {slot.postId && !demoMode && (
                 <button
                   type="button"
                   onClick={onEditContent}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
+                  <EditContentIcon />
                   Edit Content
                 </button>
               )}
@@ -2371,36 +2478,47 @@ const GridSlotBody = memo(function GridSlotBody({
                 <button
                   type="button"
                   onClick={onOpenCropFromMenu}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
                 >
+                  <CropMenuIcon />
                   Crop Image
                 </button>
               )}
+
+              {/* STYLE group */}
               {slot.postId && !demoMode && (
-                <button
-                  type="button"
-                  onClick={onOpenCopyStyle}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
-                >
-                  Copy style
-                </button>
+                <>
+                  <div className="my-1 border-t border-border" />
+                  <button
+                    type="button"
+                    onClick={onOpenCopyStyle}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                  >
+                    <CopyStyleIcon />
+                    Copy style
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onPasteStyle}
+                    disabled={!pasteStyleEnabled}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    <PasteStyleIcon />
+                    Paste style
+                  </button>
+                </>
               )}
-              {slot.postId && !demoMode && (
-                <button
-                  type="button"
-                  onClick={onPasteStyle}
-                  disabled={!pasteStyleEnabled}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:pointer-events-none disabled:opacity-40"
-                >
-                  Paste style
-                </button>
-              )}
+
+              {/* DANGER group -- Remove Row always renders when !demoMode,
+                  so that's the only condition the separator needs. */}
+              {!demoMode && <div className="my-1 border-t border-border" />}
               {slot.postId && !demoMode && (
                 <button
                   type="button"
                   onClick={onDeletePost}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
                 >
+                  <DeleteContentIcon />
                   Delete Content
                 </button>
               )}
@@ -2408,8 +2526,9 @@ const GridSlotBody = memo(function GridSlotBody({
                 <button
                   type="button"
                   onClick={onRemoveRow}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-error transition-colors duration-150 hover:bg-black/[.05]"
                 >
+                  <RemoveRowIcon />
                   Remove Row
                 </button>
               )}
