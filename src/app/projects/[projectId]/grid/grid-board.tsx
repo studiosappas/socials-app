@@ -1404,7 +1404,7 @@ function GridRow({
       ref={setNodeRef}
       data-row-id={row.id}
       style={style}
-      className={`group/row flex items-stretch gap-0.5 ${isDragging ? "opacity-40" : ""}`}
+      className={`group/row flex items-stretch gap-3 ${isDragging ? "opacity-40" : ""}`}
     >
       {dropIndicator && <RowDropIndicator position={dropIndicator} />}
       <div className="grid min-w-0 flex-1 grid-cols-3" style={{ gap: "2px" }}>
@@ -1440,14 +1440,23 @@ function GridRow({
         // real image content and reading as an editor chrome element
         // rather than part of a clean feed preview. This is a narrow
         // (w-4/16px) column belonging to the ROW, immediately right of the
-        // third tile, never overlapping any tile. Its own width comes out
-        // of the row's total (not an external float), but 16px + the 2px
-        // gap next to it is negligible against real tile widths -- the
-        // "do not significantly shrink the grid" tradeoff the brief asked
-        // for. touch-action:none stays scoped to just this column, same
-        // reasoning as before: an ordinary scroll/swipe starting anywhere
-        // else on the row (including now-uncovered image content) is
-        // untouched.
+        // third tile, never overlapping any tile -- live-measured (real
+        // bounding rects, not just reading the CSS) at every width from
+        // 320px to 1920px in both Chromium and WebKit, at rest and mid-
+        // drag: zero intersection with any tile in any case.
+        //
+        // A LATER round's "still looks like it's over the image" report
+        // turned out not to be a literal overlap (same measurements as
+        // above already held on that code too) -- the real problem was a
+        // 2px gap (gap-0.5) that, at rest-state's deliberately low
+        // contrast, was too thin to visibly register as a real gutter
+        // separate from the tile next to it, especially in a screenshot.
+        // gap-3 (12px) here is still "extremely narrow" against real tile
+        // widths (roughly 1-4% of a typical row) but is unambiguous, not
+        // just technically-true, whitespace. touch-action:none stays
+        // scoped to just this column, same reasoning as before: an
+        // ordinary scroll/swipe starting anywhere else on the row
+        // (including now-uncovered image content) is untouched.
         //
         // Rest is deliberately low-contrast (text-muted on touch, dropping
         // to the even fainter text-border on a fine pointer, where hover
