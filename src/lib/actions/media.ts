@@ -72,6 +72,24 @@ export async function setMediaAssetPoster(
   await supabase.from("media_assets").update({ poster_storage_path: posterStoragePath }).eq("id", mediaAssetId);
 }
 
+// Read-only lookup for Grid's Copy Style feature -- Text and Adjustments
+// aren't independently queryable anywhere; both live only inside this
+// asset's own annotation_json blob (see saveMediaAssetAnnotation below), so
+// "Copy style" fetches it directly rather than assuming the Grid slot's own
+// client state already has it.
+export async function getMediaAssetAnnotationJson(
+  mediaAssetId: string,
+): Promise<{ annotationJson: object | null; message?: string }> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("media_assets")
+    .select("annotation_json")
+    .eq("id", mediaAssetId)
+    .maybeSingle();
+  if (error) return { annotationJson: null, message: error.message };
+  return { annotationJson: (data?.annotation_json as object | null) ?? null };
+}
+
 // Same shape/flow as saveBriefAnnotation (src/lib/actions/brief.ts): upload
 // the flattened preview, store it alongside the editable annotation state.
 // Lives on media_assets itself rather than a separate attachment row since

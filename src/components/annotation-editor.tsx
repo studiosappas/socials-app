@@ -5,6 +5,9 @@ import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
 import { useCustomFonts } from "@/lib/use-custom-fonts";
+import { useRecentColors, commitRecentColor } from "@/lib/hooks/use-recent-colors";
+import type { PendingStylePaste } from "@/lib/style-clipboard";
+import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import {
   NEUTRAL_ADJUSTMENTS,
   applyAdjustments,
@@ -214,6 +217,7 @@ export function AnnotationEditor({
   onSaved,
   saveAction,
   customFonts = [],
+  pendingStyleToApply = null,
 }: {
   projectId: string;
   attachmentId: string | null;
@@ -247,6 +251,20 @@ export function AnnotationEditor({
   // lib/data/brand-moodboard.ts's deriveCustomFontFaces) -- merged into the
   // font picker below, alongside the built-in generic stacks.
   customFonts?: CustomFontFace[];
+  // Grid's Copy/Paste Style feature (see style-clipboard.ts) -- applied
+  // once, right after the canvas finishes its own NORMAL load (whichever
+  // branch that is: restoring saved JSON, or a fresh load from imageUrl),
+  // never by pre-mutating initialAnnotationJson before this component ever
+  // sees it. That earlier approach broke a real, common case: an asset
+  // with no prior annotation_json (initialAnnotationJson === null, the
+  // signal this component uses to take the "fresh load from imageUrl"
+  // path) turned into a non-null-but-empty {objects: []} once patched,
+  // which this component's own shouldRestoreAnnotation check reads as
+  // "there IS saved state" -- loadFromJSON-ing that produced a genuinely
+  // blank canvas with no base photo at all. Applying the pending values
+  // AFTER the normal load instead means Paste Style can never diverge from
+  // Edit Content/Crop Image's own image-loading behavior.
+  pendingStyleToApply?: PendingStylePaste | null;
 }) {
   const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -357,6 +375,7 @@ export function AnnotationEditor({
   // effect further down that corrects any text painted before its font
   // finished loading.
   const { familyNames: customFontFamilies, readyVersion: customFontsReady } = useCustomFonts(customFonts);
+  const recentTextColors = useRecentColors();
   const fontOptions = useMemo(
     () => [...FONT_OPTIONS, ...customFontFamilies.map((f) => ({ label: f, value: f }))],
     [customFontFamilies],
@@ -374,6 +393,19 @@ export function AnnotationEditor({
   const [textItalic, setTextItalic] = useState(false);
   const [textFont, setTextFont] = useState(FONT_OPTIONS[0].value);
   const [textAlign, setTextAlign] = useState<TextAlign>("left");
+  // Effective on-canvas size (fontSize * scaleY) of the selected text
+  // object -- a real, always-accurate numeric control, kept in sync with
+  // drag-resize (see the object:scaling listener below) rather than only
+  // ever being set by typing into it.
+  const [textFontSize, setTextFontSize] = useState(22);
+  // The last real text-range selection Fabric reported (via
+  // text:selection:changed) for the CURRENTLY selected IText -- deliberately
+  // NOT cleared when editing exits (e.g. clicking a toolbar control blurs
+  // the canvas's hidden textarea, which ends editing), since that's exactly
+  // the moment a style needs to still apply to the range the user just
+  // highlighted. Cleared only when a genuinely different object becomes
+  // selected (see syncSelection) or the selection is cleared entirely.
+  const lastTextRangeRef = useRef<{ object: fabric.IText; start: number; end: number } | null>(null);
   const [cropping, setCropping] = useState(false);
   // Same pan/zoom-within-a-fixed-frame model as Grid's own crop tool
   // (grid-crop-overlay.tsx): the frame (current canvas size) never changes,
@@ -651,10 +683,27 @@ export function AnnotationEditor({
       canvas.setDimensions({ width: canvasW, height: canvasH });
 
       function finish() {
+        const basePhoto = findBasePhoto(canvas);
+        // Applied here, after the canvas has ALREADY finished loading via
+        // whichever normal path this asset actually needed -- never as a
+        // reason to alter what got loaded or how. A pending Text style is a
+        // no-op when there's no existing text object to restyle (see this
+        // prop's own comment: never invents a placeholder), and a pending
+        // Adjustments value only makes sense once a real base photo exists,
+        // which it now always does by this point.
+        if (pendingStyleToApply?.adjustments && basePhoto) {
+          applyAdjustments(basePhoto, pendingStyleToApply.adjustments);
+        }
+        if (pendingStyleToApply?.text) {
+          const firstText = canvas.getObjects().find((o): o is fabric.IText => o instanceof fabric.IText);
+          if (firstText) {
+            firstText.set({ ...pendingStyleToApply.text, styles: {} });
+          }
+        }
+        canvas.requestRenderAll();
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
-        const basePhoto = findBasePhoto(canvas);
-        setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+        setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         setReady(true);
       }
 
@@ -838,6 +887,9 @@ export function AnnotationEditor({
 
     function syncSelection() {
       const active = canvas.getActiveObject();
+      // A genuinely different object (or none) is now selected -- any
+      // in-progress range on the PREVIOUS text object no longer applies.
+      if (active !== lastTextRangeRef.current?.object) lastTextRangeRef.current = null;
       setSelectedObject(active ?? null);
       if (active instanceof fabric.IText) {
         setSelectedText(active);
@@ -846,6 +898,7 @@ export function AnnotationEditor({
         setTextItalic(active.fontStyle === "italic");
         setTextFont((active.fontFamily as string) ?? FONT_OPTIONS[0].value);
         setTextAlign((active.textAlign as TextAlign) ?? "left");
+        setTextFontSize(Math.round((active.fontSize ?? 22) * (active.scaleY ?? 1)));
       } else {
         setSelectedText(null);
       }
@@ -858,6 +911,7 @@ export function AnnotationEditor({
       setSelectedImage(null);
       setSelectedObject(null);
       setTextEditing(false);
+      lastTextRangeRef.current = null;
     });
     // See textEditing's own comment -- these fire regardless of whether
     // editing was entered via the "Edit Text" button, a real double-click/
@@ -865,6 +919,45 @@ export function AnnotationEditor({
     // stay in sync with the same two-state toolbar.
     canvas.on("text:editing:entered", () => setTextEditing(true));
     canvas.on("text:editing:exited", () => setTextEditing(false));
+    // Fabric fires this on every caret move/selection change while editing
+    // (IText._fireSelectionChanged) -- the one place selectionStart/
+    // selectionEnd for the ACTIVE range are read, since a toolbar control's
+    // own click can blur the canvas's hidden textarea (ending editing)
+    // before its onClick handler runs otherwise.
+    function syncTextRange(active: fabric.FabricObject) {
+      if (!(active instanceof fabric.IText)) return;
+      lastTextRangeRef.current = {
+        object: active,
+        start: active.selectionStart ?? 0,
+        end: active.selectionEnd ?? 0,
+      };
+    }
+    canvas.on("text:selection:changed", (opt) => syncTextRange(opt.target));
+    // BUG FOUND AND FIXED: selectAll() (used to pre-select the "Text"
+    // placeholder when a new text object is created, see activateTool's
+    // "text" branch) fires text:selection:changed with the FULL placeholder
+    // range -- but typing over that selection (replacing it) only fires
+    // text:changed, never a follow-up text:selection:changed, even though
+    // Fabric DOES internally collapse selectionStart/selectionEnd to the
+    // new caret position. Without this listener, lastTextRangeRef stayed
+    // stuck at the placeholder's original full-select range forever, so
+    // the very next whole-object color/size change (typed "HELLO", clicked
+    // Done editing, changed color -- no range ever deliberately selected)
+    // was silently misapplied as a per-character style over roughly the
+    // placeholder's old span instead of the whole object's own fill --
+    // confirmed live via Playwright before this fix. Re-syncing on every
+    // content edit keeps the ref correctly collapsed (start === end, i.e.
+    // "no active range") the instant typing replaces a selection.
+    canvas.on("text:changed", (opt) => syncTextRange(opt.target));
+    // Read-only sync so the font-size field reflects a drag-resize live --
+    // never writes back to the object (fontSize/scaleY stay exactly what
+    // Fabric's own resize already produced), so this can't fight or
+    // duplicate Fabric's normal resize handling.
+    canvas.on("object:scaling", (opt) => {
+      if (opt.target instanceof fabric.IText) {
+        setTextFontSize(Math.round((opt.target.fontSize ?? 22) * (opt.target.scaleY ?? 1)));
+      }
+    });
     }
 
     return () => {
@@ -912,7 +1005,7 @@ export function AnnotationEditor({
     // canvasNonce forces this effect to rerun (disposing the stale
     // instance via disposePromiseRef, then constructing fresh) against
     // whichever canvas node is actually live.
-  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce]);
+  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce, pendingStyleToApply]);
 
   // See visualViewportBox's own declaration. `resize` fires when the
   // visible area's SIZE changes (keyboard opening/closing, pinch-zoom);
@@ -1504,7 +1597,7 @@ export function AnnotationEditor({
           if (fabricRef.current !== canvas) return;
           canvas.requestRenderAll();
           const basePhoto = findBasePhoto(canvas);
-          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         } finally {
           restoringRef.current = false;
           historyOperationRef.current = false;
@@ -1526,7 +1619,7 @@ export function AnnotationEditor({
           if (fabricRef.current !== canvas) return;
           canvas.requestRenderAll();
           const basePhoto = findBasePhoto(canvas);
-          setAdjustments(basePhoto ? readAdjustments(basePhoto) : NEUTRAL_ADJUSTMENTS);
+          setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         } finally {
           restoringRef.current = false;
           historyOperationRef.current = false;
@@ -1829,13 +1922,40 @@ export function AnnotationEditor({
     });
   }
 
+  // The active text RANGE, if any, for the currently selected object --
+  // null whenever there's no real highlighted substring (just a caret, or
+  // the object is selected but not being edited at all), in which case
+  // every control below falls back to whole-object formatting.
+  function getActiveRange(): { start: number; end: number } | null {
+    if (!selectedText || !lastTextRangeRef.current) return null;
+    if (lastTextRangeRef.current.object !== selectedText) return null;
+    const { start, end } = lastTextRangeRef.current;
+    if (start === end) return null;
+    return { start: Math.min(start, end), end: Math.max(start, end) };
+  }
+
   // Direct .set() calls on a fabric object don't fire "object:modified" on
   // their own (that only fires after a user drag/resize gesture completes),
   // so re-fire it manually -- that's the event the history stack listens on,
   // and reusing it keeps style edits undo-able the same way moves/resizes are.
+  //
+  // When a text range is highlighted, every control (color/font/weight/
+  // style) applies to just that range via Fabric's own native per-character
+  // `styles` map (setSelectionStyles) instead of the whole object -- this is
+  // stock Fabric IText/Text behavior, already round-tripped for free through
+  // this editor's existing canvas.toJSON()/loadFromJSON()/toBlob() save,
+  // reopen, and export paths (styles is one of Text's own additionalProps).
+  // textAlign is excluded on purpose: Fabric treats it as a paragraph-level
+  // property, not a per-character style (it's absent from Text's own
+  // styleProperties list), so it always applies to the whole object.
   function applyTextStyle(props: Partial<fabric.ITextProps>) {
     if (!selectedText) return;
-    selectedText.set(props);
+    const range = "textAlign" in props ? null : getActiveRange();
+    if (range) {
+      selectedText.setSelectionStyles(props, range.start, range.end);
+    } else {
+      selectedText.set(props);
+    }
     withCanvas((canvas) => {
       canvas.requestRenderAll();
       canvas.fire("object:modified", { target: selectedText });
@@ -1845,6 +1965,32 @@ export function AnnotationEditor({
   function handleTextColorChange(color: string) {
     setTextColor(color);
     applyTextStyle({ fill: color });
+    // Safe to treat every call here as a real commit: with the native OS
+    // picker hidden for Text (showNativePicker=false below), the only two
+    // paths that reach this are a hex field blur/Enter and a recent-swatch
+    // click -- both already discrete "the user chose this" actions, never
+    // a live drag/hover preview. Re-committing an already-recent color is
+    // exactly what moves it back to the front.
+    commitRecentColor(color);
+  }
+
+  // Deterministic: typing a number always becomes the new effective size.
+  // Outside an active range, scaleX/scaleY reset to 1 so a previously drag-
+  // resized object's fontSize IS the full new size, not multiplied again by
+  // whatever scale a prior resize left behind. Inside a range, only the
+  // range's own fontSize changes -- the object's overall scale (if any)
+  // still applies uniformly on top, same as it does for every other
+  // character, which is the one honest limitation of combining a whole-
+  // object transform with per-character sizing.
+  function handleFontSizeChange(nextSize: number) {
+    if (!selectedText || !Number.isFinite(nextSize) || nextSize <= 0) return;
+    const clamped = Math.round(clamp(nextSize, 6, 400));
+    setTextFontSize(clamped);
+    if (getActiveRange()) {
+      applyTextStyle({ fontSize: clamped });
+    } else {
+      applyTextStyle({ fontSize: clamped, scaleX: 1, scaleY: 1 });
+    }
   }
 
   function handleTextBoldToggle() {
@@ -2398,7 +2544,17 @@ export function AnnotationEditor({
               Edit text
             </Button>
           )}
-          <ColorPicker value={textColor} onChange={handleTextColorChange} />
+          <RichColorPicker value={textColor} onChange={handleTextColorChange} recentColors={recentTextColors} />
+          <input
+            type="number"
+            inputMode="numeric"
+            min={6}
+            max={400}
+            value={textFontSize}
+            onChange={(e) => handleFontSizeChange(Number(e.target.value))}
+            title="Font size"
+            className="w-14 rounded border border-border bg-transparent px-1.5 py-1 text-xs focus:border-foreground focus:outline-none"
+          />
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -3468,6 +3624,265 @@ function ColorPicker({ value, onChange }: { value: string; onChange: (hex: strin
         className="w-[4.5rem] rounded border border-border bg-transparent px-1.5 py-0.5 text-[11px] focus:border-foreground focus:outline-none"
       />
     </div>
+  );
+}
+
+// Standard HSV<->RGB<->HEX conversions -- HSV (not RGB/HSL) is the model
+// RichColorPicker's own UI is built around (a hue value + one 2D saturation/
+// value field), converted only at the edges: reading in an external hex
+// value, and producing the one hex string every caller actually deals with.
+// None of this is ever surfaced as an editable RGB/HSL/HSV field -- HEX
+// stays the only format the user can type or read.
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const n = parseInt(hex.slice(1), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const toHex = (v: number) => Math.round(clamp(v, 0, 255)).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function rgbToHsv(r: number, g: number, b: number): { h: number; s: number; v: number } {
+  const rf = r / 255;
+  const gf = g / 255;
+  const bf = b / 255;
+  const max = Math.max(rf, gf, bf);
+  const min = Math.min(rf, gf, bf);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === rf) h = ((gf - bf) / d) % 6;
+    else if (max === gf) h = (bf - rf) / d + 2;
+    else h = (rf - gf) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  const s = max === 0 ? 0 : d / max;
+  return { h, s, v: max };
+}
+
+function hsvToRgb(h: number, s: number, v: number): { r: number; g: number; b: number } {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+}
+
+function hexToHsv(hex: string): { h: number; s: number; v: number } {
+  const { r, g, b } = hexToRgb(hex);
+  return rgbToHsv(r, g, b);
+}
+
+function hsvToHex(h: number, s: number, v: number): string {
+  const { r, g, b } = hsvToRgb(h, s, v);
+  return rgbToHex(r, g, b);
+}
+
+// A compact "rich" color popover for the Text tool only -- a 2D saturation/
+// value field + hue slider + preview + ONE hex field + recent colors, all
+// converging on a single hex string. Deliberately HEX-only: there is no
+// format selector anywhere here, and HSV only exists as this component's
+// own internal state for driving the 2D field/slider -- it's never shown to
+// the user as editable numbers. Draw's plain ColorPicker above is
+// untouched; this is a separate component so Draw's simple native-picker
+// experience doesn't have to carry this popover's extra weight.
+//
+// onChange fires on every live drag frame (so the canvas updates in real
+// time, matching a real picker's feel) -- recent colors are recorded
+// separately, only at an actual commit point (pointer-up on the field,
+// `change` on the hue slider, hex field blur/Enter, or a recent-swatch
+// click), never on every intermediate drag frame.
+function RichColorPicker({
+  value,
+  onChange,
+  recentColors,
+}: {
+  value: string;
+  onChange: (hex: string) => void;
+  recentColors: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const popoverRef = useOutsideClick<HTMLDivElement>(open, () => setOpen(false));
+  const [hsv, setHsv] = useState(() => hexToHsv(value));
+  const [hexInput, setHexInput] = useState(value);
+  const svFieldRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  // Same "adjust state during render" guard as ColorPicker's own prevValue
+  // -- keeps the field/slider/hex in sync when a DIFFERENT text object (or
+  // range) is selected from outside this component.
+  const [prevValue, setPrevValue] = useState(value);
+  if (value !== prevValue) {
+    setPrevValue(value);
+    setHsv(hexToHsv(value));
+    setHexInput(value);
+  }
+
+  function applyHsv(next: { h: number; s: number; v: number }, commit: boolean) {
+    setHsv(next);
+    const hex = hsvToHex(next.h, next.s, next.v);
+    setHexInput(hex);
+    onChange(hex);
+    if (commit) commitRecentColor(hex);
+  }
+
+  function handleSvPoint(e: React.PointerEvent<HTMLDivElement>, commit: boolean) {
+    const rect = svFieldRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return;
+    const s = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+    const v = clamp(1 - (e.clientY - rect.top) / rect.height, 0, 1);
+    applyHsv({ ...hsv, s, v }, commit);
+  }
+
+  function handleHexCommit() {
+    const normalized = normalizeHex(hexInput);
+    if (normalized) {
+      setHsv(hexToHsv(normalized));
+      onChange(normalized);
+      commitRecentColor(normalized);
+    } else {
+      setHexInput(value);
+    }
+  }
+
+  function handleSwatchClick(color: string) {
+    setHsv(hexToHsv(color));
+    setHexInput(color);
+    onChange(color);
+    commitRecentColor(color);
+  }
+
+  async function handleEyedropper() {
+    const EyeDropperCtor = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } })
+      .EyeDropper;
+    if (!EyeDropperCtor) return;
+    try {
+      const result = await new EyeDropperCtor().open();
+      handleSwatchClick(result.sRGBHex);
+    } catch {
+      // User cancelled the pick -- no-op.
+    }
+  }
+
+  const hasEyedropper = typeof window !== "undefined" && "EyeDropper" in window;
+
+  return (
+    <div className="relative" ref={popoverRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Text color"
+        className="h-6 w-6 rounded-full border border-border"
+        style={{ backgroundColor: value }}
+      />
+      {open && (
+        <div className="absolute left-0 top-8 z-30 w-48 border border-border bg-background p-3 shadow-lg">
+          <div
+            ref={svFieldRef}
+            onPointerDown={(e) => {
+              draggingRef.current = true;
+              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+              handleSvPoint(e, false);
+            }}
+            onPointerMove={(e) => {
+              if (draggingRef.current) handleSvPoint(e, false);
+            }}
+            onPointerUp={(e) => {
+              draggingRef.current = false;
+              handleSvPoint(e, true);
+            }}
+            className="relative h-28 w-full cursor-crosshair touch-none select-none"
+            style={{
+              background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${hsv.h}, 100%, 50%))`,
+            }}
+          >
+            <div
+              className="pointer-events-none absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+              style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }}
+            />
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <div
+              className="h-5 w-5 shrink-0 rounded-full border border-border"
+              style={{ backgroundColor: value }}
+              title="Current color"
+            />
+            <input
+              type="range"
+              min={0}
+              max={360}
+              value={Math.round(hsv.h)}
+              onInput={(e) => applyHsv({ ...hsv, h: Number((e.target as HTMLInputElement).value) }, false)}
+              onChange={(e) => applyHsv({ ...hsv, h: Number(e.target.value) }, true)}
+              title="Hue"
+              className="h-2 min-w-0 flex-1 cursor-pointer appearance-none rounded-full [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-border [&::-webkit-slider-thumb]:bg-white"
+              style={{ background: "linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)" }}
+            />
+            {hasEyedropper && (
+              <button
+                type="button"
+                onClick={handleEyedropper}
+                title="Pick from screen"
+                className="shrink-0 rounded p-1 text-muted transition-colors duration-150 hover:bg-black/[.05] hover:text-foreground"
+              >
+                <EyedropperIcon />
+              </button>
+            )}
+          </div>
+          <input
+            type="text"
+            value={hexInput}
+            onChange={(e) => setHexInput(e.target.value)}
+            onBlur={handleHexCommit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+            }}
+            placeholder="#000000"
+            className="mt-2 w-full rounded border border-border bg-transparent px-1.5 py-1 text-center text-xs focus:border-foreground focus:outline-none"
+          />
+          {recentColors.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {recentColors.map((swatch) => (
+                <button
+                  key={swatch}
+                  type="button"
+                  onClick={() => handleSwatchClick(swatch)}
+                  title={swatch}
+                  className={`h-4 w-4 rounded-full border transition-[border-color] duration-150 ${
+                    value.toLowerCase() === swatch.toLowerCase() ? "border-foreground" : "border-border"
+                  }`}
+                  style={{ backgroundColor: swatch }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EyedropperIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+      <path
+        d="M10.5 1.5L13.5 4.5L11 7L8 4L10.5 1.5Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M8 4L2.5 9.5L1.5 13.5L5.5 12.5L11 7" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
   );
 }
 

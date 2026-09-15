@@ -130,45 +130,58 @@ export function buildFilters(values: AdjustmentValues): fabric.filters.BaseFilte
 }
 
 // The inverse of buildFilters -- recovers UI-range values from whatever
-// filters are actually on the image (defaulting to neutral for any filter
-// not present), so reopening an already-adjusted image (or undoing past an
+// filters are actually present (defaulting to neutral for any filter not
+// present), so reopening an already-adjusted image (or undoing past an
 // adjustment change) shows sliders that match the canvas's real state.
-export function readAdjustments(image: fabric.FabricImage): AdjustmentValues {
+//
+// Accepts either a live FabricImage's own `.filters` (already-hydrated
+// Fabric filter instances) or the plain filter objects straight out of a
+// saved annotation_json blob (canvas.toJSON()'s filter shape is identical
+// field-for-field to a live instance, since BaseFilter.toObject() just
+// spreads each of its own defaultKeys) -- letting the Copy-Style clipboard
+// (src/lib/style-clipboard.ts) reuse this exact switch against raw JSON
+// instead of hand-duplicating it.
+export function readAdjustments(filters: readonly { type?: string }[] | null | undefined): AdjustmentValues {
   const values = { ...NEUTRAL_ADJUSTMENTS };
-  for (const filter of image.filters ?? []) {
-    if (!filter) continue;
+  for (const raw of filters ?? []) {
+    if (!raw) continue;
+    // Cast once per filter, inside the loop -- accepting either a live
+    // Fabric filter instance (a class, no index signature) or a plain
+    // JSON filter object as the array element type itself runs into
+    // TS's "class instances don't structurally satisfy an index
+    // signature" rule; a local cast to read named fields off either shape
+    // sidesteps that without weakening the exported parameter type.
+    const filter = raw as Record<string, unknown>;
     switch (filter.type) {
       case "Brightness":
-        values.brightness = Math.round((filter as fabric.filters.Brightness).brightness * 100);
+        values.brightness = Math.round((filter.brightness as number) * 100);
         break;
       case "Contrast":
-        values.contrast = Math.round((filter as fabric.filters.Contrast).contrast * 100);
+        values.contrast = Math.round((filter.contrast as number) * 100);
         break;
       case "Saturation":
-        values.saturation = Math.round((filter as fabric.filters.Saturation).saturation * 100);
+        values.saturation = Math.round((filter.saturation as number) * 100);
         break;
       case "Vibrance":
-        values.vibrance = Math.round((filter as fabric.filters.Vibrance).vibrance * 100);
+        values.vibrance = Math.round((filter.vibrance as number) * 100);
         break;
       case "Gamma": {
-        const gamma = (filter as fabric.filters.Gamma).gamma[0];
+        const gamma = (filter.gamma as number[])[0];
         values.exposure = Math.round(Math.log2(gamma) * 100);
         break;
       }
       case "ColorMatrix": {
-        const k = (filter as fabric.filters.ColorMatrix).matrix[4];
+        const k = (filter.matrix as number[])[4];
         values.warmth = Math.round((k / WARMTH_STRENGTH) * 100);
         break;
       }
       case "HueRotation":
-        values.hue = Math.round((filter as fabric.filters.HueRotation).rotation * 180);
+        values.hue = Math.round((filter.rotation as number) * 180);
         break;
-      case "ShadowsHighlights": {
-        const f = filter as ShadowsHighlightsFilter;
-        values.shadows = Math.round(f.shadows * 100);
-        values.highlights = Math.round(f.highlights * 100);
+      case "ShadowsHighlights":
+        values.shadows = Math.round((filter.shadows as number) * 100);
+        values.highlights = Math.round((filter.highlights as number) * 100);
         break;
-      }
       default:
         break;
     }
