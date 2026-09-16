@@ -1,24 +1,17 @@
 "use client";
 
-// A small session-scoped "copy style / paste style" clipboard for Grid's
-// per-slot ⋮ menu. Two independent, sessionStorage-backed pieces of state:
+// A small session-scoped "copy style" clipboard for Grid's per-slot ⋮ menu
+// -- what "Copy style" last captured, readable by any slot's "Paste style"
+// button. sessionStorage (not localStorage) deliberately -- "the same
+// working session," cleared when the tab closes, never a permanent cross-
+// session preset/brand-style store.
 //
-// 1. The clipboard itself (useCopiedStyle/setCopiedStyle) -- what "Copy
-//    style" last captured, readable by any slot's "Paste style" button.
-// 2. A tiny per-post staging area (stagePendingStylePaste/
-//    takePendingStylePaste) -- Text and Adjustments have no independent,
-//    safely-instant-writable storage (see extract*/apply* below), so a
-//    paste of either defers to the next time that post's cover image is
-//    opened in the Image Editor, where it's blended into the canvas the
-//    user already reviews and explicitly Saves -- the same guarantee every
-//    other edit in that editor already has, with no new headless-render
-//    infrastructure and no risk of silently rewriting a media asset that
-//    may be the cover of more than one post (see saveMediaAssetAnnotation's
-//    own comment on that sharing).
-//
-// sessionStorage (not localStorage) deliberately -- "the same working
-// session," cleared when the tab closes, never a permanent cross-session
-// preset/brand-style store.
+// Paste itself is a direct, synchronous Grid mutation (see grid-board.tsx's
+// handlePasteStyle) -- there is no queue here for it to consume later. An
+// earlier version of this feature staged Text/Adjustments pastes here and
+// had Paste Style navigate to Post Editor to apply them; that's gone. See
+// this file's own git history if that mechanism is ever needed again, but
+// prefer extending the direct-paste path in grid-board.tsx instead.
 
 import { useSyncExternalStore } from "react";
 import { readAdjustments, type AdjustmentValues } from "@/lib/image-adjustments";
@@ -50,13 +43,16 @@ export type CopiedPostStyle = {
   adjustments?: AdjustmentValues;
 };
 
+// The subset of a CopiedPostStyle that AnnotationEditor knows how to apply
+// to a live canvas (see its own pendingStyleToApply prop) -- crop is
+// excluded here since it's applied directly to posts.cover_transform,
+// never through the editor.
 export type PendingStylePaste = {
   text?: CopiedTextStyle;
   adjustments?: AdjustmentValues;
 };
 
 const CLIPBOARD_KEY = "flower:copied-post-style";
-const PENDING_KEY = "flower:pending-style-paste";
 
 let cachedClipboard: CopiedPostStyle | null | undefined;
 const clipboardListeners = new Set<() => void>();
@@ -105,42 +101,6 @@ export function useCopiedStyle(): CopiedPostStyle | null {
   return useSyncExternalStore(subscribeClipboard, getClipboardSnapshot, getServerClipboardSnapshot);
 }
 
-function readPendingMap(): Record<string, PendingStylePaste> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = sessionStorage.getItem(PENDING_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, PendingStylePaste>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function writePendingMap(map: Record<string, PendingStylePaste>) {
-  try {
-    sessionStorage.setItem(PENDING_KEY, JSON.stringify(map));
-  } catch {
-    // ignore -- see setCopiedStyle
-  }
-}
-
-export function stagePendingStylePaste(postId: string, paste: PendingStylePaste) {
-  const map = readPendingMap();
-  map[postId] = paste;
-  writePendingMap(map);
-}
-
-// "Take" (read + clear in one step), not "get" -- a staged paste is meant to
-// apply exactly once, the next time this post's cover is opened in the
-// Image Editor, not every time.
-export function takePendingStylePaste(postId: string): PendingStylePaste | null {
-  const map = readPendingMap();
-  const entry = map[postId];
-  if (!entry) return null;
-  delete map[postId];
-  writePendingMap(map);
-  return entry;
-}
-
 type RawFabricObject = { type?: string; appRole?: string; [key: string]: unknown };
 type RawAnnotationJson = { objects?: RawFabricObject[] };
 
@@ -177,17 +137,3 @@ export function extractTextStyleFromAnnotationJson(json: object | null): CopiedT
   if (typeof text.lineHeight === "number") style.lineHeight = text.lineHeight;
   return style;
 }
-
-// NOTE: the paste-side "apply" step deliberately does NOT live here.
-// AnnotationEditor itself applies a PendingStylePaste (see its own
-// pendingStyleToApply prop), once, right after its own normal load
-// finishes -- never by pre-mutating a post's annotation_json before the
-// editor ever sees it. An earlier version of this file did exactly that,
-// and it broke a common, ordinary case: an asset with no prior
-// annotation_json at all (json === null, the signal AnnotationEditor uses
-// to take its "fresh load from imageUrl" path) turned into a non-null-but-
-// empty {objects: []} once "patched" -- which the editor's own
-// initialization reads as "there IS saved state to restore," loading a
-// blank canvas with no base photo at all instead of the real image. Never
-// reintroduce a JSON-patching version of this function; extend
-// AnnotationEditor's own post-load application instead.

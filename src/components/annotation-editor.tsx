@@ -218,6 +218,8 @@ export function AnnotationEditor({
   saveAction,
   customFonts = [],
   pendingStyleToApply = null,
+  autoSaveOnReady = false,
+  onSaveError,
 }: {
   projectId: string;
   attachmentId: string | null;
@@ -265,6 +267,20 @@ export function AnnotationEditor({
   // AFTER the normal load instead means Paste Style can never diverge from
   // Edit Content/Crop Image's own image-loading behavior.
   pendingStyleToApply?: PendingStylePaste | null;
+  // For Grid's direct "Paste style" (no editor UI shown at all) -- once the
+  // canvas has finished loading AND applying pendingStyleToApply (i.e. the
+  // exact same moment `ready` would let a real user click Save Changes),
+  // automatically runs the SAME handleSave the button does, then reports
+  // through onSaved/onSaveError exactly like a real save would. This is
+  // deliberately the ONLY new behavior -- no parallel save path, no new
+  // persistence mechanism, just the existing one triggered programmatically
+  // instead of by a click.
+  autoSaveOnReady?: boolean;
+  // Only meaningful paired with autoSaveOnReady -- a failed save otherwise
+  // just shows saveError inside this editor's own (visible) UI, which has
+  // no viewer in the headless case. Optional and inert for every other
+  // caller.
+  onSaveError?: (message: string) => void;
 }) {
   const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -1006,6 +1022,13 @@ export function AnnotationEditor({
     // instance via disposePromiseRef, then constructing fresh) against
     // whichever canvas node is actually live.
   }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce, pendingStyleToApply]);
+
+  // autoSavedRef itself can live here (refs don't have a declaration-order
+  // lint concern) -- the EFFECT that reads it is declared further down,
+  // right after handleSave's own definition, since referencing handleSave
+  // before its declaration point is flagged regardless of `function`
+  // hoisting technically making it work at runtime.
+  const autoSavedRef = useRef(false);
 
   // See visualViewportBox's own declaration. `resize` fires when the
   // visible area's SIZE changes (keyboard opening/closing, pinch-zoom);
@@ -2131,6 +2154,16 @@ export function AnnotationEditor({
     commitAdjustments();
   }
 
+  // Sets the same inline saveError this editor's own (visible) UI already
+  // shows, AND -- only when a caller actually passed one -- reports the
+  // failure outward too. onSaveError exists purely for autoSaveOnReady's
+  // headless case, where saveError would otherwise be set on a component
+  // nobody is looking at.
+  function reportSaveError(message: string) {
+    setSaveError(message);
+    onSaveError?.(message);
+  }
+
   async function handleSave() {
     const canvas = fabricRef.current;
     if (!canvas || !attachmentId) return;
@@ -2233,7 +2266,7 @@ export function AnnotationEditor({
       // into an immediate, specific, actionable message instead of a vague
       // one surfacing after a real round-trip.
       if (blob.size > 19 * 1024 * 1024) {
-        setSaveError(
+        reportSaveError(
           `This image is too large to save at full quality (${(blob.size / 1024 / 1024).toFixed(1)}MB). Try applying a smaller crop and save again.`,
         );
         return;
@@ -2263,7 +2296,7 @@ export function AnnotationEditor({
         // meaning the target column doesn't exist yet) looked identical to
         // a successful one from the user's side: the dialog just stayed
         // open with no feedback at all.
-        setSaveError(result.message ?? "Couldn't save changes.");
+        reportSaveError(result.message ?? "Couldn't save changes.");
       }
     } catch (error) {
       // canvas.toDataURL() throws a SecurityError (silently, with no
@@ -2276,7 +2309,7 @@ export function AnnotationEditor({
       // load. Surfacing it here doesn't fix a bad source, but at least
       // makes the failure visible instead of indistinguishable from success.
       console.error("Failed to save annotation:", error);
-      setSaveError(
+      reportSaveError(
         error instanceof DOMException && error.name === "SecurityError"
           ? "Couldn't save -- an image on this canvas failed to load securely. Try re-adding it and save again."
           : error instanceof Error && error.message === "TIMEOUT"
@@ -2287,6 +2320,27 @@ export function AnnotationEditor({
       setSaving(false);
     }
   }
+
+  // Grid's direct "Paste style" mounts this editor with no visible UI at
+  // all -- autoSaveOnReady is how it turns "canvas finished loading AND
+  // applying pendingStyleToApply" (ready flips true right after finish()
+  // runs, see the load effect above) into "now do exactly what clicking
+  // Save Changes does," with zero new persistence logic. autoSavedRef (not
+  // just checking `ready` in the deps) so a StrictMode double-render or any
+  // later, unrelated `ready` flip can't trigger a second save for the same
+  // mount. Declared here, after handleSave, rather than up near the load
+  // effect -- referencing handleSave before its own declaration point is
+  // flagged even though `function` hoisting would make it work at runtime.
+  useEffect(() => {
+    if (!autoSaveOnReady || !ready || autoSavedRef.current) return;
+    autoSavedRef.current = true;
+    void handleSave();
+    // handleSave is intentionally not in the deps array -- it's a plain
+    // function redefined every render (reading fresh closures each time,
+    // same as every other handler in this file), not something this
+    // one-shot effect should re-run for.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSaveOnReady, ready]);
 
   if (!open || internallyClosed) return null;
 
