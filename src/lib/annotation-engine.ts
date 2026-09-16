@@ -13,6 +13,10 @@
 // calls the same functions directly, with no AnnotationEditor component
 // ever mounted, visibly or off-screen.
 import * as fabric from "fabric";
+// TEMPORARY DIAGNOSTIC IMPORT -- see paste-diagnostics.ts's own header for
+// why this exists and when to remove it (once the real Adjustments-only
+// production failure is root-caused and fixed).
+import { diagStage, diagFail } from "@/lib/paste-diagnostics";
 
 export type AnnotationSaveAction = (
   projectId: string,
@@ -151,9 +155,12 @@ export async function buildAnnotationCanvas(opts: {
   imageUrl: string;
   annotationJson: object | null;
   targetAspect: { w: number; h: number };
+  // TEMPORARY DIAGNOSTIC -- see paste-diagnostics.ts.
+  opId?: string;
 }): Promise<{ canvas: fabric.Canvas; exportScale: number; canvasH: number }> {
-  const { imageUrl, annotationJson, targetAspect } = opts;
+  const { imageUrl, annotationJson, targetAspect, opId } = opts;
   const { canvasW, canvasH, exportScale } = computeCanvasFrame(targetAspect);
+  if (opId) diagStage(opId, "canvas-built", { canvasW, canvasH, restoring: Boolean(annotationJson) });
 
   const el = document.createElement("canvas");
   const canvas = new fabric.Canvas(el, { backgroundColor: "#ffffff", selection: false });
@@ -161,7 +168,12 @@ export async function buildAnnotationCanvas(opts: {
 
   if (annotationJson) {
     const patched = patchRestoredAnnotationSrc(annotationJson, imageUrl);
-    await canvas.loadFromJSON(patched);
+    try {
+      await canvas.loadFromJSON(patched);
+    } catch (err) {
+      if (opId) diagFail(opId, "image-loaded", err);
+      throw err;
+    }
     // Migrates the legacy canvas.backgroundImage shape into a regular
     // tagged object, same as annotation-editor.tsx's own restore branch.
     if (canvas.backgroundImage) {
@@ -173,10 +185,46 @@ export async function buildAnnotationCanvas(opts: {
       canvas.sendObjectToBack(legacyPhoto);
     }
     canvas.requestRenderAll();
+    if (opId) {
+      // Reads the ACTUAL DOM <img> element Fabric ended up with -- not
+      // what was requested, what it REALLY has -- so we can tell whether
+      // crossOrigin genuinely made it onto the element that was actually
+      // fetched, in the real browser this is running in.
+      const bp = findBasePhoto(canvas);
+      const el2 = bp?.getElement() as HTMLImageElement | undefined;
+      diagStage(opId, "image-loaded", {
+        foundBasePhoto: Boolean(el2),
+        // "" (unset) is expected/harmless for a data: src (no CORS needed
+        // at all) -- only meaningful for a real https signed URL, where it
+        // should read "anonymous".
+        crossOrigin: el2 ? el2.crossOrigin || "(unset)" : "(no element)",
+        src: el2 ? el2.src.slice(0, 24) : undefined,
+        naturalWidth: el2?.naturalWidth,
+        naturalHeight: el2?.naturalHeight,
+        complete: el2?.complete,
+      });
+    }
     return { canvas, exportScale, canvasH };
   }
 
-  const img = await fabric.FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" });
+  let img: fabric.FabricImage;
+  try {
+    img = await fabric.FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" });
+  } catch (err) {
+    if (opId) diagFail(opId, "image-loaded", err);
+    throw err;
+  }
+  if (opId) {
+    const el2 = img.getElement() as HTMLImageElement;
+    diagStage(opId, "image-loaded", {
+      foundBasePhoto: true,
+      crossOrigin: el2.crossOrigin || "(unset)",
+      src: el2.src.slice(0, 24),
+      naturalWidth: el2.naturalWidth,
+      naturalHeight: el2.naturalHeight,
+      complete: el2.complete,
+    });
+  }
   const naturalW = img.width ?? canvasW;
   const naturalH = img.height ?? canvasH;
   const imgScale = Math.max(canvasW / naturalW, canvasH / naturalH);
@@ -211,16 +259,40 @@ export async function exportAndSaveAnnotation(opts: {
   projectId: string;
   attachmentId: string;
   saveAction: AnnotationSaveAction;
+  // TEMPORARY DIAGNOSTIC -- see paste-diagnostics.ts. Optional and inert
+  // for every caller that doesn't pass one (AnnotationEditor's own Save
+  // doesn't need this, only Grid's Paste Style debug build does).
+  opId?: string;
 }): Promise<{ previewUrl: string } | { error: string }> {
-  const { canvas, exportScale, projectId, attachmentId, saveAction } = opts;
+  const { canvas, exportScale, projectId, attachmentId, saveAction, opId } = opts;
   try {
-    const annotationJson = JSON.stringify(canvas.toJSON());
+    let annotationJson: string;
+    try {
+      annotationJson = JSON.stringify(canvas.toJSON());
+      if (opId) diagStage(opId, "annotation-serialized", { bytes: annotationJson.length });
+    } catch (err) {
+      if (opId) diagFail(opId, "annotation-serialized", err);
+      throw err;
+    }
+
     const basePhoto = findBasePhoto(canvas);
     const nativeMultiplier =
       basePhoto && basePhoto.scaleX ? Math.max(exportScale, 1 / basePhoto.scaleX) : exportScale;
-    const blob = await canvas.toBlob({ format: "jpeg", quality: 0.92, multiplier: nativeMultiplier });
-    if (!blob) return { error: "Couldn't render the edited image." };
+
+    let blob: Blob | null;
+    try {
+      blob = await canvas.toBlob({ format: "jpeg", quality: 0.92, multiplier: nativeMultiplier });
+      if (opId) diagStage(opId, "blob-created", { size: blob?.size, type: blob?.type, multiplier: nativeMultiplier });
+    } catch (err) {
+      if (opId) diagFail(opId, "blob-created", err, { multiplier: nativeMultiplier });
+      throw err;
+    }
+    if (!blob) {
+      if (opId) diagFail(opId, "blob-created", new Error("canvas.toBlob() resolved to null"));
+      return { error: "Couldn't render the edited image." };
+    }
     if (blob.size > 19 * 1024 * 1024) {
+      if (opId) diagFail(opId, "blob-size-check", new Error(`blob too large: ${blob.size} bytes`));
       return {
         error: `This image is too large to save at full quality (${(blob.size / 1024 / 1024).toFixed(1)}MB). Try applying a smaller crop and save again.`,
       };
@@ -228,13 +300,38 @@ export async function exportAndSaveAnnotation(opts: {
     const formData = new FormData();
     formData.set("file", new File([blob], "annotated-preview.jpg", { type: "image/jpeg" }));
     formData.set("annotation_json", annotationJson);
-    const result = await Promise.race([
-      saveAction(projectId, attachmentId, formData),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 60_000)),
-    ]);
+    if (opId) formData.set("__diag_op_id", opId);
+
+    if (opId) diagStage(opId, "upload-started");
+    let result: { previewUrl?: string; message?: string };
+    try {
+      result = await Promise.race([
+        saveAction(projectId, attachmentId, formData),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 60_000)),
+      ]);
+      if (opId) {
+        diagStage(opId, "upload-complete", {
+          hasPreviewUrl: Boolean(result.previewUrl),
+          message: result.message ?? null,
+        });
+      }
+    } catch (err) {
+      // Reaching here specifically means saveAction's returned PROMISE
+      // REJECTED -- i.e. the server action THREW an uncaught exception
+      // instead of returning its normal {previewUrl}/{message} shape. This
+      // is the one failure mode the server action's own explicit `if
+      // (error) return {message}` checks can never surface a real message
+      // for, since the client never gets a chance to read one -- see
+      // media.ts's own diagnostic try/catch, added alongside this, for the
+      // server-side half of the same trace.
+      if (opId) diagFail(opId, "save-action-rejected", err, { attachmentId: attachmentId.slice(0, 8) });
+      throw err;
+    }
     if (result.previewUrl) return { previewUrl: result.previewUrl };
+    if (opId) diagFail(opId, "save-action-message", new Error(result.message ?? "(no message returned)"));
     return { error: result.message ?? "Couldn't save changes." };
   } catch (error) {
+    if (opId) diagFail(opId, "exportAndSaveAnnotation", error);
     return {
       error:
         error instanceof DOMException && error.name === "SecurityError"

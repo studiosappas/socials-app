@@ -57,6 +57,8 @@ import {
   pasteTextObjectsOntoCanvas,
 } from "@/lib/annotation-engine";
 import { applyAdjustments } from "@/lib/image-adjustments";
+// TEMPORARY DIAGNOSTIC IMPORT -- see paste-diagnostics.ts's own header.
+import { newDiagOpId, diagStage, diagFail, diagShortId } from "@/lib/paste-diagnostics";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
@@ -2173,6 +2175,17 @@ const GridSlot = memo(function GridSlot({
       const imageUrl = slot.coverOriginalUrl;
       const saveAction = slot.coverMediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation;
       setPasteBusy(true);
+      // TEMPORARY DIAGNOSTIC -- see paste-diagnostics.ts's own header for
+      // why this exists. opId ties every console line below (and the
+      // matching server-side lines in media.ts) to this ONE paste attempt.
+      const opId = newDiagOpId();
+      diagStage(opId, "target-resolved", {
+        mediaAssetId: diagShortId(mediaAssetId),
+        mediaType: slot.coverMediaType,
+        wantsText,
+        wantsAdjustments,
+        wantsCrop,
+      });
       void (async () => {
         let canvas: Awaited<ReturnType<typeof buildAnnotationCanvas>>["canvas"] | null = null;
         try {
@@ -2182,16 +2195,31 @@ const GridSlot = memo(function GridSlot({
           // all carry over untouched; only the selected categories get
           // overwritten below.
           const current = await getMediaAssetAnnotationJson(mediaAssetId);
+          diagStage(opId, "annotation-loaded", {
+            hadExistingAnnotation: Boolean(current.annotationJson),
+            objectCount: (current.annotationJson as { objects?: unknown[] } | null)?.objects?.length ?? 0,
+          });
           const built = await buildAnnotationCanvas({
             imageUrl,
             annotationJson: current.annotationJson,
             targetAspect: PASTE_TARGET_ASPECT,
+            opId,
           });
           canvas = built.canvas;
 
           if (wantsAdjustments && copiedStyle.adjustments) {
-            const basePhoto = findBasePhoto(canvas);
-            if (basePhoto) applyAdjustments(basePhoto, copiedStyle.adjustments);
+            try {
+              const basePhoto = findBasePhoto(canvas);
+              if (basePhoto) {
+                applyAdjustments(basePhoto, copiedStyle.adjustments);
+                diagStage(opId, "filters-applied", { adjustments: copiedStyle.adjustments });
+              } else {
+                diagStage(opId, "filters-skipped-no-base-photo");
+              }
+            } catch (err) {
+              diagFail(opId, "filters-applied", err);
+              throw err;
+            }
           }
           if (wantsText && copiedStyle.text) {
             // Strictly ADDITIVE -- every existing object already on this
@@ -2206,6 +2234,7 @@ const GridSlot = memo(function GridSlot({
               copiedStyle.text.sourceFrameH,
               built.canvasH,
             );
+            diagStage(opId, "text-pasted", { count: copiedStyle.text.objects.length });
           }
 
           const result = await exportAndSaveAnnotation({
@@ -2214,6 +2243,7 @@ const GridSlot = memo(function GridSlot({
             projectId,
             attachmentId: mediaAssetId,
             saveAction,
+            opId,
           });
 
           if ("previewUrl" in result) {
@@ -2234,6 +2264,7 @@ const GridSlot = memo(function GridSlot({
             // the crop write first (or concurrently) would have that reset
             // silently clobber it a moment later.
             if (wantsCrop) applyCropTransform(nextTransform, previousTransform);
+            diagStage(opId, "grid-reconciled");
             showSuccess("Style pasted.");
           } else {
             if (wantsCrop) {
@@ -2243,7 +2274,8 @@ const GridSlot = memo(function GridSlot({
               showError(result.error);
             }
           }
-        } catch {
+        } catch (err) {
+          diagFail(opId, "handlePasteStyle", err, { mediaAssetId: diagShortId(mediaAssetId) });
           if (wantsCrop) {
             applyCropTransform(nextTransform, previousTransform);
             showError("Couldn't paste that style. Crop was still applied.");

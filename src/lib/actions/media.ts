@@ -6,6 +6,32 @@ import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { logSystemEvent } from "@/lib/system-event-log";
 import type { MediaType } from "@/types/database";
 
+// TEMPORARY DIAGNOSTIC -- added specifically to trace a real, Supabase-
+// backed Adjustments Paste failure a local/stubbed environment could not
+// reproduce (see src/lib/paste-diagnostics.ts's own header, and
+// annotation-engine.ts's exportAndSaveAnnotation, which sets
+// formData.__diag_op_id when a paste is in progress). Inline here (rather
+// than importing paste-diagnostics.ts, a "use client" module) since this
+// file is "use server" -- these two log helpers are the server-side half
+// of the same opId-tagged trace, so a failure that a server action THREW
+// (an unhandled rejection the client only ever saw as a generic
+// "Couldn't save changes") is visible here in this action's own logs
+// (dev server terminal locally; Vercel function logs in production) even
+// when the client-side error message alone wasn't enough to diagnose it.
+// Delete both helpers and every diagLog/diagLogFail call site in this file
+// once the real failing stage is identified and properly fixed.
+function diagLog(opId: string | null, stage: string, extra?: Record<string, unknown>) {
+  if (!opId) return;
+  console.log(`[PasteStyle][${opId}][server] stage=${stage}`, extra ?? "");
+}
+function diagLogFail(opId: string | null, stage: string, error: unknown, extra?: Record<string, unknown>) {
+  const info =
+    error instanceof Error
+      ? { name: error.name, message: error.message, code: (error as Error & { code?: string }).code }
+      : { name: typeof error, message: String(error) };
+  console.error(`[PasteStyle][${opId ?? "?"}][server] FAILED stage=${stage}`, info, extra ?? "");
+}
+
 // If this asset is the cover (position 0) of any post, that post's saved
 // pan/zoom (posts.cover_transform) is about to be reframing a different
 // image than it was cropped against -- reset it rather than let a stale
@@ -103,72 +129,103 @@ export async function saveMediaAssetAnnotation(
   mediaAssetId: string,
   formData: FormData,
 ): Promise<{ previewUrl?: string; message?: string }> {
-  const file = formData.get("file");
-  const annotationJsonRaw = formData.get("annotation_json");
-  if (!(file instanceof File) || file.size === 0) {
-    return { message: "No preview image provided." };
-  }
-  if (typeof annotationJsonRaw !== "string") {
-    return { message: "Missing annotation data." };
-  }
-
-  let annotationJson: object;
+  const opId = (formData.get("__diag_op_id") as string) || null;
   try {
-    annotationJson = JSON.parse(annotationJsonRaw);
-  } catch {
-    return { message: "Invalid annotation data." };
-  }
-
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const storagePath = `${projectId}/${crypto.randomUUID()}-preview.jpg`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(storagePath, file, { contentType: file.type });
-
-  if (uploadError) {
-    await logSystemEvent(supabase, {
-      category: "annotation_save_failed",
-      area: "image-editor",
-      message: uploadError.message,
-      projectId,
-      userId: user?.id ?? null,
+    const file = formData.get("file");
+    const annotationJsonRaw = formData.get("annotation_json");
+    diagLog(opId, "server-received", {
+      fileSize: file instanceof File ? file.size : null,
+      fileType: file instanceof File ? file.type : null,
+      hasAnnotationJson: typeof annotationJsonRaw === "string",
     });
-    return { message: uploadError.message };
+    if (!(file instanceof File) || file.size === 0) {
+      diagLogFail(opId, "server-received", new Error("No preview image provided."));
+      return { message: "No preview image provided." };
+    }
+    if (typeof annotationJsonRaw !== "string") {
+      diagLogFail(opId, "server-received", new Error("Missing annotation data."));
+      return { message: "Missing annotation data." };
+    }
+
+    let annotationJson: object;
+    try {
+      annotationJson = JSON.parse(annotationJsonRaw);
+    } catch (err) {
+      diagLogFail(opId, "annotation-json-parse", err);
+      return { message: "Invalid annotation data." };
+    }
+
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const storagePath = `${projectId}/${crypto.randomUUID()}-preview.jpg`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("project-media")
+      .upload(storagePath, file, { contentType: file.type });
+
+    if (uploadError) {
+      diagLogFail(opId, "storage-upload", uploadError, { storagePath });
+      await logSystemEvent(supabase, {
+        category: "annotation_save_failed",
+        area: "image-editor",
+        message: uploadError.message,
+        projectId,
+        userId: user?.id ?? null,
+      });
+      return { message: uploadError.message };
+    }
+    diagLog(opId, "storage-upload-complete", { storagePath });
+
+    const { error: updateError } = await supabase
+      .from("media_assets")
+      .update({ preview_storage_path: storagePath, annotation_json: annotationJson })
+      .eq("id", mediaAssetId);
+
+    if (updateError) {
+      diagLogFail(opId, "db-update", updateError, { mediaAssetId });
+      await logSystemEvent(supabase, {
+        category: "annotation_save_failed",
+        area: "image-editor",
+        message: updateError.message,
+        projectId,
+        userId: user?.id ?? null,
+      });
+      return { message: updateError.message };
+    }
+    diagLog(opId, "db-update-complete");
+
+    await resetCoverTransformForAsset(supabase, mediaAssetId);
+    diagLog(opId, "cover-transform-reset");
+
+    // Brand-new path every edit (crypto.randomUUID() above), so this is
+    // always a cache miss for correctness -- routed through the shared cache
+    // anyway so the next page load that reads this exact path (Grid,
+    // Calendar, Stories) reuses this same signed URL instead of re-signing it.
+    const previewUrl = await getCachedSignedUrl(supabase, "project-media", storagePath);
+    diagLog(opId, "signed-url-generated", { hasPreviewUrl: Boolean(previewUrl) });
+
+    revalidatePath(`/projects/${projectId}/grid`);
+    revalidatePath(`/projects/${projectId}/calendar`);
+    revalidatePath(`/projects/${projectId}/stories`);
+
+    diagLog(opId, "server-complete");
+    return { previewUrl: previewUrl ?? undefined };
+  } catch (error) {
+    // Reaching here means something threw that none of the explicit
+    // `if (error)` checks above ever saw -- previously an UNHANDLED
+    // rejection the client's saveAction(...) call only ever observed as a
+    // generic, cause-less failure. Returning a safe {message} here instead
+    // (rather than letting it propagate) means the client's own
+    // exportAndSaveAnnotation now gets a REAL message via result.message
+    // instead of falling through to its own "Couldn't save changes. Try
+    // again." catch-all.
+    diagLogFail(opId, "saveMediaAssetAnnotation-uncaught", error, { mediaAssetId });
+    return {
+      message: error instanceof Error ? `Unexpected server error: ${error.message}` : "Unexpected server error.",
+    };
   }
-
-  const { error: updateError } = await supabase
-    .from("media_assets")
-    .update({ preview_storage_path: storagePath, annotation_json: annotationJson })
-    .eq("id", mediaAssetId);
-
-  if (updateError) {
-    await logSystemEvent(supabase, {
-      category: "annotation_save_failed",
-      area: "image-editor",
-      message: updateError.message,
-      projectId,
-      userId: user?.id ?? null,
-    });
-    return { message: updateError.message };
-  }
-
-  await resetCoverTransformForAsset(supabase, mediaAssetId);
-
-  // Brand-new path every edit (crypto.randomUUID() above), so this is
-  // always a cache miss for correctness -- routed through the shared cache
-  // anyway so the next page load that reads this exact path (Grid,
-  // Calendar, Stories) reuses this same signed URL instead of re-signing it.
-  const previewUrl = await getCachedSignedUrl(supabase, "project-media", storagePath);
-
-  revalidatePath(`/projects/${projectId}/grid`);
-  revalidatePath(`/projects/${projectId}/calendar`);
-  revalidatePath(`/projects/${projectId}/stories`);
-
-  return { previewUrl: previewUrl ?? undefined };
 }
 
 // Same shape as saveMediaAssetAnnotation above (and satisfies the same
@@ -186,71 +243,94 @@ export async function saveMediaAssetPosterAnnotation(
   mediaAssetId: string,
   formData: FormData,
 ): Promise<{ previewUrl?: string; message?: string }> {
-  const file = formData.get("file");
-  const annotationJsonRaw = formData.get("annotation_json");
-  if (!(file instanceof File) || file.size === 0) {
-    return { message: "No cover image provided." };
-  }
-  if (typeof annotationJsonRaw !== "string") {
-    return { message: "Missing annotation data." };
-  }
-
-  let annotationJson: object;
+  const opId = (formData.get("__diag_op_id") as string) || null;
   try {
-    annotationJson = JSON.parse(annotationJsonRaw);
-  } catch {
-    return { message: "Invalid annotation data." };
-  }
-
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const posterPath = `${projectId}/${crypto.randomUUID()}-poster.jpg`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("project-media")
-    .upload(posterPath, file, { contentType: file.type });
-
-  if (uploadError) {
-    await logSystemEvent(supabase, {
-      category: "annotation_save_failed",
-      area: "image-editor",
-      message: uploadError.message,
-      projectId,
-      userId: user?.id ?? null,
+    const file = formData.get("file");
+    const annotationJsonRaw = formData.get("annotation_json");
+    diagLog(opId, "server-received", {
+      fileSize: file instanceof File ? file.size : null,
+      fileType: file instanceof File ? file.type : null,
+      hasAnnotationJson: typeof annotationJsonRaw === "string",
     });
-    return { message: uploadError.message };
+    if (!(file instanceof File) || file.size === 0) {
+      diagLogFail(opId, "server-received", new Error("No cover image provided."));
+      return { message: "No cover image provided." };
+    }
+    if (typeof annotationJsonRaw !== "string") {
+      diagLogFail(opId, "server-received", new Error("Missing annotation data."));
+      return { message: "Missing annotation data." };
+    }
+
+    let annotationJson: object;
+    try {
+      annotationJson = JSON.parse(annotationJsonRaw);
+    } catch (err) {
+      diagLogFail(opId, "annotation-json-parse", err);
+      return { message: "Invalid annotation data." };
+    }
+
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const posterPath = `${projectId}/${crypto.randomUUID()}-poster.jpg`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("project-media")
+      .upload(posterPath, file, { contentType: file.type });
+
+    if (uploadError) {
+      diagLogFail(opId, "storage-upload", uploadError, { posterPath });
+      await logSystemEvent(supabase, {
+        category: "annotation_save_failed",
+        area: "image-editor",
+        message: uploadError.message,
+        projectId,
+        userId: user?.id ?? null,
+      });
+      return { message: uploadError.message };
+    }
+    diagLog(opId, "storage-upload-complete", { posterPath });
+
+    const { error: updateError } = await supabase
+      .from("media_assets")
+      .update({ poster_storage_path: posterPath, annotation_json: annotationJson })
+      .eq("id", mediaAssetId);
+
+    if (updateError) {
+      diagLogFail(opId, "db-update", updateError, { mediaAssetId });
+      await logSystemEvent(supabase, {
+        category: "annotation_save_failed",
+        area: "image-editor",
+        message: updateError.message,
+        projectId,
+        userId: user?.id ?? null,
+      });
+      return { message: updateError.message };
+    }
+    diagLog(opId, "db-update-complete");
+
+    await resetCoverTransformForAsset(supabase, mediaAssetId);
+    diagLog(opId, "cover-transform-reset");
+
+    // Same reasoning as saveMediaAssetAnnotation above -- brand-new path, but
+    // routed through the shared cache so a subsequent normal page load of
+    // this exact poster reuses this signed URL rather than minting another.
+    const previewUrl = await getCachedSignedUrl(supabase, "project-media", posterPath);
+    diagLog(opId, "signed-url-generated", { hasPreviewUrl: Boolean(previewUrl) });
+
+    revalidatePath(`/projects/${projectId}/grid`);
+    revalidatePath(`/projects/${projectId}/calendar`);
+    revalidatePath(`/projects/${projectId}/stories`);
+
+    diagLog(opId, "server-complete");
+    return { previewUrl: previewUrl ?? undefined };
+  } catch (error) {
+    diagLogFail(opId, "saveMediaAssetPosterAnnotation-uncaught", error, { mediaAssetId });
+    return {
+      message: error instanceof Error ? `Unexpected server error: ${error.message}` : "Unexpected server error.",
+    };
   }
-
-  const { error: updateError } = await supabase
-    .from("media_assets")
-    .update({ poster_storage_path: posterPath, annotation_json: annotationJson })
-    .eq("id", mediaAssetId);
-
-  if (updateError) {
-    await logSystemEvent(supabase, {
-      category: "annotation_save_failed",
-      area: "image-editor",
-      message: updateError.message,
-      projectId,
-      userId: user?.id ?? null,
-    });
-    return { message: updateError.message };
-  }
-
-  await resetCoverTransformForAsset(supabase, mediaAssetId);
-
-  // Same reasoning as saveMediaAssetAnnotation above -- brand-new path, but
-  // routed through the shared cache so a subsequent normal page load of
-  // this exact poster reuses this signed URL rather than minting another.
-  const previewUrl = await getCachedSignedUrl(supabase, "project-media", posterPath);
-
-  revalidatePath(`/projects/${projectId}/grid`);
-  revalidatePath(`/projects/${projectId}/calendar`);
-  revalidatePath(`/projects/${projectId}/stories`);
-
-  return { previewUrl: previewUrl ?? undefined };
 }
 
 // Manual escape hatch for a video whose poster was never captured (e.g.
