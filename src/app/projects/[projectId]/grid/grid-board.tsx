@@ -55,6 +55,7 @@ import {
   disposeAnnotationCanvas,
   findBasePhoto,
   pasteTextObjectsOntoCanvas,
+  type AnnotationSaveAction,
 } from "@/lib/annotation-engine";
 import { applyAdjustments } from "@/lib/image-adjustments";
 // TEMPORARY DIAGNOSTIC IMPORT -- see paste-diagnostics.ts's own header.
@@ -2096,6 +2097,56 @@ const GridSlot = memo(function GridSlot({
     [slot, showSuccess],
   );
 
+  // Raw server-side crop write only -- no mutateSlot, no pushCommand.
+  // Shared by applyCropTransform below (which owns its OWN single-category
+  // crop-only undo entry) AND by handlePasteStyle's combined-category
+  // command (which bundles a crop change into the SAME one undo entry as
+  // the asset/text/adjustments change it was pasted together with -- see
+  // that command's own comment on why).
+  const persistCropOnly = useCallback(
+    async (postId: string, transform: GridCoverTransform | null): Promise<boolean> => {
+      if (demoMode) return true;
+      try {
+        await updatePostCoverTransform(projectId, postId, transform);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [demoMode, projectId],
+  );
+
+  // Rebuilds+re-persists a FULL canonical annotation state (adjustments,
+  // text, every other Fabric object) through the exact same detached-
+  // canvas engine and canonical saveAction a real paste uses -- this is
+  // what Paste Style's own Undo/Redo call to restore B to an exact prior
+  // persisted state, never a purely-visual/local rollback. `annotationJson
+  // null` (an asset that had never been annotated before this paste)
+  // correctly takes buildAnnotationCanvas's own fresh-load branch, which
+  // produces the same neutral state as never having pasted anything.
+  const persistAnnotationState = useCallback(
+    async (
+      annotationJson: object | null,
+      imageUrl: string,
+      mediaAssetId: string,
+      saveAction: AnnotationSaveAction,
+    ): Promise<{ previewUrl: string } | { error: string }> => {
+      const built = await buildAnnotationCanvas({ imageUrl, annotationJson, targetAspect: PASTE_TARGET_ASPECT });
+      try {
+        return await exportAndSaveAnnotation({
+          canvas: built.canvas,
+          exportScale: built.exportScale,
+          projectId,
+          attachmentId: mediaAssetId,
+          saveAction,
+        });
+      } finally {
+        disposeAnnotationCanvas(built.canvas);
+      }
+    },
+    [projectId],
+  );
+
   // Shared by both paste paths below: a crop-only paste applies this
   // directly; a paste that ALSO includes text/adjustments applies it AFTER
   // the headless asset save resolves instead (see handlePasteStyle's own
@@ -2106,8 +2157,8 @@ const GridSlot = memo(function GridSlot({
       if (!slot.postId) return;
       const postId = slot.postId;
       mutateSlot(slot.id, { ...slot, coverTransform: nextTransform }, async () => {
-        if (demoMode) return;
-        await updatePostCoverTransform(projectId, postId, nextTransform);
+        const ok = await persistCropOnly(postId, nextTransform);
+        if (!ok) throw new Error("Couldn't save that crop.");
       }).then((ok) => {
         if (!ok) {
           showError("Couldn't paste that crop. Please try again.");
@@ -2119,20 +2170,22 @@ const GridSlot = memo(function GridSlot({
           label: "Paste style (crop)",
           undo: () =>
             mutateSlot(slot.id, { ...slot, coverTransform: previousTransform }, async () => {
-              await updatePostCoverTransform(projectId, postId, previousTransform);
+              const undoOk = await persistCropOnly(postId, previousTransform);
+              if (!undoOk) throw new Error("Couldn't undo that crop.");
             }).then((undoOk) => {
               if (!undoOk) requestIdleRefresh();
             }),
           redo: () =>
             mutateSlot(slot.id, { ...slot, coverTransform: nextTransform }, async () => {
-              await updatePostCoverTransform(projectId, postId, nextTransform);
+              const redoOk = await persistCropOnly(postId, nextTransform);
+              if (!redoOk) throw new Error("Couldn't redo that crop.");
             }).then((redoOk) => {
               if (!redoOk) requestIdleRefresh();
             }),
         });
       });
     },
-    [slot, demoMode, projectId, mutateSlot, pushCommand, showError, requestIdleRefresh],
+    [slot, demoMode, mutateSlot, pushCommand, showError, requestIdleRefresh, persistCropOnly],
   );
 
   // Applies DIRECTLY to the Grid -- a pure data operation, no editor of any
@@ -2182,6 +2235,7 @@ const GridSlot = memo(function GridSlot({
       diagStage(opId, "target-resolved", {
         mediaAssetId: diagShortId(mediaAssetId),
         mediaType: slot.coverMediaType,
+        hasCoverTransform: Boolean(slot.coverTransform),
         wantsText,
         wantsAdjustments,
         wantsCrop,
@@ -2195,10 +2249,42 @@ const GridSlot = memo(function GridSlot({
           // all carry over untouched; only the selected categories get
           // overwritten below.
           const current = await getMediaAssetAnnotationJson(mediaAssetId);
-          diagStage(opId, "annotation-loaded", {
-            hadExistingAnnotation: Boolean(current.annotationJson),
-            objectCount: (current.annotationJson as { objects?: unknown[] } | null)?.objects?.length ?? 0,
-          });
+          // Asset-shape fields the Adjustments failure turned out to be
+          // asset-dependent on -- reported working on one real image and
+          // failing on another with the exact same crossOrigin fix live in
+          // both. Every field here is read straight from the RAW saved
+          // JSON (before any load/patch), so it reflects exactly what this
+          // specific target asset's history actually looks like.
+          {
+            const raw = current.annotationJson as
+              | { version?: string; objects?: Record<string, unknown>[]; backgroundImage?: unknown }
+              | null;
+            const rawBasePhoto = raw?.objects?.find((o) => o.appRole === "basePhoto");
+            diagStage(opId, "annotation-loaded", {
+              hadExistingAnnotation: Boolean(raw),
+              version: raw?.version ?? "(none)",
+              objectCount: raw?.objects?.length ?? 0,
+              hasLegacyBackgroundImage: Boolean(raw?.backgroundImage),
+              basePhotoFound: Boolean(rawBasePhoto),
+              basePhotoWidth: rawBasePhoto?.width,
+              basePhotoHeight: rawBasePhoto?.height,
+              basePhotoScaleX: rawBasePhoto?.scaleX,
+              basePhotoScaleY: rawBasePhoto?.scaleY,
+              basePhotoSrcKind: (() => {
+                const s = rawBasePhoto?.src;
+                if (typeof s !== "string") return "(none)";
+                if (s.startsWith("data:")) return "data-url";
+                if (s.startsWith("http")) return "http-url";
+                return "other";
+              })(),
+              existingFilterTypes: Array.isArray(rawBasePhoto?.filters)
+                ? (rawBasePhoto!.filters as { type?: string }[]).map((f) => f.type)
+                : [],
+              existingTextCount:
+                raw?.objects?.filter((o) => o.type === "IText" || o.type === "Text" || o.type === "Textbox")
+                  .length ?? 0,
+            });
+          }
           const built = await buildAnnotationCanvas({
             imageUrl,
             annotationJson: current.annotationJson,
@@ -2237,6 +2323,16 @@ const GridSlot = memo(function GridSlot({
             diagStage(opId, "text-pasted", { count: copiedStyle.text.objects.length });
           }
 
+          // Captured BEFORE export/save -- this is the exact final state
+          // being persisted (adjustments + additive text + everything B
+          // already had), so Redo can re-persist this SAME snapshot
+          // verbatim later without re-running pasteTextObjectsOntoCanvas a
+          // second time (which would add a THIRD copy of A's text on top
+          // of a Redo -- see this command's own redo below for why it
+          // replays this captured JSON instead of re-doing the mutation).
+          const afterAnnotationJson = canvas.toJSON();
+          const beforeAnnotationJson = current.annotationJson;
+
           const result = await exportAndSaveAnnotation({
             canvas,
             exportScale: built.exportScale,
@@ -2247,23 +2343,82 @@ const GridSlot = memo(function GridSlot({
           });
 
           if ("previewUrl" in result) {
-            mutateSlot(
-              targetSlotId,
-              { ...targetSlot, thumbnailUrl: result.previewUrl },
-              async () => ({ thumbnailUrl: result.previewUrl }),
-            ).then((ok) => {
-              if (!ok) {
-                showError("Pasted, but the Grid preview couldn't refresh. Reloading…");
-                requestIdleRefresh();
-              }
-            });
             // Applied AFTER the asset save resolves, never before/in
             // parallel -- saveMediaAssetAnnotation/saveMediaAssetPoster
             // Annotation both call resetCoverTransformForAsset internally,
             // which nulls posts.cover_transform for this exact post. Doing
             // the crop write first (or concurrently) would have that reset
             // silently clobber it a moment later.
-            if (wantsCrop) applyCropTransform(nextTransform, previousTransform);
+            let cropOk = true;
+            if (wantsCrop) {
+              cropOk = await persistCropOnly(targetSlot.postId!, nextTransform);
+              if (!cropOk) showError("Pasted, but the crop couldn't be saved. Please try again.");
+            }
+            const appliedTransform = wantsCrop && cropOk ? nextTransform : targetSlot.coverTransform;
+            const reconcileOk = await mutateSlot(
+              targetSlotId,
+              { ...targetSlot, thumbnailUrl: result.previewUrl, coverTransform: appliedTransform },
+              async () => ({ thumbnailUrl: result.previewUrl, coverTransform: appliedTransform }),
+            );
+            if (!reconcileOk) {
+              showError("Pasted, but the Grid preview couldn't refresh. Reloading…");
+              requestIdleRefresh();
+            }
+
+            // ONE history entry for the whole paste, whatever combination
+            // of categories was selected -- undo/redo re-persist the
+            // captured before/after annotation_json verbatim (never
+            // re-running the extraction/merge that produced them) through
+            // the SAME canonical engine+saveAction a real paste uses, plus
+            // the crop write if this paste included one, so Undo/Redo are
+            // real, persisted server mutations -- never a local-only
+            // visual rollback -- and a page refresh after either always
+            // shows the correct state.
+            if (!demoMode) {
+              pushCommand({
+                label: "Paste style",
+                undo: async () => {
+                  const beforeResult = await persistAnnotationState(
+                    beforeAnnotationJson,
+                    imageUrl,
+                    mediaAssetId,
+                    saveAction,
+                  );
+                  let cropUndoOk = true;
+                  if (wantsCrop && cropOk) {
+                    cropUndoOk = await persistCropOnly(targetSlot.postId!, previousTransform);
+                  }
+                  const previewUrl = "previewUrl" in beforeResult ? beforeResult.previewUrl : targetSlot.thumbnailUrl;
+                  const restoredTransform = wantsCrop && cropOk ? previousTransform : targetSlot.coverTransform;
+                  const undoOk = await mutateSlot(
+                    targetSlotId,
+                    { ...targetSlot, thumbnailUrl: previewUrl, coverTransform: restoredTransform },
+                    async () => ({ thumbnailUrl: previewUrl, coverTransform: restoredTransform }),
+                  );
+                  if (!undoOk || !("previewUrl" in beforeResult) || !cropUndoOk) requestIdleRefresh();
+                },
+                redo: async () => {
+                  const afterResult = await persistAnnotationState(
+                    afterAnnotationJson,
+                    imageUrl,
+                    mediaAssetId,
+                    saveAction,
+                  );
+                  let cropRedoOk = true;
+                  if (wantsCrop && cropOk) {
+                    cropRedoOk = await persistCropOnly(targetSlot.postId!, nextTransform);
+                  }
+                  const previewUrl = "previewUrl" in afterResult ? afterResult.previewUrl : result.previewUrl;
+                  const reappliedTransform = wantsCrop && cropOk ? nextTransform : targetSlot.coverTransform;
+                  const redoOk = await mutateSlot(
+                    targetSlotId,
+                    { ...targetSlot, thumbnailUrl: previewUrl, coverTransform: reappliedTransform },
+                    async () => ({ thumbnailUrl: previewUrl, coverTransform: reappliedTransform }),
+                  );
+                  if (!redoOk || !("previewUrl" in afterResult) || !cropRedoOk) requestIdleRefresh();
+                },
+              });
+            }
             diagStage(opId, "grid-reconciled");
             showSuccess("Style pasted.");
           } else {
@@ -2308,7 +2463,11 @@ const GridSlot = memo(function GridSlot({
     copiedStyle,
     slot,
     projectId,
+    demoMode,
     applyCropTransform,
+    persistCropOnly,
+    persistAnnotationState,
+    pushCommand,
     mutateSlot,
     showError,
     showSuccess,

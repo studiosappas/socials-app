@@ -278,6 +278,23 @@ export async function exportAndSaveAnnotation(opts: {
     const basePhoto = findBasePhoto(canvas);
     const nativeMultiplier =
       basePhoto && basePhoto.scaleX ? Math.max(exportScale, 1 / basePhoto.scaleX) : exportScale;
+    if (opId) {
+      diagStage(opId, "export-multiplier-computed", {
+        exportScale,
+        basePhotoScaleX: basePhoto?.scaleX,
+        nativeMultiplier,
+        // The exact pixel dimensions canvas.toBlob() is about to allocate
+        // and encode -- an asset whose basePhoto has a very small scaleX
+        // (e.g. never cropped, or cropped from a very large original)
+        // produces a very large nativeMultiplier here, which is the
+        // leading asset-dependent-size suspect for a failure that isn't
+        // CORS-related: a genuinely huge export can hit a browser canvas
+        // area limit or memory ceiling that a smaller/already-cropped
+        // source never approaches.
+        exportWidth: Math.round(canvas.getWidth() * nativeMultiplier),
+        exportHeight: Math.round(canvas.getHeight() * nativeMultiplier),
+      });
+    }
 
     let blob: Blob | null;
     try {
