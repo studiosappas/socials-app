@@ -2204,7 +2204,7 @@ const GridSlot = memo(function GridSlot({
               canvas,
               copiedStyle.text.objects,
               copiedStyle.text.sourceFrameH,
-              built.frameH,
+              built.canvasH,
             );
           }
 

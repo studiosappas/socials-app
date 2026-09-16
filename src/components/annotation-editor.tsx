@@ -15,11 +15,12 @@ import {
 } from "@/lib/image-adjustments";
 import {
   BASE_PHOTO_ROLE,
-  TARGET_EXPORT_W,
+  MAX_DISPLAY,
   tagAsBasePhoto,
   findBasePhoto,
   patchRestoredAnnotationSrc,
   exportAndSaveAnnotation,
+  computeCanvasFrame,
   type AnnotationSaveAction,
 } from "@/lib/annotation-engine";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
@@ -33,7 +34,6 @@ import {
 } from "@/lib/crop-geometry";
 
 const INK = "#171412"; // matches --foreground
-const MAX_DISPLAY = 640;
 const CROP_MAX_ZOOM = 4;
 // The crop overlay is now always mounted (see its own render-site comment)
 // even before cropSourceUrl exists -- a real, valid src is still required,
@@ -624,11 +624,19 @@ export function AnnotationEditor({
       // TARGET_EXPORT_W (1080) -- handleSave re-reads the base photo's
       // then-current scale and exports at whichever is larger, that or the
       // crop's actual native resolution, so a large source no longer gets
-      // silently downgraded to 1080xN.
-      const canvasW = targetAspect ? maxDisplay * (targetAspect.w / targetAspect.h) : naturalW * displayScale;
-      const canvasH = targetAspect ? maxDisplay : naturalH * displayScale;
-      exportScaleRef.current = targetAspect
-        ? TARGET_EXPORT_W / canvasW
+      // silently downgraded to 1080xN. Delegated to annotation-engine.ts's
+      // computeCanvasFrame for the targetAspect case specifically -- Grid's
+      // headless Paste Style engine calls that SAME function to build its
+      // own canvas, which is what makes the two agree on the frame every
+      // object's serialized left/top/scale is relative to (see that
+      // function's own comment on the real bug this fixed: a headless
+      // engine using a different frame size than a real editor session
+      // visibly shrank/mispositioned objects on load).
+      const targetFrame = targetAspect ? computeCanvasFrame(targetAspect) : null;
+      const canvasW = targetFrame ? targetFrame.canvasW : naturalW * displayScale;
+      const canvasH = targetFrame ? targetFrame.canvasH : naturalH * displayScale;
+      exportScaleRef.current = targetFrame
+        ? targetFrame.exportScale
         : displayScale > 0
           ? 1 / displayScale
           : 1;

@@ -48,15 +48,45 @@ export function findBasePhoto(canvas: fabric.Canvas): fabric.FabricImage | null 
 // actual output size. Matches annotation-editor.tsx's own TARGET_EXPORT_W.
 export const TARGET_EXPORT_W = 1080;
 
-// A fixed, viewport-INDEPENDENT working frame height for headless canvas
-// building (Grid's direct Paste Style has no visible viewport to size
-// against, unlike the real editor, which sizes its frame to
-// window.innerWidth/innerHeight so a phone doesn't get an oversized
-// canvas). The exported image's actual resolution never depends on this
-// value (exportAndSaveAnnotation's nativeMultiplier always scales up to the
-// source's real resolution) -- it only sets the coordinate space pasted
-// objects are positioned/sized in before that final export multiply.
-export const HEADLESS_FRAME_H = 1200;
+// Same display cap AnnotationEditor's own load effect uses -- see
+// computeCanvasFrame below for why this must be shared, not reinvented.
+export const MAX_DISPLAY = 640;
+
+// THE fix for a real, confirmed bug: an earlier version of this module used
+// a fixed, disconnected "headless frame size" (1200px tall) for every
+// paste, instead of the frame size a normal (visible) AnnotationEditor
+// session actually computes for the SAME targetAspect. Fabric's
+// loadFromJSON() places every object -- the base photo included -- at its
+// serialized ABSOLUTE left/top/scale onto whatever canvas.setDimensions()
+// is current; it never re-fits objects to a differently-sized canvas. That
+// mismatch is what made a pasted target's base image visibly shrink (B's
+// annotation_json was saved against the real editor's ~480x640 frame, then
+// loaded into this module's own unrelated 900x1200 canvas) AND made a
+// manually-reopened Image Editor fail to show the pasted result correctly
+// (the newly-saved annotation_json now held coordinates calibrated to THAT
+// 900x1200 frame, rendered into the real editor's own, still-~480x640,
+// canvas). The fix is structural, not a tuned constant: this function
+// computes the EXACT SAME numbers annotation-editor.tsx's own setupCanvas
+// does for a targetAspect-locked frame (see that component's own call into
+// this same function) -- both reflect the browser window this Paste is
+// actually happening in, from the one shared formula, so a headless paste
+// and the next real editor session (opened in the same or a similarly-
+// sized window, same as any two real editor sessions already have to be
+// today) agree on the frame every object's coordinates are relative to.
+export function computeCanvasFrame(targetAspect: { w: number; h: number }): {
+  canvasW: number;
+  canvasH: number;
+  exportScale: number;
+} {
+  const maxDisplay =
+    typeof window !== "undefined"
+      ? Math.max(240, Math.min(MAX_DISPLAY, window.innerWidth - 64, window.innerHeight - 280))
+      : MAX_DISPLAY;
+  const canvasW = maxDisplay * (targetAspect.w / targetAspect.h);
+  const canvasH = maxDisplay;
+  const exportScale = TARGET_EXPORT_W / canvasW;
+  return { canvasW, canvasH, exportScale };
+}
 
 type RawFabricObject = Record<string, unknown> & { type?: string; appRole?: string; src?: string };
 type RawAnnotationJson = { objects?: RawFabricObject[]; backgroundImage?: RawFabricObject };
@@ -96,12 +126,9 @@ export async function buildAnnotationCanvas(opts: {
   imageUrl: string;
   annotationJson: object | null;
   targetAspect: { w: number; h: number };
-  frameH?: number;
-}): Promise<{ canvas: fabric.Canvas; exportScale: number; frameH: number }> {
-  const { imageUrl, annotationJson, targetAspect, frameH = HEADLESS_FRAME_H } = opts;
-  const canvasH = frameH;
-  const canvasW = frameH * (targetAspect.w / targetAspect.h);
-  const exportScale = TARGET_EXPORT_W / canvasW;
+}): Promise<{ canvas: fabric.Canvas; exportScale: number; canvasH: number }> {
+  const { imageUrl, annotationJson, targetAspect } = opts;
+  const { canvasW, canvasH, exportScale } = computeCanvasFrame(targetAspect);
 
   const el = document.createElement("canvas");
   const canvas = new fabric.Canvas(el, { backgroundColor: "#ffffff", selection: false });
@@ -121,7 +148,7 @@ export async function buildAnnotationCanvas(opts: {
       canvas.sendObjectToBack(legacyPhoto);
     }
     canvas.requestRenderAll();
-    return { canvas, exportScale, frameH };
+    return { canvas, exportScale, canvasH };
   }
 
   const img = await fabric.FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" });
@@ -140,7 +167,7 @@ export async function buildAnnotationCanvas(opts: {
   tagAsBasePhoto(img);
   canvas.add(img);
   canvas.requestRenderAll();
-  return { canvas, exportScale, frameH };
+  return { canvas, exportScale, canvasH };
 }
 
 /**
