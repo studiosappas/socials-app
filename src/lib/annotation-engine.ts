@@ -102,6 +102,30 @@ export function patchRestoredAnnotationSrc(annotationJson: object, freshUrl: str
   const basePhoto = clone.objects?.find((o) => o.appRole === BASE_PHOTO_ROLE);
   if (basePhoto && typeof basePhoto.src === "string" && !basePhoto.src.startsWith("data:")) {
     basePhoto.src = freshUrl;
+    // THE fix for a real, confirmed bug: patching src forces a genuine
+    // re-fetch of the image on every restore, but nothing previously
+    // guaranteed that re-fetch happened in CORS mode -- whatever
+    // `crossOrigin` value (if any) happened to be serialized on THIS
+    // particular saved object was just carried through as-is. FabricImage's
+    // own toObject() always writes a `crossOrigin` field (see Image.ts), so
+    // this SHOULD already be "anonymous" for any asset the app itself ever
+    // saved -- but confirmed live (Playwright, a real network image with no
+    // explicit crossOrigin on the saved object) that when it ISN'T, the
+    // re-fetched element loads and DISPLAYS fine (a plain, non-CORS
+    // request), and canvas.toBlob() on it still succeeds (per spec, a
+    // tainted canvas's toBlob() silently returns null/handles gracefully --
+    // Text-only paste never touches pixel data, so it never notices) --
+    // but Adjustments' own Canvas2D filters (image-adjustments.ts) call
+    // ctx.getImageData() internally (see Fabric's own
+    // Canvas2dFilterBackend.applyFilters), which THROWS a SecurityError on
+    // a tainted canvas. That's the exact, reproduced mechanism behind
+    // "Couldn't save changes" appearing only for Adjustments, never Text.
+    // Setting this explicitly, unconditionally, on every restore -- the
+    // same moment src is already being forced to a fresh URL, so this is
+    // exactly when a genuine re-fetch happens anyway -- removes the
+    // dependency on that field having been serialized correctly by
+    // whatever process originally saved this asset.
+    basePhoto.crossOrigin = "anonymous";
   }
   if (
     clone.backgroundImage &&
@@ -109,6 +133,7 @@ export function patchRestoredAnnotationSrc(annotationJson: object, freshUrl: str
     !clone.backgroundImage.src.startsWith("data:")
   ) {
     clone.backgroundImage.src = freshUrl;
+    clone.backgroundImage.crossOrigin = "anonymous";
   }
   return clone;
 }
