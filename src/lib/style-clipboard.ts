@@ -15,40 +15,35 @@
 
 import { useSyncExternalStore } from "react";
 import { readAdjustments, type AdjustmentValues } from "@/lib/image-adjustments";
+import { recoverSourceFrameHeight } from "@/lib/annotation-engine";
 import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-reducer";
+import { GRID_COVER_RATIO_W, GRID_COVER_RATIO_H } from "@/app/projects/[projectId]/grid/grid-constants";
 
 export type StyleCategory = "crop" | "text" | "adjustments";
 
-// Deliberately style-only -- no `text` (content) and no position/scale
-// fields. Position/scale would create a "duplicate layout" behavior that's
-// a different feature from copying styling (see this project's own task
-// notes on that distinction), so it's left out entirely rather than guessed
-// at.
-export type CopiedTextStyle = {
-  fontFamily: string;
-  fontSize: number;
-  fontWeight: string | number;
-  fontStyle: string;
-  fill: string;
-  textAlign: string;
-  charSpacing?: number;
-  lineHeight?: number;
-};
+// "Text" means the complete textual visual content of every text object on
+// the source's cover, not just a style to reapply to something else: the
+// literal words, every per-character/whole-object Fabric property
+// (font/size/color/weight/style/alignment/lineHeight/charSpacing), and its
+// full geometry (position/scale/rotation/opacity). Pasting always ADDS
+// these as new, independent objects on the target -- see
+// annotation-engine.ts's pasteTextObjectsOntoCanvas -- never restyles or
+// replaces anything the target already has. Kept as the raw Fabric object
+// JSON (not a hand-picked field list) specifically so nothing the editor's
+// object model supports today silently gets dropped in the copy.
+export type CopiedTextObject = Record<string, unknown>;
 
 export type CopiedPostStyle = {
   sourcePostId: string;
   categories: StyleCategory[];
   crop?: GridCoverTransform | null;
-  text?: CopiedTextStyle;
-  adjustments?: AdjustmentValues;
-};
-
-// The subset of a CopiedPostStyle that AnnotationEditor knows how to apply
-// to a live canvas (see its own pendingStyleToApply prop) -- crop is
-// excluded here since it's applied directly to posts.cover_transform,
-// never through the editor.
-export type PendingStylePaste = {
-  text?: CopiedTextStyle;
+  // ALL text objects found on the source (not just the first) -- see
+  // extractTextObjectsFromAnnotationJson below -- plus the frame height
+  // they were positioned/sized against, so a paste onto a differently-
+  // sized target canvas can rescale position/fontSize proportionally
+  // instead of copying raw pixel coordinates (see
+  // annotation-engine.ts's recoverSourceFrameHeight).
+  text?: { objects: CopiedTextObject[]; sourceFrameH: number | null };
   adjustments?: AdjustmentValues;
 };
 
@@ -115,25 +110,25 @@ export function extractAdjustmentsFromAnnotationJson(json: object | null): Adjus
   return readAdjustments(basePhoto.filters as { type?: string }[] | undefined);
 }
 
-// Same idea for Text style -- uses the first IText object in the canvas's
-// object stack (paint order) as "the" text style for this asset. There's no
-// other signal available outside a live editing session (e.g. "the
-// currently selected one"), and a post's cover art in this app typically
-// carries at most one text treatment, so this is a simple, deterministic
-// default rather than an attempt to model multiple independent text styles.
-export function extractTextStyleFromAnnotationJson(json: object | null): CopiedTextStyle | null {
+// "Text" is the COMPLETE textual visual content of the source -- every text
+// object found (IText/Text/Textbox, in paint order), each carrying its
+// literal words and full raw Fabric object JSON (font, per-character
+// styles, color, alignment, position, scale, rotation, opacity, line
+// height, everything toJSON() persists), not a hand-picked style subset.
+// Returns null only when the source has no text object at all; a source
+// with several returns ALL of them -- pasting adds every one as an
+// independent object on the target, never just the first (see
+// annotation-engine.ts's pasteTextObjectsOntoCanvas).
+export function extractTextObjectsFromAnnotationJson(
+  json: object | null,
+): { objects: Record<string, unknown>[]; sourceFrameH: number | null } | null {
   const objects = (json as RawAnnotationJson | null)?.objects;
-  const text = objects?.find((o) => o.type === "IText");
-  if (!text) return null;
-  const style: CopiedTextStyle = {
-    fontFamily: (text.fontFamily as string) ?? "Arial, Helvetica, sans-serif",
-    fontSize: (text.fontSize as number) ?? 22,
-    fontWeight: (text.fontWeight as string | number) ?? "normal",
-    fontStyle: (text.fontStyle as string) ?? "normal",
-    fill: (text.fill as string) ?? "#171412",
-    textAlign: (text.textAlign as string) ?? "left",
-  };
-  if (typeof text.charSpacing === "number") style.charSpacing = text.charSpacing;
-  if (typeof text.lineHeight === "number") style.lineHeight = text.lineHeight;
-  return style;
+  const textObjects = (objects ?? []).filter(
+    (o) => o.type === "IText" || o.type === "Text" || o.type === "Textbox",
+  );
+  if (textObjects.length === 0) return null;
+  const sourceFrameH = json
+    ? recoverSourceFrameHeight(json, { w: GRID_COVER_RATIO_W, h: GRID_COVER_RATIO_H })
+    : null;
+  return { objects: textObjects, sourceFrameH };
 }

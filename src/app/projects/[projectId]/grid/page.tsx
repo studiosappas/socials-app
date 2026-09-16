@@ -141,13 +141,17 @@ export default async function GridPage({
     for (const slot of row.slots) {
       if (slot.coverStoragePath) allPaths.add(slot.coverStoragePath);
       if (slot.coverDisplayPath) allPaths.add(slot.coverDisplayPath);
-      // coverOriginalUrl is only ever read client-side by the video poster
-      // self-heal effect (grid-board.tsx) -- an image slot never touches it
-      // at all (the crop overlay operates on thumbnailUrl; coverTransform
-      // is resolution-independent fractional data, so that's correct, not
-      // a shortcut). Signing it for every image slot was another full
-      // extra signed-URL mint per tile for a value nothing ever renders.
-      if (slot.coverOriginalPath && slot.coverMediaType === "video") allPaths.add(slot.coverOriginalPath);
+      // coverOriginalUrl is read client-side by the video poster self-heal
+      // effect AND by Grid's direct Paste Style engine (grid-board.tsx /
+      // annotation-engine.ts) -- the latter needs a fresh, currently-valid
+      // signed original for BOTH image and video covers, since restoring a
+      // target's saved annotation_json requires patching its base photo's
+      // (possibly hours-old, expired) signed src with a live one -- see
+      // annotation-editor.tsx's own "SIGNED url refresh" comment for why
+      // that patch is necessary. Previously only signed for video, which
+      // made every Paste Style onto an image cover fail target resolution
+      // with a false "no image to paste onto" error.
+      if (slot.coverOriginalPath) allPaths.add(slot.coverOriginalPath);
     }
   }
 

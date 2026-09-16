@@ -44,13 +44,19 @@ import { CopyStyleDialog } from "./copy-style-dialog";
 import {
   useCopiedStyle,
   setCopiedStyle,
-  extractTextStyleFromAnnotationJson,
+  extractTextObjectsFromAnnotationJson,
   extractAdjustmentsFromAnnotationJson,
   type StyleCategory,
   type CopiedPostStyle,
-  type PendingStylePaste,
 } from "@/lib/style-clipboard";
-import { AnnotationEditor } from "@/components/annotation-editor";
+import {
+  buildAnnotationCanvas,
+  exportAndSaveAnnotation,
+  disposeAnnotationCanvas,
+  findBasePhoto,
+  pasteTextObjectsOntoCanvas,
+} from "@/lib/annotation-engine";
+import { applyAdjustments } from "@/lib/image-adjustments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
@@ -76,7 +82,7 @@ import {
 import { gridInteractionReducer, initialGridInteractionState } from "./grid-interaction";
 import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
-import { GRID_COVER_ASPECT_CLASS } from "./grid-constants";
+import { GRID_COVER_ASPECT_CLASS, GRID_COVER_RATIO_W, GRID_COVER_RATIO_H } from "./grid-constants";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -96,6 +102,12 @@ export type { GridBoardRow, GridBoardSlot, GridCoverTransform };
 // comfortably inside typical OS double-click intervals without making a
 // genuine single click feel laggy.
 const DOUBLE_CLICK_WINDOW_MS = 400;
+
+// The aspect every Grid cover is edited/exported at (see grid-constants.ts)
+// -- Paste Style's headless engine (annotation-engine.ts) needs this same
+// ratio to build/read a target's canvas, exactly like manually opening
+// "Edit Image" on a cover does (post-editor.tsx's own COVER_ASPECT).
+const PASTE_TARGET_ASPECT = { w: GRID_COVER_RATIO_W, h: GRID_COVER_RATIO_H };
 
 // Resizable Library sidebar (desktop only -- the sidebar itself is already
 // `hidden lg:block`, mobile is untouched). Bounded by the project page's own
@@ -1698,35 +1710,15 @@ const GridSlot = memo(function GridSlot({
   const { showError, showSuccess } = useToast();
   const copiedStyle = useCopiedStyle();
   const [copyStyleOpen, setCopyStyleOpen] = useState(false);
-  // Drives a HIDDEN AnnotationEditor mount (rendered at the bottom of this
-  // component, off-screen) that applies a pasted Text/Adjustments style and
-  // saves it immediately, with no visible editor UI at all -- see that
-  // render site's own comment for why an off-screen mount rather than a
-  // headless canvas reimplementation. `cropToApplyAfter` isn't part of the
-  // style this editor applies -- see handlePasteStyle's own comment on why
-  // crop, when pasted together with text/adjustments, is applied AFTER
-  // this save resolves rather than before or in parallel.
-  const [headlessPasteState, setHeadlessPasteState] = useState<{
-    mediaAssetId: string;
-    imageUrl: string;
-    mediaType: "image" | "video";
-    annotationJson: object | null;
-    pending: PendingStylePaste;
-    cropToApplyAfter?: { previousTransform: GridCoverTransform | null; nextTransform: GridCoverTransform | null };
-  } | null>(null);
-  // Defensive only -- handleSave's own 60s timeout only starts once the
-  // canvas has finished LOADING (ready === true); if the image itself never
-  // loads (a broken/expired URL), nothing else would ever clear this hidden
-  // mount or tell the user anything went wrong, since there's no visible UI
-  // for them to notice it's stuck.
-  useEffect(() => {
-    if (!headlessPasteState) return;
-    const timeout = setTimeout(() => {
-      setHeadlessPasteState(null);
-      showError("Couldn't paste that style -- the image took too long to load. Please try again.");
-    }, 20_000);
-    return () => clearTimeout(timeout);
-  }, [headlessPasteState, showError]);
+  // Paste Style is a pure DATA OPERATION -- no editor of any kind (visible
+  // or off-screen) is ever mounted for it. handlePasteStyle below builds a
+  // DETACHED Fabric canvas directly via annotation-engine.ts, mutates it,
+  // exports+saves it through the same canonical saveAction a real Image
+  // Editor Save uses, and reflects the result into this slot's own Grid
+  // state -- the user never leaves the Grid. This flag only disables the
+  // menu action while one paste is genuinely in flight on this slot (guards
+  // a rapid double-click from starting two saves for the same target).
+  const [pasteBusy, setPasteBusy] = useState(false);
   const { attributes, listeners, setNodeRef, transform, transition, isOver, isDragging } =
     useSortable({
       id: slot.id,
@@ -2082,7 +2074,7 @@ const GridSlot = memo(function GridSlot({
         if (needsAnnotation && slot.coverMediaAssetId) {
           const result = await getMediaAssetAnnotationJson(slot.coverMediaAssetId);
           if (categories.includes("text")) {
-            const text = extractTextStyleFromAnnotationJson(result.annotationJson);
+            const text = extractTextObjectsFromAnnotationJson(result.annotationJson);
             if (text) payload.text = text;
           }
           if (categories.includes("adjustments")) {
@@ -2141,57 +2133,127 @@ const GridSlot = memo(function GridSlot({
     [slot, demoMode, projectId, mutateSlot, pushCommand, showError, requestIdleRefresh],
   );
 
-  // Applies DIRECTLY to the Grid, no editor, no navigation -- Paste Style
-  // is a real paste operation, not a "go edit this yourself" hint. Crop
-  // writes straight to posts.cover_transform (already small, independent,
-  // instant). Text/Adjustments have no such independent field -- both live
-  // only inside the cover asset's own annotation_json (see
-  // saveMediaAssetAnnotation), so applying them for real means rendering
-  // the change through a real (if invisible) canvas and re-saving through
-  // that SAME canonical action -- see the hidden AnnotationEditor mount
-  // below and its autoSaveOnReady prop. `postId`/`slot` here are always
-  // THIS slot's own -- whichever tile's ⋮ menu "Paste style" was actually
-  // clicked -- never copiedStyle.sourcePostId, which is read only back in
-  // handleCopyStyle's own extraction step and never touched again.
+  // Applies DIRECTLY to the Grid -- a pure data operation, no editor of any
+  // kind mounted (visible or off-screen), no navigation, no intermediate
+  // "ready to paste" state the user has to do anything else to consume.
+  // Crop writes straight to posts.cover_transform (already small,
+  // independent, instant). Text/Adjustments have no such independent field
+  // -- both live only inside the cover asset's own annotation_json (see
+  // saveMediaAssetAnnotation) -- so applying them for real means building a
+  // DETACHED canvas (annotation-engine.ts's buildAnnotationCanvas, never
+  // inserted into the document), mutating it, and re-saving through that
+  // SAME canonical action. Every identifier used below (`slot`, `postId`,
+  // `mediaAssetId`, `imageUrl`) is captured HERE, synchronously, from
+  // whichever tile's ⋮ menu "Paste style" was actually clicked -- never
+  // re-read from `slot` after an await, and never copiedStyle.sourcePostId
+  // (read only back in handleCopyStyle's own extraction step, never touched
+  // again) -- so a slow paste can never end up resolved against a target
+  // that isn't the one the user actually clicked.
   const handlePasteStyle = useCallback(() => {
     setContentMenuOpen(false);
     if (!copiedStyle || !slot.postId) return;
 
-    const pending: PendingStylePaste = {};
-    if (copiedStyle.categories.includes("text") && copiedStyle.text) pending.text = copiedStyle.text;
-    if (copiedStyle.categories.includes("adjustments") && copiedStyle.adjustments) {
-      pending.adjustments = copiedStyle.adjustments;
-    }
+    const wantsText = copiedStyle.categories.includes("text") && Boolean(copiedStyle.text?.objects.length);
+    const wantsAdjustments = copiedStyle.categories.includes("adjustments") && Boolean(copiedStyle.adjustments);
     const wantsCrop = copiedStyle.categories.includes("crop");
-    const wantsAssetPaste = Boolean(pending.text || pending.adjustments);
+    const wantsAssetPaste = wantsText || wantsAdjustments;
 
     if (!wantsCrop && !wantsAssetPaste) {
       showError("Nothing to paste from the copied style.");
       return;
     }
 
+    const targetSlotId = slot.id;
+    const targetSlot = slot;
+    const previousTransform = slot.coverTransform;
+    const nextTransform = copiedStyle.crop ?? null;
+
     if (wantsAssetPaste && slot.coverMediaAssetId && slot.coverOriginalUrl) {
-      const previousTransform = slot.coverTransform;
-      const nextTransform = copiedStyle.crop ?? null;
       const mediaAssetId = slot.coverMediaAssetId;
       const imageUrl = slot.coverOriginalUrl;
-      const mediaType = slot.coverMediaType === "video" ? "video" : "image";
+      const saveAction = slot.coverMediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation;
+      setPasteBusy(true);
       void (async () => {
-        // Reads the asset's CURRENT annotation_json (not the copied
-        // payload) so the hidden editor loads B's own real, existing state
-        // -- crop remnants/draw/arrow objects/any prior text or
-        // adjustments all carry over untouched; only the selected
-        // categories get overwritten (see finish()'s own comment in
-        // annotation-editor.tsx).
-        const result = await getMediaAssetAnnotationJson(mediaAssetId);
-        setHeadlessPasteState({
-          mediaAssetId,
-          imageUrl,
-          mediaType,
-          annotationJson: result.annotationJson,
-          pending,
-          cropToApplyAfter: wantsCrop ? { previousTransform, nextTransform } : undefined,
-        });
+        let canvas: Awaited<ReturnType<typeof buildAnnotationCanvas>>["canvas"] | null = null;
+        try {
+          // Reads the asset's CURRENT annotation_json (not the copied
+          // payload) so the engine builds B's own real, existing state --
+          // crop remnants/draw/arrow objects/any prior text or adjustments
+          // all carry over untouched; only the selected categories get
+          // overwritten below.
+          const current = await getMediaAssetAnnotationJson(mediaAssetId);
+          const built = await buildAnnotationCanvas({
+            imageUrl,
+            annotationJson: current.annotationJson,
+            targetAspect: PASTE_TARGET_ASPECT,
+          });
+          canvas = built.canvas;
+
+          if (wantsAdjustments && copiedStyle.adjustments) {
+            const basePhoto = findBasePhoto(canvas);
+            if (basePhoto) applyAdjustments(basePhoto, copiedStyle.adjustments);
+          }
+          if (wantsText && copiedStyle.text) {
+            // Strictly ADDITIVE -- every existing object already on this
+            // canvas (B's own text, drawings, arrows, shapes, restored by
+            // buildAnnotationCanvas above) stays exactly as loaded;
+            // pasteTextObjectsOntoCanvas only ever adds new objects, never
+            // reads or removes what's already there, and never
+            // deduplicates against a previous paste.
+            await pasteTextObjectsOntoCanvas(
+              canvas,
+              copiedStyle.text.objects,
+              copiedStyle.text.sourceFrameH,
+              built.frameH,
+            );
+          }
+
+          const result = await exportAndSaveAnnotation({
+            canvas,
+            exportScale: built.exportScale,
+            projectId,
+            attachmentId: mediaAssetId,
+            saveAction,
+          });
+
+          if ("previewUrl" in result) {
+            mutateSlot(
+              targetSlotId,
+              { ...targetSlot, thumbnailUrl: result.previewUrl },
+              async () => ({ thumbnailUrl: result.previewUrl }),
+            ).then((ok) => {
+              if (!ok) {
+                showError("Pasted, but the Grid preview couldn't refresh. Reloading…");
+                requestIdleRefresh();
+              }
+            });
+            // Applied AFTER the asset save resolves, never before/in
+            // parallel -- saveMediaAssetAnnotation/saveMediaAssetPoster
+            // Annotation both call resetCoverTransformForAsset internally,
+            // which nulls posts.cover_transform for this exact post. Doing
+            // the crop write first (or concurrently) would have that reset
+            // silently clobber it a moment later.
+            if (wantsCrop) applyCropTransform(nextTransform, previousTransform);
+            showSuccess("Style pasted.");
+          } else {
+            if (wantsCrop) {
+              applyCropTransform(nextTransform, previousTransform);
+              showError(`${result.error} Crop was still applied.`);
+            } else {
+              showError(result.error);
+            }
+          }
+        } catch {
+          if (wantsCrop) {
+            applyCropTransform(nextTransform, previousTransform);
+            showError("Couldn't paste that style. Crop was still applied.");
+          } else {
+            showError("Couldn't paste that style. Please try again.");
+          }
+        } finally {
+          if (canvas) disposeAnnotationCanvas(canvas);
+          setPasteBusy(false);
+        }
       })();
       return;
     }
@@ -2203,60 +2265,23 @@ const GridSlot = memo(function GridSlot({
         showError("This slot has no image to paste that style onto.");
         return;
       }
-      applyCropTransform(copiedStyle.crop ?? null, slot.coverTransform);
+      applyCropTransform(nextTransform, previousTransform);
       showError("This slot has no image for text/adjustments, but the crop was pasted.");
       return;
     }
 
-    applyCropTransform(copiedStyle.crop ?? null, slot.coverTransform);
+    applyCropTransform(nextTransform, previousTransform);
     showSuccess("Style pasted.");
-  }, [copiedStyle, slot, applyCropTransform, showError, showSuccess]);
-
-  // Fires from the hidden AnnotationEditor's onSaved once the asset paste
-  // has genuinely persisted (never before) -- reflects the new thumbnail
-  // into this slot's own Grid state via the same mutateSlot every other
-  // mutation here uses (the `run` callback is a no-op-that-always-
-  // "succeeds" since the real server write already happened; mutateSlot's
-  // job here is purely to commit that result into the reducer). Crop, if
-  // ALSO part of this paste, applies now -- see handlePasteStyle's own
-  // comment on why AFTER, not before or in parallel.
-  const handleHeadlessPasteSaved = useCallback(
-    (previewUrl: string) => {
-      setHeadlessPasteState((current) => {
-        if (!current) return current;
-        mutateSlot(slot.id, { ...slot, thumbnailUrl: previewUrl }, async () => ({ thumbnailUrl: previewUrl })).then(
-          (ok) => {
-            if (!ok) {
-              showError("Pasted, but the Grid preview couldn't refresh. Reloading…");
-              requestIdleRefresh();
-            }
-          },
-        );
-        if (current.cropToApplyAfter) {
-          applyCropTransform(current.cropToApplyAfter.nextTransform, current.cropToApplyAfter.previousTransform);
-        }
-        showSuccess("Style pasted.");
-        return null;
-      });
-    },
-    [slot, mutateSlot, showError, showSuccess, requestIdleRefresh, applyCropTransform],
-  );
-
-  const handleHeadlessPasteError = useCallback(
-    (message: string) => {
-      setHeadlessPasteState((current) => {
-        if (!current) return current;
-        if (current.cropToApplyAfter) {
-          applyCropTransform(current.cropToApplyAfter.nextTransform, current.cropToApplyAfter.previousTransform);
-          showError(`${message || "Couldn't paste that style."} Crop was still applied.`);
-        } else {
-          showError(message || "Couldn't paste that style. Please try again.");
-        }
-        return null;
-      });
-    },
-    [showError, applyCropTransform],
-  );
+  }, [
+    copiedStyle,
+    slot,
+    projectId,
+    applyCropTransform,
+    mutateSlot,
+    showError,
+    showSuccess,
+    requestIdleRefresh,
+  ]);
 
   const handleDeletePost = useCallback(() => {
     if (!slot.postId) return;
@@ -2372,44 +2397,13 @@ const GridSlot = memo(function GridSlot({
         onOpenCropFromMenu={handleOpenCropFromMenu}
         onOpenCopyStyle={handleOpenCopyStyle}
         onPasteStyle={handlePasteStyle}
-        pasteStyleEnabled={copiedStyle !== null}
+        pasteStyleEnabled={copiedStyle !== null && !pasteBusy}
         onDeletePost={handleDeletePost}
         onRemoveRow={handleRemoveRow}
         onSaveCrop={handleSaveCrop}
         onCancelCrop={handleCancelCrop}
       />
       <CopyStyleDialog open={copyStyleOpen} onClose={() => setCopyStyleOpen(false)} onCopy={handleCopyStyle} />
-      {headlessPasteState && (
-        // Renders the REAL AnnotationEditor -- same component, same load/
-        // save code, same canonical persistence -- just positioned off-
-        // screen so Paste Style never shows any editor UI. Off-screen
-        // (not display:none): canvas sizing here reads window.innerWidth/
-        // innerHeight directly (see that component's own setupCanvas), not
-        // this wrapper's box, and a display:none ancestor risks the canvas
-        // never actually getting a paint pass in some browsers, which
-        // could produce an empty/incorrect toBlob() export. autoSaveOnReady
-        // fires handleSave itself the instant the canvas finishes loading
-        // AND applying pendingStyleToApply -- exactly what clicking Save
-        // Changes does, just triggered programmatically instead of by a
-        // click nobody would ever see to make.
-        <div aria-hidden style={{ position: "fixed", top: 0, left: "-99999px", width: 1, height: 1, overflow: "hidden" }}>
-          <AnnotationEditor
-            projectId={projectId}
-            attachmentId={headlessPasteState.mediaAssetId}
-            open
-            imageUrl={headlessPasteState.imageUrl}
-            initialAnnotationJson={headlessPasteState.annotationJson}
-            mediaType={headlessPasteState.mediaType}
-            targetAspect={{ w: 3, h: 4 }}
-            onClose={() => setHeadlessPasteState(null)}
-            onSaved={handleHeadlessPasteSaved}
-            saveAction={headlessPasteState.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}
-            pendingStyleToApply={headlessPasteState.pending}
-            autoSaveOnReady
-            onSaveError={handleHeadlessPasteError}
-          />
-        </div>
-      )}
     </div>
   );
 });

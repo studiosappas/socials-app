@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
 import { useCustomFonts } from "@/lib/use-custom-fonts";
 import { useRecentColors, commitRecentColor } from "@/lib/hooks/use-recent-colors";
-import type { PendingStylePaste } from "@/lib/style-clipboard";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import {
   NEUTRAL_ADJUSTMENTS,
@@ -14,6 +13,15 @@ import {
   readAdjustments,
   type AdjustmentValues,
 } from "@/lib/image-adjustments";
+import {
+  BASE_PHOTO_ROLE,
+  TARGET_EXPORT_W,
+  tagAsBasePhoto,
+  findBasePhoto,
+  patchRestoredAnnotationSrc,
+  exportAndSaveAnnotation,
+  type AnnotationSaveAction,
+} from "@/lib/annotation-engine";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 import {
   clampNum,
@@ -34,13 +42,6 @@ const CROP_MAX_ZOOM = 4;
 // harmless placeholder that's never actually visible (the overlay is
 // display:none until cropSourceUrl is set).
 const EMPTY_IMAGE_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
-// Minimum export pixel width for every targetAspect-locked frame (cover
-// 1080x1350, carousel slide 1080x1440) -- the height follows from
-// targetAspect itself, so only the width needs to be a shared constant.
-// handleSave scales this up further when the source's native resolution
-// at the current crop is larger, so this is a floor, not the actual
-// output size.
-const TARGET_EXPORT_W = 1080;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -103,15 +104,10 @@ const HUE_GRADIENT_CSS =
 
 type Tool = "select" | "draw" | "text" | "arrow" | "crop";
 
-// The base photo lives as a regular (tagged, non-selectable) object in the
-// canvas's own object stack rather than the special canvas.backgroundImage
-// slot, specifically so other objects can be sent BEHIND it via Arrange, not
-// just reordered in front of it. `appRole` marks which object that is; it
-// only survives the toObject()/toJSON() round trip (and therefore
-// reopening a saved annotation) because it's registered as a custom
-// property here -- see fabric's own FabricObject.customProperties.
-const BASE_PHOTO_ROLE = "basePhoto";
-fabric.FabricObject.customProperties = ["appRole"];
+// BASE_PHOTO_ROLE/customProperties registration, tagAsBasePhoto, and
+// findBasePhoto now live in annotation-engine.ts (imported above) -- the
+// one place both this editor and Grid's headless Paste Style engine import
+// from, so the base-photo tagging convention can never drift between them.
 // touchCornerSize is Fabric's own (already-existing, already-larger-than-
 // cornerSize) invisible hit-area for the resize/rotate corner handles --
 // confirmed live that FabricObject.ownDefaults IS the same object every
@@ -138,19 +134,6 @@ fabric.FabricObject.ownDefaults.touchCornerSize = 44;
 // the corner-control fix above. Same ownDefaults object every interactive
 // subclass reads from, so this one assignment covers every object type.
 fabric.FabricObject.ownDefaults.padding = 20;
-
-type TaggableObject = fabric.FabricObject & { appRole?: string };
-function tagAsBasePhoto(obj: fabric.FabricObject) {
-  (obj as TaggableObject).appRole = BASE_PHOTO_ROLE;
-}
-// Adjustments (Brightness/Contrast/etc.) always target the base photo
-// specifically, never whatever's currently selected -- the base photo is
-// deliberately selectable:false (see tagAsBasePhoto's own comment above), so
-// it can never be what selectedImage points at.
-function findBasePhoto(canvas: fabric.Canvas): fabric.FabricImage | null {
-  const obj = canvas.getObjects().find((o) => (o as TaggableObject).appRole === BASE_PHOTO_ROLE);
-  return obj instanceof fabric.FabricImage ? obj : null;
-}
 
 // Fabric's cropX/cropY/width/height are just a WINDOW into the base photo's
 // underlying element (getElement()) -- the element itself stays the full,
@@ -199,11 +182,7 @@ function getRotatedCropDataUrl(
   return off.toDataURL("image/jpeg", 0.97);
 }
 
-export type AnnotationSaveAction = (
-  projectId: string,
-  targetId: string,
-  formData: FormData,
-) => Promise<{ previewUrl?: string; message?: string }>;
+export type { AnnotationSaveAction };
 
 export function AnnotationEditor({
   projectId,
@@ -217,9 +196,6 @@ export function AnnotationEditor({
   onSaved,
   saveAction,
   customFonts = [],
-  pendingStyleToApply = null,
-  autoSaveOnReady = false,
-  onSaveError,
 }: {
   projectId: string;
   attachmentId: string | null;
@@ -253,34 +229,6 @@ export function AnnotationEditor({
   // lib/data/brand-moodboard.ts's deriveCustomFontFaces) -- merged into the
   // font picker below, alongside the built-in generic stacks.
   customFonts?: CustomFontFace[];
-  // Grid's Copy/Paste Style feature (see style-clipboard.ts) -- applied
-  // once, right after the canvas finishes its own NORMAL load (whichever
-  // branch that is: restoring saved JSON, or a fresh load from imageUrl),
-  // never by pre-mutating initialAnnotationJson before this component ever
-  // sees it. That earlier approach broke a real, common case: an asset
-  // with no prior annotation_json (initialAnnotationJson === null, the
-  // signal this component uses to take the "fresh load from imageUrl"
-  // path) turned into a non-null-but-empty {objects: []} once patched,
-  // which this component's own shouldRestoreAnnotation check reads as
-  // "there IS saved state" -- loadFromJSON-ing that produced a genuinely
-  // blank canvas with no base photo at all. Applying the pending values
-  // AFTER the normal load instead means Paste Style can never diverge from
-  // Edit Content/Crop Image's own image-loading behavior.
-  pendingStyleToApply?: PendingStylePaste | null;
-  // For Grid's direct "Paste style" (no editor UI shown at all) -- once the
-  // canvas has finished loading AND applying pendingStyleToApply (i.e. the
-  // exact same moment `ready` would let a real user click Save Changes),
-  // automatically runs the SAME handleSave the button does, then reports
-  // through onSaved/onSaveError exactly like a real save would. This is
-  // deliberately the ONLY new behavior -- no parallel save path, no new
-  // persistence mechanism, just the existing one triggered programmatically
-  // instead of by a click.
-  autoSaveOnReady?: boolean;
-  // Only meaningful paired with autoSaveOnReady -- a failed save otherwise
-  // just shows saveError inside this editor's own (visible) UI, which has
-  // no viewer in the headless case. Optional and inert for every other
-  // caller.
-  onSaveError?: (message: string) => void;
 }) {
   const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -700,22 +648,6 @@ export function AnnotationEditor({
 
       function finish() {
         const basePhoto = findBasePhoto(canvas);
-        // Applied here, after the canvas has ALREADY finished loading via
-        // whichever normal path this asset actually needed -- never as a
-        // reason to alter what got loaded or how. A pending Text style is a
-        // no-op when there's no existing text object to restyle (see this
-        // prop's own comment: never invents a placeholder), and a pending
-        // Adjustments value only makes sense once a real base photo exists,
-        // which it now always does by this point.
-        if (pendingStyleToApply?.adjustments && basePhoto) {
-          applyAdjustments(basePhoto, pendingStyleToApply.adjustments);
-        }
-        if (pendingStyleToApply?.text) {
-          const firstText = canvas.getObjects().find((o): o is fabric.IText => o instanceof fabric.IText);
-          if (firstText) {
-            firstText.set({ ...pendingStyleToApply.text, styles: {} });
-          }
-        }
         canvas.requestRenderAll();
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
@@ -751,29 +683,10 @@ export function AnnotationEditor({
         // is never a stale signed URL to refresh; overwriting it with the
         // ORIGINAL un-rotated `url` would silently discard the rotation on
         // every reopen.
-        let patched = restoreAnnotation;
-        if (!isVideo) {
-          const clone = JSON.parse(JSON.stringify(restoreAnnotation)) as {
-            objects?: Record<string, unknown>[];
-            backgroundImage?: Record<string, unknown>;
-            [k: string]: unknown;
-          };
-          const basePhoto = clone.objects?.find((o) => o.appRole === BASE_PHOTO_ROLE);
-          if (basePhoto && typeof basePhoto.src === "string" && !basePhoto.src.startsWith("data:")) {
-            basePhoto.src = url;
-          }
-          // Legacy shape (pre-migration, see the backgroundImage handling
-          // right below) stored the photo under its own top-level key
-          // instead of in `objects` -- needs the same src refresh.
-          if (
-            clone.backgroundImage &&
-            typeof clone.backgroundImage.src === "string" &&
-            !clone.backgroundImage.src.startsWith("data:")
-          ) {
-            clone.backgroundImage.src = url;
-          }
-          patched = clone;
-        }
+        // Shared with Grid's headless Paste Style engine -- see
+        // annotation-engine.ts's own comment on why only the src field is
+        // touched.
+        const patched = isVideo ? restoreAnnotation : patchRestoredAnnotationSrc(restoreAnnotation, url);
 
         // Reload the exact saved state -- objects, background crop, everything --
         // so annotations remain fully editable across sessions, not just baked pixels.
@@ -1021,14 +934,7 @@ export function AnnotationEditor({
     // canvasNonce forces this effect to rerun (disposing the stale
     // instance via disposePromiseRef, then constructing fresh) against
     // whichever canvas node is actually live.
-  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce, pendingStyleToApply]);
-
-  // autoSavedRef itself can live here (refs don't have a declaration-order
-  // lint concern) -- the EFFECT that reads it is declared further down,
-  // right after handleSave's own definition, since referencing handleSave
-  // before its declaration point is flagged regardless of `function`
-  // hoisting technically making it work at runtime.
-  const autoSavedRef = useRef(false);
+  }, [open, loadUrl, initialAnnotationJson, shouldRestoreAnnotation, canvasNonce]);
 
   // See visualViewportBox's own declaration. `resize` fires when the
   // visible area's SIZE changes (keyboard opening/closing, pinch-zoom);
@@ -2154,16 +2060,6 @@ export function AnnotationEditor({
     commitAdjustments();
   }
 
-  // Sets the same inline saveError this editor's own (visible) UI already
-  // shows, AND -- only when a caller actually passed one -- reports the
-  // failure outward too. onSaveError exists purely for autoSaveOnReady's
-  // headless case, where saveError would otherwise be set on a component
-  // nobody is looking at.
-  function reportSaveError(message: string) {
-    setSaveError(message);
-    onSaveError?.(message);
-  }
-
   async function handleSave() {
     const canvas = fabricRef.current;
     if (!canvas || !attachmentId) return;
@@ -2216,131 +2112,30 @@ export function AnnotationEditor({
       // no dialog left for a save result to mean anything to, so stop
       // rather than snapshot/export a canvas that's no longer live.
       if (fabricRef.current !== canvas) return;
-      const annotationJson = JSON.stringify(canvas.toJSON());
-      // For a targetAspect-locked frame, exportScaleRef.current is a FIXED
-      // TARGET_EXPORT_W/canvasW ratio (see setupCanvas) -- it always produces
-      // exactly TARGET_EXPORT_W regardless of the source's real resolution,
-      // which silently saved every cropped cover/attachment at ~1080px even
-      // when the original was much larger. basePhoto.scaleX is how many
-      // canvas-units currently map to 1 native source pixel for the CURRENT
-      // crop/zoom (see handleApplyCrop: scaleX = frameW / cropW), so its
-      // reciprocal is exactly the multiplier that renders this same frame at
-      // the crop's native resolution -- same idea as the non-cropping
-      // branch's `1 / displayScale` below, just re-read at save time instead
-      // of frozen at load time, since crop/zoom can change after that. Only
-      // ever scales UP from the existing multiplier (never below it), so an
-      // already-small source still exports at exactly what it did before.
-      const basePhoto = findBasePhoto(canvas);
-      const nativeMultiplier =
-        targetAspect && basePhoto && basePhoto.scaleX
-          ? Math.max(exportScaleRef.current, 1 / basePhoto.scaleX)
-          : exportScaleRef.current;
-      // canvas.toBlob() (Fabric's own, not a native <canvas> method -- it
-      // still builds the same full-resolution temp canvas internally, see
-      // toCanvasElement) goes straight to a real Blob via the browser's
-      // native, off-main-thread-friendly HTMLCanvasElement.toBlob(). The
-      // previous toDataURL()+fetch() pattern built a base64 STRING (~33%
-      // larger than the raw bytes) of the full-resolution export, held it
-      // entirely in memory, then had fetch() parse that whole string back
-      // into a second, separate binary buffer to produce the Blob --
-      // meaning peak memory during Save was roughly double what the actual
-      // export needed, exactly during the highest-memory-pressure moment
-      // (a full native-resolution multi-megapixel JPEG). On a memory-
-      // constrained real phone that's a plausible reason Save could stall
-      // or fail outright with no error a modest desktop test would ever
-      // trigger.
-      const blob = await canvas.toBlob({
-        format: "jpeg",
-        quality: 0.92,
-        multiplier: nativeMultiplier,
+      // The actual export+persist tail is shared verbatim with Grid's
+      // headless Paste Style engine -- see annotation-engine.ts's own
+      // comment on why this is "the minimum reusable non-UI logic" rather
+      // than each caller keeping its own copy.
+      const result = await exportAndSaveAnnotation({
+        canvas,
+        exportScale: exportScaleRef.current,
+        projectId,
+        attachmentId,
+        saveAction,
       });
-      if (!blob) {
-        throw new Error("Couldn't render the edited image.");
-      }
-      // Server Actions on this project are capped at 20MB (bodySizeLimit AND
-      // proxyClientMaxBodySize in next.config.ts -- the proxy has its own,
-      // separate buffering limit that silently truncates a larger body
-      // *before* bodySizeLimit ever gets a say, turning an oversized upload
-      // into an opaque multipart parse failure instead of a clean rejection).
-      // Catching it here, before ever sending, turns an edge-case failure
-      // into an immediate, specific, actionable message instead of a vague
-      // one surfacing after a real round-trip.
-      if (blob.size > 19 * 1024 * 1024) {
-        reportSaveError(
-          `This image is too large to save at full quality (${(blob.size / 1024 / 1024).toFixed(1)}MB). Try applying a smaller crop and save again.`,
-        );
-        return;
-      }
-      const formData = new FormData();
-      formData.set("file", new File([blob], "annotated-preview.jpg", { type: "image/jpeg" }));
-      formData.set("annotation_json", annotationJson);
-      // A dropped mobile connection mid-upload (common on cellular, rare on
-      // a desktop test's wifi/wired connection) can leave the underlying
-      // fetch simply never settling -- neither resolving nor rejecting --
-      // which previously meant "Saving…" stayed on screen forever with no
-      // way out and no feedback, indistinguishable from the button having
-      // done nothing at all. 60s is generous enough not to false-trigger on
-      // a genuinely slow-but-working upload of a large native-resolution
-      // export over a weak connection, while still giving up eventually
-      // instead of hanging indefinitely.
-      const result = await Promise.race([
-        saveAction(projectId, attachmentId, formData),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("TIMEOUT")), 60_000),
-        ),
-      ]);
-      if (result.previewUrl) {
+      if ("previewUrl" in result) {
         onSaved(result.previewUrl);
       } else {
         // Previously silent -- a failed save (e.g. a pending migration
         // meaning the target column doesn't exist yet) looked identical to
         // a successful one from the user's side: the dialog just stayed
         // open with no feedback at all.
-        reportSaveError(result.message ?? "Couldn't save changes.");
+        setSaveError(result.error);
       }
-    } catch (error) {
-      // canvas.toDataURL() throws a SecurityError (silently, with no
-      // network request ever sent) if any object on the canvas is a
-      // cross-origin image whose source didn't actually send permissive
-      // CORS headers -- previously uncaught here, so the whole save
-      // silently no-opped: the dialog stayed open looking like nothing was
-      // wrong, but nothing was ever sent to saveAction, and reopening later
-      // showed the pre-edit state because there was never anything new to
-      // load. Surfacing it here doesn't fix a bad source, but at least
-      // makes the failure visible instead of indistinguishable from success.
-      console.error("Failed to save annotation:", error);
-      reportSaveError(
-        error instanceof DOMException && error.name === "SecurityError"
-          ? "Couldn't save -- an image on this canvas failed to load securely. Try re-adding it and save again."
-          : error instanceof Error && error.message === "TIMEOUT"
-            ? "Couldn't save -- the connection timed out. Check your connection and try again."
-            : "Couldn't save changes. Try again.",
-      );
     } finally {
       setSaving(false);
     }
   }
-
-  // Grid's direct "Paste style" mounts this editor with no visible UI at
-  // all -- autoSaveOnReady is how it turns "canvas finished loading AND
-  // applying pendingStyleToApply" (ready flips true right after finish()
-  // runs, see the load effect above) into "now do exactly what clicking
-  // Save Changes does," with zero new persistence logic. autoSavedRef (not
-  // just checking `ready` in the deps) so a StrictMode double-render or any
-  // later, unrelated `ready` flip can't trigger a second save for the same
-  // mount. Declared here, after handleSave, rather than up near the load
-  // effect -- referencing handleSave before its own declaration point is
-  // flagged even though `function` hoisting would make it work at runtime.
-  useEffect(() => {
-    if (!autoSaveOnReady || !ready || autoSavedRef.current) return;
-    autoSavedRef.current = true;
-    void handleSave();
-    // handleSave is intentionally not in the deps array -- it's a plain
-    // function redefined every render (reading fresh closures each time,
-    // same as every other handler in this file), not something this
-    // one-shot effect should re-run for.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSaveOnReady, ready]);
 
   if (!open || internallyClosed) return null;
 
