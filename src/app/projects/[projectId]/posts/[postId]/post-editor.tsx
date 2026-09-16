@@ -205,10 +205,34 @@ export function PostEditor({
   // The ref guards against StrictMode's double-invoke (a second call would
   // just find nothing, since takePendingStylePaste already deleted the
   // entry, but there's no reason to even try twice).
-  const consumedPendingPasteRef = useRef(false);
+  // BUG FOUND AND FIXED: this used to be a plain useRef(false) -- "have I
+  // EVER run" -- not "have I run for THIS post". The @modal intercepted
+  // route that renders PostEditor (src/app/projects/[projectId]/@modal/
+  // (.)posts/[postId]/page.tsx) has no `key={postId}` on it, so navigating
+  // from one post's editor to a DIFFERENT post's (e.g. Grid's Paste Style
+  // handler navigating straight to the destination) does NOT guarantee a
+  // fresh PostEditor mount -- React can and does reconcile it as the same
+  // component instance with updated props if the surrounding tree shape is
+  // unchanged. With the old boolean, once ANY post's pending paste had been
+  // consumed once in a given instance's lifetime, the guard silently
+  // short-circuited for every OTHER post that instance was later reused
+  // for -- takePendingStylePaste(post.id) was never even called, so the
+  // queued entry sat there unconsumed and the editor never auto-opened
+  // with it. Live-confirmed via a direct instance-reuse test: post A's
+  // pending style consumed and applied correctly, then switching (same
+  // instance, no remount) to post B left post B's queue entry untouched
+  // and its editor never auto-opened at all.
+  //
+  // Keying the ref on the post id itself (not a boolean) makes it re-fire
+  // exactly once per DISTINCT post.id, regardless of whether the
+  // component instance was freshly mounted or reused -- correct for a
+  // genuine remount (ref starts null, first real post.id always differs)
+  // and for StrictMode's double-invoke (same post.id both times, second
+  // call is skipped) exactly as before.
+  const consumedPendingPasteForPostIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (consumedPendingPasteRef.current) return;
-    consumedPendingPasteRef.current = true;
+    if (consumedPendingPasteForPostIdRef.current === post.id) return;
+    consumedPendingPasteForPostIdRef.current = post.id;
     const pending = takePendingStylePaste(post.id);
     if (!pending) return;
     const coverAsset = orderedAssets[0];
@@ -226,9 +250,9 @@ export function PostEditor({
       isCover: true,
       pendingStyleToApply: pending,
     });
-    // orderedAssets/post.id intentionally the only deps that matter here --
-    // this is a one-shot mount action (guarded above), not something that
-    // should re-run just because the asset list is later reordered.
+    // orderedAssets intentionally not a dep -- this must run once per
+    // post.id (guarded above by the ref), not re-run just because the
+    // asset list is later reordered.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [post.id]);
 
