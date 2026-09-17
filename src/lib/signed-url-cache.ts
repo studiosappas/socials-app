@@ -22,9 +22,29 @@ const CACHE_REVALIDATE_SECONDS = 1800;
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
-async function signOne(supabase: SupabaseServerClient, bucket: string, path: string): Promise<string | null> {
-  const { data } = await supabase.storage.from(bucket).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
-  return data?.signedUrl ?? null;
+// THROWS on failure -- never returns null for a failed sign. This matters
+// specifically because of how getCachedSignedUrl below wraps this in
+// unstable_cache: Next only ever persists a cache entry for a call that
+// RESOLVES (confirmed against unstable_cache's own source -- the "generate
+// a new entry" path awaits the callback and only calls cacheNewResult()
+// on the value it resolved with; a rejection propagates straight out with
+// nothing written to the cache). A version of this that swallowed the
+// Storage error and returned `null` on failure was silently caching that
+// null for CACHE_REVALIDATE_SECONDS (30 minutes) -- indistinguishable
+// from a real "no URL for this path" result, and shared by EVERY user who
+// requested the same (bucket, path) in that window, not just whoever hit
+// the original failure. A freshly-uploaded object can transiently fail to
+// sign (Storage eventual-consistency lag right after upload) -- exactly
+// the shape of the real bug this fixed: another project member opening a
+// teammate's just-uploaded Carousel/Library asset could permanently see a
+// blank slot for up to 30 minutes, with no retry, because one transient
+// failure got cached as if it were a real negative result.
+async function signOne(supabase: SupabaseServerClient, bucket: string, path: string): Promise<string> {
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
+  if (error || !data?.signedUrl) {
+    throw new Error(`Failed to sign ${bucket}/${path}: ${error?.message ?? "no signed URL returned"}`);
+  }
+  return data.signedUrl;
 }
 
 // Cached per (bucket, path) -- safe to share across requests/users: a
@@ -41,7 +61,17 @@ export async function getCachedSignedUrl(
   const cached = unstable_cache(() => signOne(supabase, bucket, path), ["signed-url", bucket, path], {
     revalidate: CACHE_REVALIDATE_SECONDS,
   });
-  return cached();
+  try {
+    return await cached();
+  } catch {
+    // Caught here, OUTSIDE the unstable_cache-wrapped function -- so this
+    // null is this one request's own return value, never itself written
+    // to the cache. The next request for this exact path (this user's own
+    // retry, or another member opening the same asset moments later) gets
+    // a completely fresh signOne() attempt instead of replaying this
+    // failure.
+    return null;
+  }
 }
 
 // Batch helper matching the shape callers already use around
