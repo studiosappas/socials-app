@@ -120,6 +120,35 @@ export function formatScheduleDate(value: string, format: WorkspaceSettings["dat
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// Defensive normalization for whatever `posts.scheduled_date` actually
+// comes back as, BEFORE it ever reaches a native <input type="date">'s
+// value prop or formatScheduleDate above. A native date input silently
+// rejects (renders blank) any value that isn't exactly "YYYY-MM-DD" --
+// and formatScheduleDate's own regex falls back to showing a non-matching
+// value completely raw/unformatted, which is exactly what a genuinely
+// malformed "Schedule date" field looks like. This extracts just the
+// leading YYYY-MM-DD from whatever was received (tolerating a value that
+// arrived with extra trailing content, e.g. a full timestamp), never using
+// `new Date(...)` (which reparses/reformats in a way that can shift the
+// calendar day depending on the runtime's local timezone offset from
+// UTC -- see this file's own comment on formatScheduleDate for the same
+// reasoning). Plain string slicing only.
+export function normalizeScheduleDate(value: string | null | undefined): string {
+  if (!value) return "";
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
+  return match ? match[1] : "";
+}
+
+// Same defensive reasoning for `posts.scheduled_time` -- a native
+// <input type="time"> wants "HH:MM" (or "HH:MM:SS"); this keeps just that
+// leading portion rather than passing through anything extra (a stray
+// timezone suffix, fractional seconds) unnormalized.
+export function normalizeScheduleTime(value: string | null | undefined): string {
+  if (!value) return "";
+  const match = /^(\d{2}:\d{2}(:\d{2})?)/.exec(value);
+  return match ? match[1] : "";
+}
+
 export const LANDING_PAGE_OPTIONS: { value: WorkspaceSettings["default_landing_page"]; label: string }[] = [
   { value: "projects", label: "Projects" },
   { value: "calendar", label: "Calendar" },
