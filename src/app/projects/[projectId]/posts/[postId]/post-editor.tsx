@@ -48,7 +48,7 @@ import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { CroppedCoverImage, GridCropOverlay } from "../../grid/grid-crop-overlay";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
-import type { WorkspaceSettings } from "@/lib/account-settings";
+import { normalizeScheduleDate, normalizeScheduleTime, type WorkspaceSettings } from "@/lib/account-settings";
 import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 import { canSubmitClientReview } from "@/lib/role-permissions";
 import { submitClientPostReview } from "@/lib/actions/posts";
@@ -1298,8 +1298,8 @@ function PostMainForm({
   const [notes, setNotes] = useState(post.notes);
   const [status, setStatus] = useState<PostStatus>(post.status);
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>(post.review_status);
-  const [scheduledDate, setScheduledDate] = useState(post.scheduled_date ?? "");
-  const [scheduledTime, setScheduledTime] = useState(post.scheduled_time ?? "");
+  const [scheduledDate, setScheduledDate] = useState(normalizeScheduleDate(post.scheduled_date));
+  const [scheduledTime, setScheduledTime] = useState(normalizeScheduleTime(post.scheduled_time));
   // Client's own optimistic view of review_status -- deliberately separate
   // state from `reviewStatus` above (which is what the owner/admin/editor
   // form save submits), since a client's review goes through a completely
@@ -1312,8 +1312,8 @@ function PostMainForm({
     setNotes(post.notes);
     setStatus(post.status);
     setReviewStatus(post.review_status);
-    setScheduledDate(post.scheduled_date ?? "");
-    setScheduledTime(post.scheduled_time ?? "");
+    setScheduledDate(normalizeScheduleDate(post.scheduled_date));
+    setScheduledTime(normalizeScheduleTime(post.scheduled_time));
     setClientReviewStatus(post.review_status);
   }
 
@@ -1381,8 +1381,8 @@ function PostMainForm({
         setNotes(post.notes);
         setStatus(post.status);
         setReviewStatus(post.review_status);
-        setScheduledDate(post.scheduled_date ?? "");
-        setScheduledTime(post.scheduled_time ?? "");
+        setScheduledDate(normalizeScheduleDate(post.scheduled_date));
+        setScheduledTime(normalizeScheduleTime(post.scheduled_time));
       } else {
         setSaved(true);
         setTimeout(() => setSaved(false), 1800);
