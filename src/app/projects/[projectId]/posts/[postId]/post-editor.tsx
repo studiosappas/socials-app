@@ -1289,11 +1289,25 @@ function PostMainForm({
     setPostType(post.post_type);
   }
 
-  // Same pattern, one block covering the rest of the form's fields since
-  // they all reset together on the same event (a fresh `post` prop -- today
-  // that only happens via some other action's revalidation of this route;
-  // this form's own save no longer triggers one, see updatePost).
-  const [prevPost, setPrevPost] = useState(post);
+  // Same pattern, one block covering the rest of the form's fields -- but
+  // keyed on post.id changing, NOT on `post !== prevPost` (object identity).
+  // REAL, CONFIRMED BUG this fixed: a client-invoked Server Action (this
+  // form's own Save included, verified live) causes Next to re-deliver a
+  // fresh RSC payload for the currently-mounted route, which re-executes
+  // this page's Server Component and hands PostEditor a BRAND NEW `post`
+  // object -- even when nothing this action doesn't itself own actually
+  // changed. The previous `post !== prevPost` check treated that identity
+  // change alone as "the server has new data, reset every field to it,"
+  // which silently wiped Schedule date/time (and caption/notes/status)
+  // back to their pre-edit values immediately after every single Save,
+  // even a fully successful one -- the exact "I still don't have a working
+  // way to schedule a post" symptom: the fields visibly went blank right
+  // after clicking Save. Scoping the reset to an actual DIFFERENT post
+  // (post.id change -- this component instance getting reused for another
+  // post entirely, a real case React can do on a soft navigation) instead
+  // means an unrelated re-render of the SAME post can never clobber local
+  // edits or a value the user just successfully saved.
+  const [prevPostId, setPrevPostId] = useState(post.id);
   const [caption, setCaption] = useState(post.caption);
   const [notes, setNotes] = useState(post.notes);
   const [status, setStatus] = useState<PostStatus>(post.status);
@@ -1306,8 +1320,8 @@ function PostMainForm({
   // different, immediate-submit action, not the batched form save.
   const [clientReviewStatus, setClientReviewStatus] = useState<ReviewStatus>(post.review_status);
   const [clientReviewSaving, setClientReviewSaving] = useState(false);
-  if (post !== prevPost) {
-    setPrevPost(post);
+  if (post.id !== prevPostId) {
+    setPrevPostId(post.id);
     setCaption(post.caption);
     setNotes(post.notes);
     setStatus(post.status);
