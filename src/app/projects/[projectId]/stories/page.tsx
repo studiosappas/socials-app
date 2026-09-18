@@ -14,16 +14,65 @@ export default async function StoriesPage({
   const { projectId } = await params;
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Wave 1 -- auth.getUser(), the stories list, content_folders, and share
+  // links only need projectId (or nothing), not each other's result, so
+  // they go out together instead of one after another. This used to be a
+  // chain of ~6 sequential `await`s (membership, then stories, then
+  // folder_id-per-story, then content_folders, then story_frames, then
+  // share links), the same waterfall shape Grid's page.tsx had -- see that
+  // file's own comment for the RLS/access-check trade-off this mirrors.
+  const [
+    {
+      data: { user },
+    },
+    { data: stories },
+    { data: folders },
+    shareData,
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase
+      .from("stories")
+      .select("id, name, scheduled_date, notes, position, status, created_at")
+      .eq("project_id", projectId)
+      .order("position"),
+    supabase.from("content_folders").select("id, name, created_at").eq("project_id", projectId).order("created_at"),
+    getShareLinksData(supabase, projectId),
+  ]);
 
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role, custom_permissions")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
+  const storyIds = (stories ?? []).map((s) => s.id);
+
+  // Wave 2 -- membership needs user.id, folderIdRows/frames need storyIds,
+  // all just resolved above; none of the three need each other.
+  const [
+    { data: membership },
+    // Isolated from the stories select above -- folder_id/content_folders
+    // are new, possibly-not-yet-migrated additions. A .select("...folder_id")
+    // that fails because the column doesn't exist yet would wipe out the
+    // *entire* stories list (only `data` is read, and it comes back null on
+    // error), not just the folder grouping -- same reasoning as the
+    // archived-check isolation in lib/data/stories.ts. If either fetch
+    // fails, everything just renders as ungrouped/no folders instead of an
+    // empty page.
+    { data: folderIdRows },
+    { data: frames },
+  ] = await Promise.all([
+    supabase
+      .from("project_members")
+      .select("role, custom_permissions")
+      .eq("project_id", projectId)
+      .eq("user_id", user!.id)
+      .single(),
+    storyIds.length
+      ? supabase.from("stories").select("id, folder_id").in("id", storyIds)
+      : Promise.resolve({ data: [] }),
+    storyIds.length
+      ? supabase
+          .from("story_frames")
+          .select("id, story_id, position, media_assets(storage_path, media_type, poster_storage_path, thumbnail_storage_path)")
+          .in("story_id", storyIds)
+          .order("position")
+      : Promise.resolve({ data: [] }),
+  ]);
 
   if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "stories")) {
     return <AccessRestricted />;
@@ -33,39 +82,7 @@ export default async function StoriesPage({
   // grid/page.tsx's identical comment.
   const canManage = canEditContent(membership.role);
 
-  const { data: stories } = await supabase
-    .from("stories")
-    .select("id, name, scheduled_date, notes, position, status, created_at")
-    .eq("project_id", projectId)
-    .order("position");
-
-  const storyIds = (stories ?? []).map((s) => s.id);
-
-  // Isolated from the select above -- folder_id/content_folders are new,
-  // possibly-not-yet-migrated additions. A .select("...folder_id") that fails
-  // because the column doesn't exist yet would wipe out the *entire* stories
-  // list (only `data` is read, and it comes back null on error), not just
-  // the folder grouping -- same reasoning as the archived-check isolation
-  // in lib/data/stories.ts. If either fetch fails, everything just renders
-  // as ungrouped/no folders instead of an empty page.
-  const { data: folderIdRows } = storyIds.length
-    ? await supabase.from("stories").select("id, folder_id").in("id", storyIds)
-    : { data: [] };
   const folderIdByStory = new Map((folderIdRows ?? []).map((r) => [r.id, r.folder_id]));
-
-  const { data: folders } = await supabase
-    .from("content_folders")
-    .select("id, name, created_at")
-    .eq("project_id", projectId)
-    .order("created_at");
-
-  const { data: frames } = storyIds.length
-    ? await supabase
-        .from("story_frames")
-        .select("id, story_id, position, media_assets(storage_path, media_type, poster_storage_path, thumbnail_storage_path)")
-        .in("story_id", storyIds)
-        .order("position")
-    : { data: [] };
 
   type FrameMedia = {
     storage_path: string;
@@ -159,8 +176,6 @@ export default async function StoriesPage({
     name: f.name,
     coverUrl: folderCoverByFolder.get(f.id) ?? null,
   }));
-
-  const shareData = await getShareLinksData(supabase, projectId);
 
   return (
     <StoriesBoard

@@ -13,9 +13,12 @@ export default async function TodoPage() {
   const today = format(new Date(), "yyyy-MM-dd");
   const tomorrow = format(addDays(new Date(), 1), "yyyy-MM-dd");
 
-  const { tasks, projectsById, membersByProject } = await getTasksForUser(supabase, user!.id);
-
-  const { data: profile } = await supabase.from("profiles").select("preferences").eq("id", user!.id).single();
+  // Independent of each other -- both only need user.id, resolved above --
+  // so run them at once instead of one after another.
+  const [{ tasks, projectsById, membersByProject }, { data: profile }] = await Promise.all([
+    getTasksForUser(supabase, user!.id),
+    supabase.from("profiles").select("preferences").eq("id", user!.id).single(),
+  ]);
   const { interface: interfacePrefs } = mergePreferences(profile?.preferences);
 
   // Maps aren't serializable across the server/client component boundary --

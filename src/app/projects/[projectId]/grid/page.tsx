@@ -14,16 +14,120 @@ export default async function GridPage({
   const { projectId } = await params;
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Wave 1 -- everything below needs only projectId (or nothing at all), so
+  // none of it has to wait on any other query in this wave. This used to be
+  // ~10 sequential `await`s in a row (membership, then project, then
+  // socialLinks, then profilePhotoUrl, then grid rows, then media assets,
+  // then folders, ...) -- each one a real round trip to Supabase paid in
+  // series instead of at once, the same waterfall shape Overview's and
+  // Brief's page.tsx already avoid with their own Promise.all. Matches
+  // those two files' same trade-off of also fetching membership-gated data
+  // before the access check below, rather than after: RLS already scopes
+  // every one of these queries to what the requesting user can see, so an
+  // unauthorized visitor gets back empty results here, not someone else's
+  // data -- the only cost is a few wasted (but parallel, so still cheap)
+  // queries on the rare access-denied path.
+  const [
+    {
+      data: { user },
+    },
+    { data: project },
+    // Isolated from the project select above -- instagram_url/tiktok_url
+    // are new columns that may not exist yet on a not-yet-migrated
+    // database, and PostgREST fails the whole select if any referenced
+    // column is missing.
+    { data: socialLinks },
+    gridRowsWithPaths,
+    // Excludes 'pdf' -- Grid's Media Library is a "pick a cover for this
+    // post/carousel slot" picker, and a PDF was never a sensible Grid
+    // cover. PDFs still exist in this same project-wide media_assets table
+    // (via the Content page's own upload), just never surfaced here --
+    // Grid's own rendering/types stay exactly "image" | "video" throughout,
+    // unchanged.
+    { data: allMediaAssets },
+    // Isolated the same way as socialLinks above -- folder_id/media_folders
+    // are new and may not exist yet on a not-yet-migrated database, and
+    // PostgREST fails the whole select if any referenced column/table is
+    // missing. A failed lookup here just means no folders show yet, not a
+    // broken Grid page.
+    { data: mediaFolderRows },
+    shareData,
+  ] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase
+      .from("projects")
+      .select(
+        "name, brand_notes, content_pillars, ig_username, ig_display_name, ig_bio, ig_website_link, industry, platform, posts_per_week, stories_per_week, reels_per_week, newsletter_per_week, profile_photo_path",
+      )
+      .eq("id", projectId)
+      .single(),
+    supabase.from("projects").select("instagram_url, tiktok_url").eq("id", projectId).maybeSingle(),
+    getGridRowsWithCoverPaths(supabase, projectId),
+    supabase
+      .from("media_assets")
+      .select("id, storage_path, media_type, poster_storage_path, created_at")
+      .eq("project_id", projectId)
+      .neq("media_type", "pdf")
+      .order("created_at", { ascending: false }),
+    supabase.from("media_folders").select("id, name").eq("project_id", projectId).order("created_at", { ascending: true }),
+    getShareLinksData(supabase, projectId),
+  ]);
 
-  const { data: membership } = await supabase
-    .from("project_members")
-    .select("role, custom_permissions")
-    .eq("project_id", projectId)
-    .eq("user_id", user!.id)
-    .single();
+  const mediaFolders: MediaFolder[] = (mediaFolderRows ?? []).map((f) => ({ id: f.id, name: f.name }));
+  const assetIds = (allMediaAssets ?? []).map((a) => a.id);
+  // Which assets already occupy a slot on the Grid, for the always-visible
+  // "already on the Grid" badge on the media library -- scoped to posts
+  // that actually have a grid_slots row (not just any post in the
+  // project), since a post can exist without being placed on the grid yet.
+  const gridPostIds = Array.from(
+    new Set(
+      gridRowsWithPaths.flatMap((row) => row.slots.map((slot) => slot.postId).filter((id): id is string => Boolean(id))),
+    ),
+  );
+
+  // Wave 2 -- each of these needs one specific result from wave 1
+  // (user.id, project.profile_photo_path, assetIds, or gridPostIds), but
+  // none of them need each other's result, so they still all go out at
+  // once rather than one after another.
+  const [
+    { data: membership },
+    profilePhotoUrl,
+    { data: folderAssignmentRows },
+    // Isolated the same way as folder_id above -- archived is an even newer
+    // column, and a plain .eq("archived", false) filter on the MAIN select
+    // above would fail (and silently return nothing, since only `data` is
+    // read) the instant it doesn't exist yet on a not-yet-migrated
+    // database, wiping out the entire library rather than just not
+    // filtering archived assets out yet. A failed/empty lookup here means
+    // nothing gets excluded, not that everything disappears.
+    { data: archivedRows },
+    // Isolated the same way -- thumbnail_storage_path is a new column that
+    // may not exist yet on a not-yet-migrated database. A missing/failed
+    // lookup here just means the library sidebar shows full originals
+    // until the migration runs, never a broken page.
+    { data: thumbnailRows },
+    { data: gridAssetRows },
+  ] = await Promise.all([
+    supabase
+      .from("project_members")
+      .select("role, custom_permissions")
+      .eq("project_id", projectId)
+      .eq("user_id", user!.id)
+      .single(),
+    getCachedSignedUrl(supabase, "project-media", project?.profile_photo_path),
+    assetIds.length
+      ? supabase.from("media_assets").select("id, folder_id").in("id", assetIds)
+      : Promise.resolve({ data: [] }),
+    assetIds.length
+      ? supabase.from("media_assets").select("id, archived").in("id", assetIds)
+      : Promise.resolve({ data: [] }),
+    assetIds.length
+      ? supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", assetIds)
+      : Promise.resolve({ data: [] }),
+    gridPostIds.length
+      ? supabase.from("post_assets").select("media_asset_id").in("post_id", gridPostIds)
+      : Promise.resolve({ data: [] }),
+  ]);
 
   if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "grid")) {
     return <AccessRestricted />;
@@ -34,93 +138,15 @@ export default async function GridPage({
   // supabase/fix_project_role_permission_presets.sql's Section 2.
   const canManage = canEditContent(membership.role);
 
-  const { data: project } = await supabase
-    .from("projects")
-    .select(
-      "name, brand_notes, content_pillars, ig_username, ig_display_name, ig_bio, ig_website_link, industry, platform, posts_per_week, stories_per_week, reels_per_week, newsletter_per_week, profile_photo_path",
-    )
-    .eq("id", projectId)
-    .single();
-
-  // Isolated from the select above -- instagram_url/tiktok_url are new
-  // columns that may not exist yet on a not-yet-migrated database, and
-  // PostgREST fails the whole select if any referenced column is missing.
-  const { data: socialLinks } = await supabase
-    .from("projects")
-    .select("instagram_url, tiktok_url")
-    .eq("id", projectId)
-    .maybeSingle();
-
-  const profilePhotoUrl = await getCachedSignedUrl(supabase, "project-media", project?.profile_photo_path);
-
-  const gridRowsWithPaths = await getGridRowsWithCoverPaths(supabase, projectId);
-
-  // Excludes 'pdf' -- Grid's Media Library is a "pick a cover for this
-  // post/carousel slot" picker, and a PDF was never a sensible Grid cover.
-  // PDFs still exist in this same project-wide media_assets table (via the
-  // Content page's own upload), just never surfaced here -- Grid's own
-  // rendering/types stay exactly "image" | "video" throughout, unchanged.
-  const { data: allMediaAssets } = await supabase
-    .from("media_assets")
-    .select("id, storage_path, media_type, poster_storage_path, created_at")
-    .eq("project_id", projectId)
-    .neq("media_type", "pdf")
-    .order("created_at", { ascending: false });
-
-  // Isolated from the select above, same reasoning as socialLinks below --
-  // folder_id/media_folders are new and may not exist yet on a
-  // not-yet-migrated database, and PostgREST fails the whole select if any
-  // referenced column/table is missing. A failed lookup here just means no
-  // folders show yet, not a broken Grid page.
-  const { data: mediaFolderRows } = await supabase
-    .from("media_folders")
-    .select("id, name")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: true });
-  const mediaFolders: MediaFolder[] = (mediaFolderRows ?? []).map((f) => ({ id: f.id, name: f.name }));
-
-  const assetIds = (allMediaAssets ?? []).map((a) => a.id);
-  const { data: folderAssignmentRows } = assetIds.length
-    ? await supabase.from("media_assets").select("id, folder_id").in("id", assetIds)
-    : { data: [] };
   const folderIdByAssetId = new Map((folderAssignmentRows ?? []).map((r) => [r.id, r.folder_id as string | null]));
 
-  // Isolated the same way as folder_id above -- archived is an even newer
-  // column, and a plain .eq("archived", false) filter on the MAIN select
-  // above would fail (and silently return nothing, since only `data` is
-  // read) the instant it doesn't exist yet on a not-yet-migrated database,
-  // wiping out the entire library rather than just not filtering archived
-  // assets out yet. A failed/empty lookup here means nothing gets excluded,
-  // not that everything disappears.
-  const { data: archivedRows } = assetIds.length
-    ? await supabase.from("media_assets").select("id, archived").in("id", assetIds)
-    : { data: [] };
   const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
 
-  // Isolated the same way -- thumbnail_storage_path is a new column that
-  // may not exist yet on a not-yet-migrated database. A missing/failed
-  // lookup here just means the library sidebar shows full originals until
-  // the migration runs, never a broken page.
-  const { data: thumbnailRows } = assetIds.length
-    ? await supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", assetIds)
-    : { data: [] };
   const thumbnailPathByAssetId = new Map(
     (thumbnailRows ?? []).map((r) => [r.id, (r as { thumbnail_storage_path: string | null }).thumbnail_storage_path]),
   );
 
-  // Which assets already occupy a slot on the Grid, for the always-visible
-  // "already on the Grid" badge on the media library -- scoped to posts
-  // that actually have a grid_slots row (not just any post in the
-  // project), since a post can exist without being placed on the grid yet.
-  const gridPostIds = Array.from(
-    new Set(
-      gridRowsWithPaths.flatMap((row) => row.slots.map((slot) => slot.postId).filter((id): id is string => Boolean(id))),
-    ),
-  );
-  const { data: gridAssetRows } = gridPostIds.length
-    ? await supabase.from("post_assets").select("media_asset_id").in("post_id", gridPostIds)
-    : { data: [] };
   const usedInGridIds = new Set((gridAssetRows ?? []).map((r) => r.media_asset_id));
 
   const allPaths = new Set<string>();
@@ -194,8 +220,6 @@ export default async function GridPage({
     folderId: folderIdByAssetId.get(asset.id) ?? null,
     };
   });
-
-  const shareData = await getShareLinksData(supabase, projectId);
 
   return (
     <GridBoard

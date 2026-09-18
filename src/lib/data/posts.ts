@@ -205,6 +205,28 @@ export async function getPostCoreData(
   };
 }
 
+// This list still scales with project media count even with the query
+// batching/thumbnail-preference below (each asset needs its own signed
+// original -- see originalUrl's own comment further down -- plus a signed
+// thumbnail, so path count is ~2x asset count). Measured locally against
+// this app's real Supabase project (see signed-url-cache.ts's sign
+// endpoint): 300 unique paths through getCachedSignedUrls took 3.8s-7.3s
+// end to end even fully parallelized via Promise.all, because Storage's
+// sign endpoint has real per-call latency (~150ms) and concurrency limits
+// that stop scaling linearly well before 300 concurrent calls. A project
+// whose media library has grown to a few hundred assets was therefore
+// paying several seconds to over ten, signing URLs for rows far off the
+// bottom of this popup's own scrollable list before the first pixel of it
+// could show anything. Capped to the most recent MEDIA_LIBRARY_LIMIT
+// assets (already the sort order below) -- enough to fill this popup's
+// scrollable grid many times over for ordinary use, small enough to keep
+// the signing fan-out in the sub-second-to-low-seconds range. Not true
+// pagination/"load more" -- nothing in this codebase's media pickers
+// (Grid's own sidebar library included) has that today, so adding it here
+// would be a bigger change than this fix warrants; a natural follow-up if
+// someone genuinely needs to reach further back than this.
+const MEDIA_LIBRARY_LIMIT = 100;
+
 // The project's whole media library, for the "Add from library" section and
 // the Replace-asset popover -- deliberately split out from getPostCoreData
 // above. This is the one query in the old getPostPageData that scaled with
@@ -224,13 +246,17 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
     // (grid/page.tsx): this is a "pick an asset for this post/carousel
     // slot" picker, and a PDF was never a sensible post asset. Still exists
     // in this same project-wide table via the Content page, just never
-    // offered here.
+    // offered here. Capped to MEDIA_LIBRARY_LIMIT -- see that constant's
+    // own comment for why: this was previously unbounded and its own
+    // subsequent signed-URL fan-out was the dominant cost of opening this
+    // popup on any project with a sizeable media library.
     supabase
       .from("media_assets")
       .select("id, storage_path, media_type")
       .eq("project_id", projectId)
       .neq("media_type", "pdf")
-      .order("created_at", { ascending: false }),
+      .order("created_at", { ascending: false })
+      .limit(MEDIA_LIBRARY_LIMIT),
     // Same "already used in a carousel" lookup as Grid's own media library
     // (grid/page.tsx) -- kept as two plain queries rather than a joined
     // filter, matching this file's existing isolated-lookup style.
