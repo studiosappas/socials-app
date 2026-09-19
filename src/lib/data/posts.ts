@@ -205,40 +205,38 @@ export async function getPostCoreData(
   };
 }
 
-// This list still scales with project media count even with the query
-// batching/thumbnail-preference below (each asset needs its own signed
-// original -- see originalUrl's own comment further down -- plus a signed
-// thumbnail, so path count is ~2x asset count). Measured locally against
-// this app's real Supabase project (see signed-url-cache.ts's sign
-// endpoint): 300 unique paths through getCachedSignedUrls took 3.8s-7.3s
-// end to end even fully parallelized via Promise.all, because Storage's
-// sign endpoint has real per-call latency (~150ms) and concurrency limits
-// that stop scaling linearly well before 300 concurrent calls. A project
-// whose media library has grown to a few hundred assets was therefore
-// paying several seconds to over ten, signing URLs for rows far off the
-// bottom of this popup's own scrollable list before the first pixel of it
-// could show anything. Capped to the most recent MEDIA_LIBRARY_LIMIT
-// assets (already the sort order below) -- enough to fill this popup's
-// scrollable grid many times over for ordinary use, small enough to keep
-// the signing fan-out in the sub-second-to-low-seconds range. Not true
-// pagination/"load more" -- nothing in this codebase's media pickers
-// (Grid's own sidebar library included) has that today, so adding it here
-// would be a bigger change than this fix warrants; a natural follow-up if
-// someone genuinely needs to reach further back than this.
-const MEDIA_LIBRARY_LIMIT = 100;
+// A real, honest PAGE, not a raised-but-still-fixed cap: an earlier
+// version of this function capped the query at 100 assets total with no
+// way to reach anything past that, which still isn't correct for a
+// project whose library has grown past it, AND still bulk-signed all 100
+// (~200 paths, original+thumbnail each) before the popup could show
+// anything -- confirmed too slow in real manual QA even after that cap.
+// This page size (24) is sized to comfortably fill this popup's own
+// visible grid (sm:grid-cols-6 -- 4 rows) before any scrolling, so the
+// FIRST page is both fast to sign (~48 paths) and already a genuinely
+// useful amount of media, with getPostMediaLibraryPage below callable
+// again for every subsequent page so nothing past #24 is ever
+// unreachable.
+export const MEDIA_LIBRARY_PAGE_SIZE = 24;
+// getPostMediaLibrary (unpaginated callers below) keeps its own prior
+// larger size -- this only governs the PRIMARY "Add from library"/Replace
+// flow in post-editor.tsx, which now pages via loadMorePostMediaLibrary
+// (lib/actions/posts.ts) instead of needing everything up front.
+const MEDIA_LIBRARY_LEGACY_LIMIT = 100;
 
-// The project's whole media library, for the "Add from library" section and
-// the Replace-asset popover -- deliberately split out from getPostCoreData
-// above. This is the one query in the old getPostPageData that scaled with
-// the ENTIRE project's media count (every asset gets an archived check, a
-// preview/poster lookup, and a signed URL), not with this one post's asset
-// count -- on a project with a large library, it was the dominant cost of
-// opening the editor, and none of it is needed to render the primary
-// editing surface. Callers pass this as an unawaited promise so the
-// primary editor can render immediately; only the two actual consumers
-// (the inline "Add from library" grid, and Replace-asset, both in
-// post-editor.tsx) suspend on it, each in its own small boundary.
-export async function getPostMediaLibrary(projectId: string): Promise<MediaLibraryItem[]> {
+// One project media page, newest first. Shared by getPostMediaLibrary
+// below (first page, for callers with no pagination UI of their own) and
+// loadMorePostMediaLibrary (lib/actions/posts.ts, the client-callable
+// Server Action "Add from library"'s own Load More button invokes for
+// every page after the first). `hasMore` is a simple "did this page come
+// back full" heuristic (no separate COUNT query) -- correct as long as
+// `limit` matches what the caller actually asked for, which both callers
+// here guarantee.
+export async function getPostMediaLibraryPage(
+  projectId: string,
+  offset: number,
+  limit: number,
+): Promise<{ items: MediaLibraryItem[]; hasMore: boolean }> {
   const supabase = await createClient();
 
   const [{ data: allMediaAssets }, { data: carouselPosts }] = await Promise.all([
@@ -246,17 +244,15 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
     // (grid/page.tsx): this is a "pick an asset for this post/carousel
     // slot" picker, and a PDF was never a sensible post asset. Still exists
     // in this same project-wide table via the Content page, just never
-    // offered here. Capped to MEDIA_LIBRARY_LIMIT -- see that constant's
-    // own comment for why: this was previously unbounded and its own
-    // subsequent signed-URL fan-out was the dominant cost of opening this
-    // popup on any project with a sizeable media library.
+    // offered here. .range() is Postgres/PostgREST's own OFFSET+LIMIT --
+    // an inclusive [start, end] pair, hence `offset + limit - 1`.
     supabase
       .from("media_assets")
       .select("id, storage_path, media_type")
       .eq("project_id", projectId)
       .neq("media_type", "pdf")
       .order("created_at", { ascending: false })
-      .limit(MEDIA_LIBRARY_LIMIT),
+      .range(offset, offset + limit - 1),
     // Same "already used in a carousel" lookup as Grid's own media library
     // (grid/page.tsx) -- kept as two plain queries rather than a joined
     // filter, matching this file's existing isolated-lookup style.
@@ -330,7 +326,7 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
 
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
 
-  return (mediaAssets ?? []).map((asset) => {
+  const items: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => {
     const preview = previewPathByMediaId.get(asset.id);
     const thumbnail = thumbnailPathByMediaId.get(asset.id);
     const originalUrl = urlByPath.get(asset.storage_path) ?? null;
@@ -354,4 +350,27 @@ export async function getPostMediaLibrary(projectId: string): Promise<MediaLibra
       usedInCarousel: usedInCarouselIds.has(asset.id),
     };
   });
+
+  return {
+    items,
+    // Based on the RAW page (before the archived filter above) -- whether
+    // THIS page was full, not how many of its rows survived filtering, is
+    // what actually tells us whether a next .range() call could return
+    // more rows at all.
+    hasMore: (allMediaAssets ?? []).length === limit,
+  };
+}
+
+// The project's whole media library, for callers with no pagination UI of
+// their own (Tasks' LinkedContentModal via fetchPostForModal) --
+// deliberately split out from getPostCoreData above, same reasoning as
+// getPostMediaLibraryPage: this is the one query that scales with the
+// ENTIRE project's media count, not with this one post's asset count.
+// Post Editor's own primary "Add from library"/Replace flow no longer
+// calls this -- see loadMorePostMediaLibrary (lib/actions/posts.ts) and
+// its own first-page call in page.tsx, which page through
+// getPostMediaLibraryPage directly instead of needing everything at once.
+export async function getPostMediaLibrary(projectId: string): Promise<MediaLibraryItem[]> {
+  const { items } = await getPostMediaLibraryPage(projectId, 0, MEDIA_LIBRARY_LEGACY_LIMIT);
+  return items;
 }

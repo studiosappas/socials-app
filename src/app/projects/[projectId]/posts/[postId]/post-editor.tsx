@@ -19,6 +19,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   addPostAsset,
   addPostLink,
+  loadMorePostMediaLibrary,
   removePostAsset,
   removePostLink,
   reorderPostAssets,
@@ -559,6 +560,7 @@ export function PostEditor({
       {canManage && (
         <Suspense fallback={null}>
           <AddFromLibrarySection
+            projectId={projectId}
             mediaLibraryPromise={mediaLibraryPromise}
             usedMediaIds={usedMediaIds}
             hideBackLink={hideBackLink}
@@ -615,7 +617,17 @@ export function PostEditor({
 // changes what a click here means (see onAdd/handleLibraryItemClick in
 // PostEditor) and adds a minimal visual cue -- everything else about how
 // this section looks and behaves is exactly what it always was.
+// Must match lib/data/posts.ts's own MEDIA_LIBRARY_PAGE_SIZE -- can't
+// import that constant directly (it lives in a server-only data module,
+// not a "use server" actions file, so importing it here would pull
+// server-only code into the client bundle). Only used as a "did the last
+// page come back full" heuristic for whether to show Load More at all;
+// being off by one page here would just show/hide that button a page
+// late, never lose or duplicate any actual media.
+const LIBRARY_PAGE_SIZE = 24;
+
 function AddFromLibrarySection({
+  projectId,
   mediaLibraryPromise,
   usedMediaIds,
   hideBackLink,
@@ -623,6 +635,7 @@ function AddFromLibrarySection({
   replaceActive,
   sectionRef,
 }: {
+  projectId: string;
   mediaLibraryPromise: Promise<MediaLibraryItem[]>;
   usedMediaIds: Set<string>;
   hideBackLink: boolean;
@@ -630,8 +643,28 @@ function AddFromLibrarySection({
   replaceActive: boolean;
   sectionRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const mediaLibrary = use(mediaLibraryPromise);
+  const initialMediaLibrary = use(mediaLibraryPromise);
+  // Progressive pages beyond the first -- appended locally as Load More
+  // resolves each one, never re-fetching pages already loaded. Seeded
+  // from the Suspense-resolved first page; a genuinely different
+  // mediaLibraryPromise (a fresh post/project) remounts this whole
+  // component via Suspense, so this never goes stale against a prop
+  // change the way a plain prop-derived value could.
+  const [mediaLibrary, setMediaLibrary] = useState(initialMediaLibrary);
+  const [hasMoreMedia, setHasMoreMedia] = useState(initialMediaLibrary.length === LIBRARY_PAGE_SIZE);
+  const [loadingMore, setLoadingMore] = useState(false);
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
+
+  async function handleLoadMore() {
+    setLoadingMore(true);
+    try {
+      const result = await loadMorePostMediaLibrary(projectId, mediaLibrary.length);
+      setMediaLibrary((current) => [...current, ...result.items]);
+      setHasMoreMedia(result.hasMore);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   // Fixes the SAME bug at sm:+ widths that media-library.tsx's own
   // --tile-row-h/wide-mode comment documents (and that THIS grid's own
@@ -685,7 +718,10 @@ function AddFromLibrarySection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replaceActive]);
 
-  if (availableMedia.length === 0) return null;
+  // Only hides when there's truly nothing left to ever show -- this page's
+  // own items all being already-used (rare, but possible with a small
+  // first page) must NOT also hide the one button that could load more.
+  if (availableMedia.length === 0 && !hasMoreMedia) return null;
 
   return (
     <section
@@ -762,6 +798,16 @@ function AddFromLibrarySection({
           </button>
         ))}
       </div>
+      {hasMoreMedia && (
+        <button
+          type="button"
+          onClick={handleLoadMore}
+          disabled={loadingMore}
+          className="self-center px-3 py-1.5 text-xs tracking-wide text-muted uppercase transition-colors duration-150 hover:text-foreground disabled:opacity-50"
+        >
+          {loadingMore ? "Loading…" : "Load more"}
+        </button>
+      )}
     </section>
   );
 }

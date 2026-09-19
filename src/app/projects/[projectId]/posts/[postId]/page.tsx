@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getPostCoreData, getPostMediaLibrary } from "@/lib/data/posts";
+import { getPostCoreData, getPostMediaLibraryPage, MEDIA_LIBRARY_PAGE_SIZE } from "@/lib/data/posts";
 import { PostEditor } from "./post-editor";
 
 export default async function PostPage({
@@ -14,8 +14,11 @@ export default async function PostPage({
 
   // See the intercepted-modal route's identical comment -- not awaited on
   // purpose, so the primary editor doesn't wait on the whole project's
-  // media library.
-  const mediaLibraryPromise = getPostMediaLibrary(projectId);
+  // media library. Only the FIRST page (see getPostMediaLibraryPage's own
+  // comment) -- AddFromLibrarySection's own Load More button pages through
+  // loadMorePostMediaLibrary for the rest, so this never blocks first
+  // paint on signing the whole project's media.
+  const mediaLibraryPromise = getPostMediaLibraryPage(projectId, 0, MEDIA_LIBRARY_PAGE_SIZE).then((r) => r.items);
 
   return (
     <PostEditor

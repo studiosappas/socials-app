@@ -6,7 +6,13 @@ import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media"
 import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
-import { getPostCoreData, getPostMediaLibrary, type PostCoreData } from "@/lib/data/posts";
+import {
+  getPostCoreData,
+  getPostMediaLibrary,
+  getPostMediaLibraryPage,
+  MEDIA_LIBRARY_PAGE_SIZE,
+  type PostCoreData,
+} from "@/lib/data/posts";
 import { syncPostType } from "@/lib/post-type";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
@@ -36,6 +42,22 @@ export async function fetchPostForModal(projectId: string, postId: string): Prom
   if (!core) return null;
   const mediaLibrary = await getPostMediaLibrary(projectId);
   return { ...core, mediaLibrary };
+}
+
+// Client-callable counterpart to page.tsx's own first-page
+// getPostMediaLibraryPage call -- "Add from library"'s own Load More
+// button (post-editor.tsx's AddFromLibrarySection) invokes this directly
+// for every page after the first, so the whole project library stays
+// reachable without ever needing it all signed/loaded up front. `offset`
+// is always the number of items already loaded client-side (0-indexed,
+// exclusive), never a page number, so it stays correct even if items were
+// filtered out of what's actually rendered (already-used-in-carousel
+// items, for instance) on an earlier page.
+export async function loadMorePostMediaLibrary(
+  projectId: string,
+  offset: number,
+): Promise<{ items: MediaLibraryItem[]; hasMore: boolean }> {
+  return getPostMediaLibraryPage(projectId, offset, MEDIA_LIBRARY_PAGE_SIZE);
 }
 
 // Not revalidating /grid or /calendar -- deletePost has two callers (Grid's
