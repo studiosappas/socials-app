@@ -22,7 +22,7 @@ export type AnnotationSaveAction = (
   projectId: string,
   targetId: string,
   formData: FormData,
-) => Promise<{ previewUrl?: string; message?: string }>;
+) => Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string }>;
 
 // The base photo lives as a regular (tagged, non-selectable) object in the
 // canvas's own object stack -- see annotation-editor.tsx's own longer
@@ -259,12 +259,19 @@ export async function exportAndSaveAnnotation(opts: {
   projectId: string;
   attachmentId: string;
   saveAction: AnnotationSaveAction;
+  // Which post's usage is being edited, if any -- threaded through to
+  // saveAction via formData (see saveMediaAssetAnnotation's own comment on
+  // why formData rather than a new positional param) so a save onto an
+  // asset that's ALSO some OTHER post's active cover diverges onto its own
+  // copy instead of silently editing that other post too. Omitted by
+  // callers with no post concept (Brief's attachments aren't post-scoped).
+  postId?: string | null;
   // TEMPORARY DIAGNOSTIC -- see paste-diagnostics.ts. Optional and inert
   // for every caller that doesn't pass one (AnnotationEditor's own Save
   // doesn't need this, only Grid's Paste Style debug build does).
   opId?: string;
-}): Promise<{ previewUrl: string } | { error: string }> {
-  const { canvas, exportScale, projectId, attachmentId, saveAction, opId } = opts;
+}): Promise<{ previewUrl: string; mediaAssetId?: string } | { error: string }> {
+  const { canvas, exportScale, projectId, attachmentId, saveAction, postId, opId } = opts;
   try {
     let annotationJson: string;
     try {
@@ -317,10 +324,11 @@ export async function exportAndSaveAnnotation(opts: {
     const formData = new FormData();
     formData.set("file", new File([blob], "annotated-preview.jpg", { type: "image/jpeg" }));
     formData.set("annotation_json", annotationJson);
+    if (postId) formData.set("post_id", postId);
     if (opId) formData.set("__diag_op_id", opId);
 
     if (opId) diagStage(opId, "upload-started");
-    let result: { previewUrl?: string; message?: string };
+    let result: { previewUrl?: string; message?: string; mediaAssetId?: string };
     try {
       result = await Promise.race([
         saveAction(projectId, attachmentId, formData),
@@ -344,7 +352,7 @@ export async function exportAndSaveAnnotation(opts: {
       if (opId) diagFail(opId, "save-action-rejected", err, { attachmentId: attachmentId.slice(0, 8) });
       throw err;
     }
-    if (result.previewUrl) return { previewUrl: result.previewUrl };
+    if (result.previewUrl) return { previewUrl: result.previewUrl, mediaAssetId: result.mediaAssetId };
     if (opId) diagFail(opId, "save-action-message", new Error(result.message ?? "(no message returned)"));
     return { error: result.message ?? "Couldn't save changes." };
   } catch (error) {

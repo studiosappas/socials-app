@@ -32,6 +32,49 @@ function diagLogFail(opId: string | null, stage: string, error: unknown, extra?:
   console.error(`[PasteStyle][${opId ?? "?"}][server] FAILED stage=${stage}`, info, extra ?? "");
 }
 
+// LIBRARY ASSET = clean reusable source; POST/GRID USAGE = independently
+// editable instance. media_assets rows are the current, real ownership
+// scope for annotation_json/preview_storage_path/poster_storage_path
+// (confirmed by saveMediaAssetAnnotation/saveMediaAssetPosterAnnotation
+// below, which write those columns keyed ONLY by media_asset_id, with no
+// per-post scoping anywhere in the schema) -- so two posts that both got
+// assigned "the same Library asset" via Grid/Add-from-library are, today,
+// literally sharing one media_assets ROW, not just the same source image.
+// Editing one post's usage previously mutated that shared row directly,
+// silently editing every other post using it too. This creates an
+// independent copy for exactly one post's exclusive use going forward --
+// same storage_path/media_type/thumbnail/poster (still the same underlying
+// image bytes), but a clean annotation_json/preview_storage_path (never
+// copied from the source), and a brand-new id nothing else references yet.
+// The source row is never mutated or deleted -- whichever other post(s)
+// still point at it keep rendering exactly what they already had.
+export async function cloneMediaAssetForDivergence(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  sourceAssetId: string,
+): Promise<string | null> {
+  const { data: source } = await supabase
+    .from("media_assets")
+    .select("project_id, storage_path, media_type, thumbnail_storage_path, poster_storage_path, uploaded_by")
+    .eq("id", sourceAssetId)
+    .maybeSingle();
+  if (!source) return null;
+
+  const { data: clone, error } = await supabase
+    .from("media_assets")
+    .insert({
+      project_id: source.project_id,
+      storage_path: source.storage_path,
+      media_type: source.media_type,
+      thumbnail_storage_path: source.thumbnail_storage_path,
+      poster_storage_path: source.poster_storage_path,
+      uploaded_by: source.uploaded_by,
+    })
+    .select("id")
+    .single();
+
+  return error || !clone ? null : clone.id;
+}
+
 // If this asset is the cover (position 0) of any post, that post's saved
 // pan/zoom (posts.cover_transform) is about to be reframing a different
 // image than it was cropped against -- reset it rather than let a stale
@@ -128,7 +171,7 @@ export async function saveMediaAssetAnnotation(
   projectId: string,
   mediaAssetId: string,
   formData: FormData,
-): Promise<{ previewUrl?: string; message?: string }> {
+): Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string }> {
   const opId = (formData.get("__diag_op_id") as string) || null;
   try {
     const file = formData.get("file");
@@ -159,6 +202,44 @@ export async function saveMediaAssetAnnotation(
     const {
       data: { user },
     } = await supabase.auth.getUser();
+
+    // Edit-time copy-on-write -- see cloneMediaAssetForDivergence's own
+    // comment. postId is threaded through formData rather than a new
+    // positional parameter so this still satisfies the shared
+    // AnnotationSaveAction signature every caller (including Brief, which
+    // has no post concept at all and never sets this) uses unmodified.
+    // Only clones when mediaAssetId is CURRENTLY someone else's cover too --
+    // a post editing its own exclusively-owned asset keeps writing directly
+    // to it, exactly as before.
+    const editingPostIdRaw = formData.get("post_id");
+    const editingPostId = typeof editingPostIdRaw === "string" && editingPostIdRaw ? editingPostIdRaw : null;
+    let targetAssetId = mediaAssetId;
+    let clonedAssetId: string | null = null;
+    if (editingPostId) {
+      const { data: coverUsers } = await supabase
+        .from("post_assets")
+        .select("post_id")
+        .eq("media_asset_id", mediaAssetId)
+        .eq("position", 0);
+      const sharedWithAnotherPost = (coverUsers ?? []).some((r) => r.post_id !== editingPostId);
+      if (sharedWithAnotherPost) {
+        const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
+        if (cloneId) {
+          const { error: repointError } = await supabase
+            .from("post_assets")
+            .update({ media_asset_id: cloneId })
+            .eq("post_id", editingPostId)
+            .eq("media_asset_id", mediaAssetId)
+            .eq("position", 0);
+          if (!repointError) {
+            targetAssetId = cloneId;
+            clonedAssetId = cloneId;
+            diagLog(opId, "cloned-for-divergence", { from: mediaAssetId, to: cloneId });
+          }
+        }
+      }
+    }
+
     const storagePath = `${projectId}/${crypto.randomUUID()}-preview.jpg`;
 
     const { error: uploadError } = await supabase.storage
@@ -181,10 +262,10 @@ export async function saveMediaAssetAnnotation(
     const { error: updateError } = await supabase
       .from("media_assets")
       .update({ preview_storage_path: storagePath, annotation_json: annotationJson })
-      .eq("id", mediaAssetId);
+      .eq("id", targetAssetId);
 
     if (updateError) {
-      diagLogFail(opId, "db-update", updateError, { mediaAssetId });
+      diagLogFail(opId, "db-update", updateError, { mediaAssetId: targetAssetId });
       await logSystemEvent(supabase, {
         category: "annotation_save_failed",
         area: "image-editor",
@@ -196,7 +277,7 @@ export async function saveMediaAssetAnnotation(
     }
     diagLog(opId, "db-update-complete");
 
-    await resetCoverTransformForAsset(supabase, mediaAssetId);
+    await resetCoverTransformForAsset(supabase, targetAssetId);
     diagLog(opId, "cover-transform-reset");
 
     // Brand-new path every edit (crypto.randomUUID() above), so this is
@@ -211,7 +292,7 @@ export async function saveMediaAssetAnnotation(
     revalidatePath(`/projects/${projectId}/stories`);
 
     diagLog(opId, "server-complete");
-    return { previewUrl: previewUrl ?? undefined };
+    return { previewUrl: previewUrl ?? undefined, mediaAssetId: clonedAssetId ?? undefined };
   } catch (error) {
     // Reaching here means something threw that none of the explicit
     // `if (error)` checks above ever saw -- previously an UNHANDLED
@@ -242,7 +323,7 @@ export async function saveMediaAssetPosterAnnotation(
   projectId: string,
   mediaAssetId: string,
   formData: FormData,
-): Promise<{ previewUrl?: string; message?: string }> {
+): Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string }> {
   const opId = (formData.get("__diag_op_id") as string) || null;
   try {
     const file = formData.get("file");
@@ -273,6 +354,37 @@ export async function saveMediaAssetPosterAnnotation(
     const {
       data: { user },
     } = await supabase.auth.getUser();
+
+    // Same copy-on-write reasoning as saveMediaAssetAnnotation above.
+    const editingPostIdRaw = formData.get("post_id");
+    const editingPostId = typeof editingPostIdRaw === "string" && editingPostIdRaw ? editingPostIdRaw : null;
+    let targetAssetId = mediaAssetId;
+    let clonedAssetId: string | null = null;
+    if (editingPostId) {
+      const { data: coverUsers } = await supabase
+        .from("post_assets")
+        .select("post_id")
+        .eq("media_asset_id", mediaAssetId)
+        .eq("position", 0);
+      const sharedWithAnotherPost = (coverUsers ?? []).some((r) => r.post_id !== editingPostId);
+      if (sharedWithAnotherPost) {
+        const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
+        if (cloneId) {
+          const { error: repointError } = await supabase
+            .from("post_assets")
+            .update({ media_asset_id: cloneId })
+            .eq("post_id", editingPostId)
+            .eq("media_asset_id", mediaAssetId)
+            .eq("position", 0);
+          if (!repointError) {
+            targetAssetId = cloneId;
+            clonedAssetId = cloneId;
+            diagLog(opId, "cloned-for-divergence", { from: mediaAssetId, to: cloneId });
+          }
+        }
+      }
+    }
+
     const posterPath = `${projectId}/${crypto.randomUUID()}-poster.jpg`;
 
     const { error: uploadError } = await supabase.storage
@@ -295,10 +407,10 @@ export async function saveMediaAssetPosterAnnotation(
     const { error: updateError } = await supabase
       .from("media_assets")
       .update({ poster_storage_path: posterPath, annotation_json: annotationJson })
-      .eq("id", mediaAssetId);
+      .eq("id", targetAssetId);
 
     if (updateError) {
-      diagLogFail(opId, "db-update", updateError, { mediaAssetId });
+      diagLogFail(opId, "db-update", updateError, { mediaAssetId: targetAssetId });
       await logSystemEvent(supabase, {
         category: "annotation_save_failed",
         area: "image-editor",
@@ -310,7 +422,7 @@ export async function saveMediaAssetPosterAnnotation(
     }
     diagLog(opId, "db-update-complete");
 
-    await resetCoverTransformForAsset(supabase, mediaAssetId);
+    await resetCoverTransformForAsset(supabase, targetAssetId);
     diagLog(opId, "cover-transform-reset");
 
     // Same reasoning as saveMediaAssetAnnotation above -- brand-new path, but
@@ -324,7 +436,7 @@ export async function saveMediaAssetPosterAnnotation(
     revalidatePath(`/projects/${projectId}/stories`);
 
     diagLog(opId, "server-complete");
-    return { previewUrl: previewUrl ?? undefined };
+    return { previewUrl: previewUrl ?? undefined, mediaAssetId: clonedAssetId ?? undefined };
   } catch (error) {
     diagLogFail(opId, "saveMediaAssetPosterAnnotation-uncaught", error, { mediaAssetId });
     return {

@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
+import { uploadPosterIfPresent, setMediaAssetPoster, cloneMediaAssetForDivergence } from "@/lib/actions/media";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
@@ -241,12 +241,36 @@ export async function submitClientPostReview(
   return { success: true };
 }
 
+// LIBRARY ASSET = clean reusable source; POST/GRID USAGE = independently
+// editable instance -- see cloneMediaAssetForDivergence's own comment in
+// media.ts. Shared by addPostAsset and replacePostAsset's library-pick
+// branch below: picking an already-edited Library asset into a post always
+// gives that post a clean instance, never silently inherits whatever
+// Text/Adjustments some OTHER post already saved onto that exact row. A
+// never-edited asset (the overwhelming common case) has no annotation_json
+// yet, so this is a single cheap read and no clone.
+async function resolveCleanAssetId(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mediaAssetId: string,
+): Promise<string> {
+  const { data: asset } = await supabase
+    .from("media_assets")
+    .select("annotation_json")
+    .eq("id", mediaAssetId)
+    .maybeSingle();
+  if (!asset?.annotation_json) return mediaAssetId;
+  const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
+  return cloneId ?? mediaAssetId;
+}
+
 export async function addPostAsset(
   projectId: string,
   postId: string,
   mediaAssetId: string,
 ): Promise<{ success: true; postAssetId: string } | { success: false; message: string }> {
   const supabase = await createClient();
+
+  const assetIdToUse = await resolveCleanAssetId(supabase, mediaAssetId);
 
   const { count } = await supabase
     .from("post_assets")
@@ -255,7 +279,7 @@ export async function addPostAsset(
 
   const { data, error } = await supabase
     .from("post_assets")
-    .insert({ post_id: postId, media_asset_id: mediaAssetId, position: count ?? 0 })
+    .insert({ post_id: postId, media_asset_id: assetIdToUse, position: count ?? 0 })
     .select("id")
     .single();
 
@@ -406,7 +430,7 @@ export async function replacePostAsset(
   let newMediaAssetId: string;
 
   if (existingMediaAssetId) {
-    newMediaAssetId = existingMediaAssetId;
+    newMediaAssetId = await resolveCleanAssetId(supabase, existingMediaAssetId);
   } else if (typeof newStoragePathValue === "string" && newStoragePathValue) {
     const {
       data: { user },

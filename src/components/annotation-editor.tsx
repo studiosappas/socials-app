@@ -187,6 +187,7 @@ export type { AnnotationSaveAction };
 export function AnnotationEditor({
   projectId,
   attachmentId,
+  postId,
   open,
   imageUrl,
   initialAnnotationJson,
@@ -199,6 +200,11 @@ export function AnnotationEditor({
 }: {
   projectId: string;
   attachmentId: string | null;
+  // Which post's usage this is, if any -- forwarded to exportAndSaveAnnotation
+  // so an edit on an asset that's ALSO some OTHER post's cover diverges onto
+  // its own copy instead of silently editing that other post too. Omitted by
+  // Brief (attachments aren't post-scoped).
+  postId?: string | null;
   open: boolean;
   // For mediaType "video", this is the raw video's own URL, never something
   // fed directly into fabric.FabricImage.fromURL (which can't decode
@@ -219,7 +225,7 @@ export function AnnotationEditor({
   // image's own ratio.
   targetAspect?: { w: number; h: number };
   onClose: () => void;
-  onSaved: (previewUrl: string) => void;
+  onSaved: (previewUrl: string, newMediaAssetId?: string) => void;
   // Brief attachments and post/Grid media assets are saved through
   // different tables (brief_attachments vs media_assets) behind an
   // identical (projectId, id, formData) => {previewUrl|message} shape, so
@@ -2129,10 +2135,11 @@ export function AnnotationEditor({
         exportScale: exportScaleRef.current,
         projectId,
         attachmentId,
+        postId,
         saveAction,
       });
       if ("previewUrl" in result) {
-        onSaved(result.previewUrl);
+        onSaved(result.previewUrl, result.mediaAssetId);
       } else {
         // Previously silent -- a failed save (e.g. a pending migration
         // meaning the target column doesn't exist yet) looked identical to

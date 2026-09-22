@@ -1037,7 +1037,18 @@ export function GridBoard({
       // refresh": requestIdleRefresh still won't fire until every other
       // pending mutation (including this one) has settled.
       if (mediaItem?.mediaType === "video") requestIdleRefresh();
-      return assignedPostId.id ? { postId: assignedPostId.id } : undefined;
+      if (!assignedPostId.id) return undefined;
+      // result.mediaAssetId can differ from the mediaAssetId requested
+      // above -- placeMediaInSlot clones onto a fresh id when the picked
+      // Library asset was already dirty (see its own comment), so the
+      // client's own state has to follow whichever id the DB actually
+      // ended up pointing at, not the one originally dragged.
+      return {
+        postId: assignedPostId.id,
+        ...(result?.mediaAssetId && result.mediaAssetId !== mediaAssetId
+          ? { coverMediaAssetId: result.mediaAssetId }
+          : {}),
+      };
     }).then((ok) => {
       if (!ok || demoMode) return;
       pushCommand({
@@ -1051,8 +1062,13 @@ export function GridBoard({
               assignedPostId.id = null;
             } else if (beforeSlot.coverMediaAssetId) {
               // Slot already had a post -- restore its previous cover asset
-              // and crop onto that same post.
-              await placeMediaInSlot(projectId, slotId, beforeSlot.coverMediaAssetId);
+              // and crop onto that same post. skipDivergenceCheck: true --
+              // this must land on the exact prior asset id, edited state
+              // included, not go through the normal "clean if dirty" Library
+              // attach behavior (which would otherwise undo a same-asset
+              // reset into ANOTHER clean clone instead of truly restoring
+              // what was there).
+              await placeMediaInSlot(projectId, slotId, beforeSlot.coverMediaAssetId, true);
               await updatePostCoverTransform(projectId, beforeSlot.postId, beforeSlot.coverTransform);
             }
           });
@@ -1066,7 +1082,13 @@ export function GridBoard({
             const redoResult = await placeMediaInSlot(projectId, slotId, mediaAssetId);
             assignedPostId.id = redoResult?.postId ?? null;
             if (mediaItem?.mediaType === "video") requestIdleRefresh();
-            return assignedPostId.id ? { postId: assignedPostId.id } : undefined;
+            if (!assignedPostId.id) return undefined;
+            return {
+              postId: assignedPostId.id,
+              ...(redoResult?.mediaAssetId && redoResult.mediaAssetId !== mediaAssetId
+                ? { coverMediaAssetId: redoResult.mediaAssetId }
+                : {}),
+            };
           });
         },
       });

@@ -335,14 +335,22 @@ export function PostEditor({
     handleAddFromLibrary(item);
   }
 
-  function handleAnnotationSaved(previewUrl: string) {
+  function handleAnnotationSaved(previewUrl: string, newMediaAssetId?: string) {
     const target = editingImage;
     setOrderedAssets((current) =>
       current.map((asset) =>
         asset.mediaAssetId === target?.mediaAssetId
-          ? target.mediaType === "video"
-            ? { ...asset, posterUrl: previewUrl }
-            : { ...asset, url: previewUrl }
+          ? {
+              ...asset,
+              ...(target.mediaType === "video" ? { posterUrl: previewUrl } : { url: previewUrl }),
+              // Set only when saveMediaAssetAnnotation actually cloned (this
+              // asset was ALSO another post's active cover) -- this post's
+              // local state must follow the clone it now actually owns, so
+              // a second edit in the same session (or Undo/Redo, or
+              // Copy/Paste Style reading annotation by id) targets the
+              // right row instead of the original shared one.
+              ...(newMediaAssetId ? { mediaAssetId: newMediaAssetId } : {}),
+            }
           : asset,
       ),
     );
@@ -591,6 +599,7 @@ export function PostEditor({
       <AnnotationEditor
         projectId={projectId}
         attachmentId={editingImage?.mediaAssetId ?? null}
+        postId={post.id}
         open={editingImage !== null}
         imageUrl={editingImage?.imageUrl ?? null}
         initialAnnotationJson={editingImage?.annotationJson ?? null}

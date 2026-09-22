@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { uploadPosterIfPresent, setMediaAssetPoster } from "@/lib/actions/media";
+import { uploadPosterIfPresent, setMediaAssetPoster, cloneMediaAssetForDivergence } from "@/lib/actions/media";
 import { logActivity } from "@/lib/activity-log";
 import { logSystemEvent } from "@/lib/system-event-log";
 import { notifyProjectMembers } from "@/lib/notifications";
@@ -388,6 +388,15 @@ export async function placeMediaInSlot(
   projectId: string,
   slotId: string,
   mediaAssetId: string,
+  // Undo restoring a slot's PRIOR asset is not a fresh user-initiated
+  // Library attach -- it must land on the exact id that was there before,
+  // dirty state included, or "undo" would silently re-clean an edited
+  // cover instead of truly restoring it (the clean-if-dirty rule below
+  // would otherwise fire on undo's own restore call just as it does on a
+  // real attach, since it can't tell the two apart by id alone). Every
+  // real caller other than grid-board.tsx's own undo callback omits this
+  // and gets the normal clone-if-dirty behavior.
+  skipDivergenceCheck = false,
 ) {
   const supabase = await createClient();
 
@@ -408,6 +417,29 @@ export async function placeMediaInSlot(
   // must not silently keep applying. Left false for a brand-new post
   // (cover_transform is already null by default there).
   let replacingExistingCover = false;
+
+  // LIBRARY ASSET = clean reusable source; POST/GRID USAGE = independently
+  // editable instance (see cloneMediaAssetForDivergence's own comment).
+  // Checked unconditionally, before either branch below consumes it --
+  // this is what makes "drag the same already-edited Library asset back
+  // onto its own slot" a real reset (the slot's current row and the
+  // incoming id are the same, so this always fires there), AND what keeps
+  // a second post that picks an already-edited Library asset from starting
+  // clean instead of silently inheriting the first post's Text/
+  // Adjustments -- a freshly uploaded asset is never dirty yet, so this is
+  // a no-op (no clone, no extra row) for the overwhelmingly common case.
+  let assetIdToUse = mediaAssetId;
+  if (!skipDivergenceCheck) {
+    const { data: incomingAsset } = await supabase
+      .from("media_assets")
+      .select("annotation_json")
+      .eq("id", mediaAssetId)
+      .maybeSingle();
+    if (incomingAsset?.annotation_json) {
+      const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
+      if (cloneId) assetIdToUse = cloneId;
+    }
+  }
 
   if (!postId) {
     const { data: post, error: postError } = await supabase
@@ -466,7 +498,7 @@ export async function placeMediaInSlot(
 
       const { error: updateError } = await supabase
         .from("post_assets")
-        .update({ media_asset_id: mediaAssetId, position: 0 })
+        .update({ media_asset_id: assetIdToUse, position: 0 })
         .eq("id", keepRow.id);
 
       if (updateError) {
@@ -492,7 +524,7 @@ export async function placeMediaInSlot(
 
       await supabase.from("posts").update({ cover_transform: null }).eq("id", postId);
       await syncPostType(supabase, postId);
-      return { postId };
+      return { postId, mediaAssetId: assetIdToUse };
     }
     // Slot has a post but no post_assets row yet -- fall through to the
     // plain insert below.
@@ -500,7 +532,7 @@ export async function placeMediaInSlot(
 
   const { error: assetError } = await supabase
     .from("post_assets")
-    .insert({ post_id: postId, media_asset_id: mediaAssetId, position: 0 });
+    .insert({ post_id: postId, media_asset_id: assetIdToUse, position: 0 });
 
   if (assetError) {
     throw new Error(assetError.message);
@@ -512,7 +544,7 @@ export async function placeMediaInSlot(
 
   await syncPostType(supabase, postId);
 
-  return { postId };
+  return { postId, mediaAssetId: assetIdToUse };
 }
 
 // Persists a full drag-the-whole-row reorder. Reuses grid_rows' own existing
