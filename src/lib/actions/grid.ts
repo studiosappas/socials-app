@@ -402,6 +402,12 @@ export async function placeMediaInSlot(
   }
 
   let postId = slot.post_id;
+  // Mirrors replacePostAsset's own cover-transform reset (lib/actions/
+  // posts.ts): the new cover may be framed completely differently than
+  // whatever pan/zoom was saved against the old one, so that saved crop
+  // must not silently keep applying. Left false for a brand-new post
+  // (cover_transform is already null by default there).
+  let replacingExistingCover = false;
 
   if (!postId) {
     const { data: post, error: postError } = await supabase
@@ -425,17 +431,71 @@ export async function placeMediaInSlot(
       throw new Error(updateSlotError.message);
     }
   } else {
+    replacingExistingCover = true;
     // Dropping media onto a slot that already has a post replaces its
     // cover outright -- carousels are only ever built intentionally from
     // inside the post editor, never as a side effect of a grid drop.
-    const { error: clearError } = await supabase
+    //
+    // Swapped IN PLACE (update the existing row), never delete-then-insert:
+    // those are two separate round-trips with nothing tying them into one
+    // transaction, and post_assets has no unique constraint on
+    // (post_id, position). Anything that made the delete a no-op against
+    // the old row (an RLS edge case, a retry, a race with another mutation)
+    // left it sitting there right alongside the newly inserted row -- both
+    // at position 0, both "the cover" as far as the schema is concerned.
+    // grid-data.ts's read side resolves a same-position tie by array order,
+    // which silently kept preferring the OLDER row forever -- Replace
+    // would appear to work, then the old image would come back on refresh,
+    // permanently, because the stale row was still there to win the tie
+    // every time. An update is a single atomic statement: it either lands
+    // (the post now points at the new asset, nothing else to reconcile) or
+    // throws (nothing changed, the old cover keeps showing) -- there is no
+    // partial-failure state where two rows can both claim the cover.
+    const { data: existingRows, error: existingError } = await supabase
       .from("post_assets")
-      .delete()
-      .eq("post_id", postId);
+      .select("id")
+      .eq("post_id", postId)
+      .order("position");
 
-    if (clearError) {
-      throw new Error(clearError.message);
+    if (existingError) {
+      throw new Error(existingError.message);
     }
+
+    if (existingRows && existingRows.length > 0) {
+      const [keepRow, ...extraRows] = existingRows;
+
+      const { error: updateError } = await supabase
+        .from("post_assets")
+        .update({ media_asset_id: mediaAssetId, position: 0 })
+        .eq("id", keepRow.id);
+
+      if (updateError) {
+        throw new Error(updateError.message);
+      }
+
+      // Only relevant if this post already had more than one asset (an
+      // existing carousel being collapsed by a grid drop) -- the update
+      // above already made the kept row the sole, correct cover.
+      if (extraRows.length > 0) {
+        const { error: cleanupError } = await supabase
+          .from("post_assets")
+          .delete()
+          .in(
+            "id",
+            extraRows.map((r) => r.id),
+          );
+
+        if (cleanupError) {
+          throw new Error(cleanupError.message);
+        }
+      }
+
+      await supabase.from("posts").update({ cover_transform: null }).eq("id", postId);
+      await syncPostType(supabase, postId);
+      return { postId };
+    }
+    // Slot has a post but no post_assets row yet -- fall through to the
+    // plain insert below.
   }
 
   const { error: assetError } = await supabase
@@ -444,6 +504,10 @@ export async function placeMediaInSlot(
 
   if (assetError) {
     throw new Error(assetError.message);
+  }
+
+  if (replacingExistingCover) {
+    await supabase.from("posts").update({ cover_transform: null }).eq("id", postId);
   }
 
   await syncPostType(supabase, postId);
