@@ -111,6 +111,17 @@ export async function cloneMediaAssetForDivergence(
       thumbnail_storage_path: source.thumbnail_storage_path,
       poster_storage_path: source.poster_storage_path,
       uploaded_by: user.id,
+      // Reuses the EXISTING archived flag (deleteMedia's own "hidden from
+      // the Library picker, row/file stay fully intact" semantics -- see
+      // its comment) rather than adding new schema. A divergence clone is
+      // an internal per-post editable instance, never a second user-visible
+      // Library source -- every Library-listing query in this codebase
+      // (Grid, Post Editor, Stories) already filters archived out, and
+      // nothing anywhere browses archived=true rows to "restore" them, so
+      // this hides the clone from every picker while leaving it exactly as
+      // functional as an unarchived row for whatever post_assets row
+      // already points at it (cover resolution never filters on archived).
+      archived: true,
     })
     .select("id")
     .single();
