@@ -11,6 +11,25 @@ import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import type { MediaType } from "@/types/database";
 
+// TEMPORARY DIAGNOSTIC -- see the identical helper in lib/actions/media.ts
+// for the full comment on why this exists and when to remove it. Kept as
+// its own local copy (not exported/shared from media.ts) since every
+// export from a "use server" file must be an async function -- a plain
+// sync logger can't be one.
+function mediaMutationLog(entry: {
+  action: string;
+  postId?: string | null;
+  sourceAssetId?: string | null;
+  targetAssetId?: string | null;
+  stage: string;
+  extra?: Record<string, unknown>;
+}) {
+  console.log(
+    `[MediaMutation] action=${entry.action} post=${entry.postId ?? "(none)"} sourceAsset=${(entry.sourceAssetId ?? "(none)").slice(0, 8)} targetAsset=${(entry.targetAssetId ?? "(none)").slice(0, 8)} stage=${entry.stage}`,
+    entry.extra ?? "",
+  );
+}
+
 export type UploadMediaState =
   | {
       message?: string;
@@ -411,6 +430,7 @@ export async function placeMediaInSlot(
   }
 
   let postId = slot.post_id;
+  mediaMutationLog({ action: "placeMediaInSlot", postId, sourceAssetId: mediaAssetId, stage: "received", extra: { slotId, skipDivergenceCheck } });
   // Mirrors replacePostAsset's own cover-transform reset (lib/actions/
   // posts.ts): the new cover may be framed completely differently than
   // whatever pan/zoom was saved against the old one, so that saved crop
@@ -436,10 +456,21 @@ export async function placeMediaInSlot(
       .eq("id", mediaAssetId)
       .maybeSingle();
     if (incomingAsset?.annotation_json) {
+      // FAIL CLOSED, not open: a failed clone must not fall back to
+      // attaching the still-dirty/shared asset directly -- see
+      // cloneMediaAssetForDivergence's own comment for the confirmed root
+      // cause (an RLS rejection whenever the acting user differs from the
+      // asset's original uploader) that a silent fallback here used to mask.
       const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
-      if (cloneId) assetIdToUse = cloneId;
+      if (!cloneId) {
+        mediaMutationLog({ action: "placeMediaInSlot", postId, sourceAssetId: mediaAssetId, stage: "divergence-clone-failed-refusing" });
+        throw new Error("Couldn't create an independent copy of this image. Please try again.");
+      }
+      mediaMutationLog({ action: "placeMediaInSlot", postId, sourceAssetId: mediaAssetId, targetAssetId: cloneId, stage: "diverged" });
+      assetIdToUse = cloneId;
     }
   }
+  mediaMutationLog({ action: "placeMediaInSlot", postId, sourceAssetId: mediaAssetId, targetAssetId: assetIdToUse, stage: "resolved-write-target" });
 
   if (!postId) {
     const { data: post, error: postError } = await supabase

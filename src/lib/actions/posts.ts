@@ -249,18 +249,23 @@ export async function submitClientPostReview(
 // Text/Adjustments some OTHER post already saved onto that exact row. A
 // never-edited asset (the overwhelming common case) has no annotation_json
 // yet, so this is a single cheap read and no clone.
+// FAIL CLOSED, not open -- see cloneMediaAssetForDivergence's own comment
+// in media.ts for the confirmed root cause (an RLS rejection whenever the
+// acting user differs from the asset's original uploader) that a silent
+// "clone failed, fall back to the dirty/shared asset id" used to mask.
 async function resolveCleanAssetId(
   supabase: Awaited<ReturnType<typeof createClient>>,
   mediaAssetId: string,
-): Promise<string> {
+): Promise<{ assetId: string } | { error: string }> {
   const { data: asset } = await supabase
     .from("media_assets")
     .select("annotation_json")
     .eq("id", mediaAssetId)
     .maybeSingle();
-  if (!asset?.annotation_json) return mediaAssetId;
+  if (!asset?.annotation_json) return { assetId: mediaAssetId };
   const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
-  return cloneId ?? mediaAssetId;
+  if (!cloneId) return { error: "Couldn't add this asset independently. Please try again." };
+  return { assetId: cloneId };
 }
 
 export async function addPostAsset(
@@ -270,7 +275,11 @@ export async function addPostAsset(
 ): Promise<{ success: true; postAssetId: string } | { success: false; message: string }> {
   const supabase = await createClient();
 
-  const assetIdToUse = await resolveCleanAssetId(supabase, mediaAssetId);
+  const resolved = await resolveCleanAssetId(supabase, mediaAssetId);
+  if ("error" in resolved) {
+    return { success: false, message: resolved.error };
+  }
+  const assetIdToUse = resolved.assetId;
 
   const { count } = await supabase
     .from("post_assets")
@@ -430,7 +439,9 @@ export async function replacePostAsset(
   let newMediaAssetId: string;
 
   if (existingMediaAssetId) {
-    newMediaAssetId = await resolveCleanAssetId(supabase, existingMediaAssetId);
+    const resolved = await resolveCleanAssetId(supabase, existingMediaAssetId);
+    if ("error" in resolved) return { message: resolved.error };
+    newMediaAssetId = resolved.assetId;
   } else if (typeof newStoragePathValue === "string" && newStoragePathValue) {
     const {
       data: { user },
