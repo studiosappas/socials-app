@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { login } from "@/lib/actions/auth";
 import { Button } from "@/components/ui/button";
+import { PasswordField } from "@/components/ui/password-field";
 
 export function LoginForm() {
   const [state, action, pending] = useActionState(login, undefined);
@@ -27,16 +28,7 @@ export function LoginForm() {
           className="border-0 border-b border-border bg-transparent py-1.5 text-sm focus:border-foreground focus:outline-none"
         />
       </label>
-      <label className="flex flex-col gap-1.5">
-        <span className="text-xs tracking-wide text-muted uppercase">Password</span>
-        <input
-          id="password"
-          name="password"
-          type="password"
-          required
-          className="border-0 border-b border-border bg-transparent py-1.5 text-sm focus:border-foreground focus:outline-none"
-        />
-      </label>
+      <PasswordField id="password" name="password" label="Password" />
       <Link href="/login/forgot-password" className="-mt-3 self-end text-xs text-muted underline underline-offset-2 hover:text-foreground">
         Forgot password?
       </Link>
