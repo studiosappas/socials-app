@@ -10,6 +10,7 @@ import {
   WorkplaceInsightsPanel,
 } from "./overview-panels";
 import { AccessRestricted } from "../access-restricted";
+import { displayableAnalysis } from "@/lib/ai/result-safety";
 
 export default async function ProjectOverviewPage({
   params,
@@ -182,7 +183,10 @@ export default async function ProjectOverviewPage({
     sourceType: d.source_type,
     filename: d.filename,
     url: d.url,
-    aiAnalysis: d.ai_analysis,
+    // Hides the error text older versions stored in ai_analysis when AI was
+    // unavailable (it named an environment variable) -- shown as "not
+    // analyzed" instead. See result-safety.ts.
+    aiAnalysis: displayableAnalysis(d.ai_analysis),
     createdAt: d.created_at,
   }));
 

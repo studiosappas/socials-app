@@ -2,7 +2,17 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { analyzeDocument, generateText } from "@/lib/ai/client";
+import { analyzeDocument, generateText, isAiConfigured } from "@/lib/ai/client";
+import {
+  AI_REFRESH_UNAVAILABLE_MESSAGE,
+  AI_SAVE_FAILED_MESSAGE,
+  AI_USER_MESSAGES,
+  analysisForPrompt,
+  parseInsights,
+  parseSections,
+  parseSpectrum,
+  runDocumentAnalysis,
+} from "@/lib/ai/result-safety";
 import { notifyProjectMembers } from "@/lib/notifications";
 import type { AiInsights } from "@/types/database";
 
@@ -140,13 +150,19 @@ export async function generateBrandSummary(
     `Audience notes: ${strategy?.audience_notes || "(none provided)"}`,
   ].join("\n");
 
+  // generateText only returns text when it's non-empty and complete (see
+  // result-safety.ts's safeAiCall) -- an empty or truncated response can no
+  // longer overwrite the saved summary with "".
   const result = await generateText(prompt);
   if ("error" in result) return { message: result.error };
 
   const { error } = await supabase
     .from("brand_strategy")
     .upsert({ project_id: projectId, ai_summary: result.text, updated_at: new Date().toISOString() });
-  if (error) return { message: error.message };
+  if (error) {
+    console.error("[ai] generateBrandSummary save failed:", error.message);
+    return { message: AI_SAVE_FAILED_MESSAGE };
+  }
 
   // Not revalidating this action's own route -- its one caller
   // (BrandIntelligenceSection.handleRefreshAi) already calls
@@ -163,8 +179,10 @@ export async function suggestPersonalitySpectrum(
 
   const { strategy, documents } = preFetched ?? (await fetchBrandContextRows(supabase, projectId));
 
+  // Only real analyses -- never the informational notes or the legacy
+  // "not configured" error text older versions stored in this column.
   const documentSummaries = (documents ?? [])
-    .map((d) => d.ai_analysis)
+    .map((d) => analysisForPrompt(d.ai_analysis))
     .filter(Boolean)
     .join("\n");
 
@@ -184,27 +202,26 @@ export async function suggestPersonalitySpectrum(
   const result = await generateText(prompt);
   if ("error" in result) return { message: result.error };
 
-  let parsed: Record<string, number>;
-  try {
-    const jsonMatch = result.text.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : result.text);
-  } catch {
-    return { message: "AI response could not be parsed. Try again." };
-  }
-
-  const clamp = (n: unknown) => Math.min(100, Math.max(0, Number(n) || 50));
+  // All six axes must come back numeric, or nothing is written -- the
+  // previous version defaulted any missing axis to 50, silently resetting
+  // the user's own slider positions on a partial response.
+  const parsed = parseSpectrum(result.text);
+  if (!parsed) return { message: AI_USER_MESSAGES.unusable_response };
 
   const { error } = await supabase.from("brand_strategy").upsert({
     project_id: projectId,
-    spectrum_serious_playful: clamp(parsed.serious_playful),
-    spectrum_classic_futuristic: clamp(parsed.classic_futuristic),
-    spectrum_premium_accessible: clamp(parsed.premium_accessible),
-    spectrum_editorial_commercial: clamp(parsed.editorial_commercial),
-    spectrum_minimal_expressive: clamp(parsed.minimal_expressive),
-    spectrum_luxury_casual: clamp(parsed.luxury_casual),
+    spectrum_serious_playful: parsed.serious_playful,
+    spectrum_classic_futuristic: parsed.classic_futuristic,
+    spectrum_premium_accessible: parsed.premium_accessible,
+    spectrum_editorial_commercial: parsed.editorial_commercial,
+    spectrum_minimal_expressive: parsed.minimal_expressive,
+    spectrum_luxury_casual: parsed.luxury_casual,
     updated_at: new Date().toISOString(),
   });
-  if (error) return { message: error.message };
+  if (error) {
+    console.error("[ai] suggestPersonalitySpectrum save failed:", error.message);
+    return { message: AI_SAVE_FAILED_MESSAGE };
+  }
 
   // Not revalidating this action's own route -- its callers
   // (BrandSpectrumPanel.handleSuggestSpectrum, refreshBrandIntelligence)
@@ -293,52 +310,63 @@ export async function addBrandLink(
 // bring back fresh data themselves: BrandKnowledgeDialog.handleAnalyze
 // calls router.refresh() right after, and refreshBrandIntelligence (which
 // also calls this internally) has its own client-side refresh chain too.
-export async function analyzeBrandDocument(projectId: string, documentId: string) {
+//
+// Only ever writes a REAL analysis (or, into an empty field, one of the
+// informational link/non-PDF notes). Any failure -- AI not configured,
+// request failed, unusable response, unreadable file -- leaves the stored
+// analysis exactly as it was and is returned as a message instead. The
+// previous version wrote the error text itself into ai_analysis, so the
+// always-visible Analyze button replaced real analyses with it. All of the
+// decision logic lives in result-safety.ts's runDocumentAnalysis (tested in
+// result-safety.test.ts); this function only supplies the database/storage
+// I/O. Links have no fetchable file server-side; they're passed to the AI
+// as labeled context (URL text) whenever a brand summary/insights prompt
+// runs, rather than analyzed individually.
+export async function analyzeBrandDocument(projectId: string, documentId: string): Promise<OverviewActionState> {
   const supabase = await createClient();
 
-  const { data: doc } = await supabase
-    .from("brand_documents")
-    .select("source_type, storage_path, filename")
-    .eq("id", documentId)
-    .single();
-  if (!doc) return;
+  const outcome = await runDocumentAnalysis({
+    aiConfigured: isAiConfigured(),
+    loadDocument: async () => {
+      const { data: doc } = await supabase
+        .from("brand_documents")
+        .select("source_type, storage_path, filename, ai_analysis")
+        .eq("id", documentId)
+        .single();
+      if (!doc) return null;
+      return {
+        sourceType: doc.source_type,
+        storagePath: doc.storage_path,
+        filename: doc.filename,
+        existingAnalysis: doc.ai_analysis,
+      };
+    },
+    downloadFile: async (storagePath) => {
+      const { data: file, error } = await supabase.storage.from("brand-documents").download(storagePath);
+      if (error || !file) return null;
+      return Buffer.from(await file.arrayBuffer()).toString("base64");
+    },
+    analyze: (fileBase64) =>
+      analyzeDocument(
+        "Summarize this brand document's key points in 3-5 sentences for an internal team knowledge base.",
+        fileBase64,
+        "application/pdf",
+      ),
+    // .select("id") so a write that RLS silently filtered out (0 rows, no
+    // error) counts as a failure rather than a success.
+    saveAnalysis: async (text) => {
+      const { data, error } = await supabase
+        .from("brand_documents")
+        .update({ ai_analysis: text })
+        .eq("id", documentId)
+        .select("id");
+      if (error) console.error("[ai] analyzeBrandDocument save failed:", error.message);
+      return !error && (data?.length ?? 0) > 0;
+    },
+  });
 
-  if (doc.source_type === "link" || !doc.storage_path) {
-    // Links have no fetchable file server-side; they're passed to the AI as
-    // labeled context (URL text) whenever a brand summary/insights prompt runs,
-    // rather than analyzed individually.
-    await supabase
-      .from("brand_documents")
-      .update({ ai_analysis: "Links are used as context automatically -- no separate analysis needed." })
-      .eq("id", documentId);
-    return;
-  }
-
-  const { data: file, error: downloadError } = await supabase.storage
-    .from("brand-documents")
-    .download(doc.storage_path);
-  if (downloadError || !file) return;
-
-  const isPdf = doc.filename.toLowerCase().endsWith(".pdf");
-  if (!isPdf) {
-    await supabase
-      .from("brand_documents")
-      .update({ ai_analysis: "Only PDF analysis is supported right now." })
-      .eq("id", documentId);
-    return;
-  }
-
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const base64 = buffer.toString("base64");
-
-  const result = await analyzeDocument(
-    "Summarize this brand document's key points in 3-5 sentences for an internal team knowledge base.",
-    base64,
-    "application/pdf",
-  );
-
-  const analysis = "error" in result ? result.error : result.text;
-  await supabase.from("brand_documents").update({ ai_analysis: analysis }).eq("id", documentId);
+  if (outcome.status === "failed") return { message: outcome.message };
+  return { success: true };
 }
 
 // Not revalidating its own route -- its one caller
@@ -376,7 +404,7 @@ async function brandContextLines(
   const { strategy, documents } = preFetched ?? (await fetchBrandContextRows(supabase, projectId));
 
   const docLines = (documents ?? []).map((d) =>
-    d.source_type === "link" ? `Link -- ${d.filename}: ${d.url}` : `File "${d.filename}": ${d.ai_analysis || "(not analyzed yet)"}`,
+    d.source_type === "link" ? `Link -- ${d.filename}: ${d.url}` : `File "${d.filename}": ${analysisForPrompt(d.ai_analysis) ?? "(not analyzed yet)"}`,
   );
 
   return [
@@ -413,28 +441,27 @@ export async function generateBrandSections(
   const result = await generateText(prompt);
   if ("error" in result) return { message: result.error };
 
-  let parsed: Record<string, string>;
-  try {
-    const jsonMatch = result.text.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : result.text);
-  } catch {
-    return { message: "AI response could not be parsed. Try again." };
-  }
-
-  const str = (key: string) => (typeof parsed[key] === "string" ? parsed[key] : "");
+  // All seven sections must come back non-empty, or nothing is written --
+  // the previous version wrote "" for every missing key, so a partial
+  // response blanked the previously saved sections.
+  const parsed = parseSections(result.text);
+  if (!parsed) return { message: AI_USER_MESSAGES.unusable_response };
 
   const { error } = await supabase.from("brand_strategy").upsert({
     project_id: projectId,
-    ai_brand_dna: str("brand_dna"),
-    ai_tone_of_voice: str("tone_of_voice"),
-    ai_communication_style: str("communication_style"),
-    ai_content_pillars: str("content_pillars"),
-    ai_audience_snapshot: str("audience_snapshot"),
-    ai_visual_language: str("visual_language"),
-    ai_avoid: str("avoid"),
+    ai_brand_dna: parsed.brand_dna,
+    ai_tone_of_voice: parsed.tone_of_voice,
+    ai_communication_style: parsed.communication_style,
+    ai_content_pillars: parsed.content_pillars,
+    ai_audience_snapshot: parsed.audience_snapshot,
+    ai_visual_language: parsed.visual_language,
+    ai_avoid: parsed.avoid,
     updated_at: new Date().toISOString(),
   });
-  if (error) return { message: error.message };
+  if (error) {
+    console.error("[ai] generateBrandSections save failed:", error.message);
+    return { message: AI_SAVE_FAILED_MESSAGE };
+  }
 
   // Not revalidating -- same reasoning as generateBrandSummary above (both
   // callers, handleRefreshAi and refreshBrandIntelligence, already bring
@@ -490,13 +517,11 @@ export async function generateAiInsights(projectId: string): Promise<OverviewAct
   const result = await generateText(prompt);
   if ("error" in result) return { message: result.error };
 
-  let parsed: AiInsights;
-  try {
-    const jsonMatch = result.text.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : result.text);
-  } catch {
-    return { message: "AI response could not be parsed. Try again." };
-  }
+  // Every insights field must be present with the right type, or nothing
+  // is written -- the previous version stored whatever JSON came back (even
+  // `{}`), replacing the previous insights.
+  const parsed: AiInsights | null = parseInsights(result.text);
+  if (!parsed) return { message: AI_USER_MESSAGES.unusable_response };
 
   const { error } = await supabase.from("brand_strategy").upsert({
     project_id: projectId,
@@ -504,7 +529,10 @@ export async function generateAiInsights(projectId: string): Promise<OverviewAct
     ai_insights_updated_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
-  if (error) return { message: error.message };
+  if (error) {
+    console.error("[ai] generateAiInsights save failed:", error.message);
+    return { message: AI_SAVE_FAILED_MESSAGE };
+  }
 
   // Not revalidating -- its one caller (AiRecommendationsPanel.handleRefresh)
   // already calls router.refresh() itself right after this resolves.
@@ -520,8 +548,15 @@ export async function refreshBrandIntelligence(
   projectId: string,
   newDocumentId?: string,
 ): Promise<OverviewActionState> {
+  // The document/link itself was already saved by uploadBrandDocument/
+  // addBrandLink before this runs -- with no AI configured there's nothing
+  // to refresh, so say so plainly instead of attempting four calls that
+  // can only fail.
+  if (!isAiConfigured()) return { message: AI_REFRESH_UNAVAILABLE_MESSAGE };
+
+  let analysisMessage: string | undefined;
   if (newDocumentId) {
-    await analyzeBrandDocument(projectId, newDocumentId);
+    analysisMessage = (await analyzeBrandDocument(projectId, newDocumentId))?.message;
   }
 
   // Fetched once (after analyzeBrandDocument above, so a freshly-analyzed
@@ -537,7 +572,7 @@ export async function refreshBrandIntelligence(
     suggestPersonalitySpectrum(projectId, context),
   ]);
 
-  const message = summary?.message || sections?.message || spectrum?.message;
+  const message = analysisMessage || summary?.message || sections?.message || spectrum?.message;
   if (message) return { message };
 
   await notifyProjectMembers(supabase, projectId, "ai_analysis_complete", {
