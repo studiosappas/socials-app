@@ -11,7 +11,137 @@ Rules for this checklist:
 
 ---
 
-## A. Anthropic (start here)
+## A0. Where did this key come from? (P0-01 investigation, start here)
+
+**Background:** you don't remember creating an Anthropic API account or buying API credits, yet `ANTHROPIC_API_KEY` exists in Vercel for Production and Preview.
+- Having no paid Claude subscription tells us **nothing** about this key. Claude.ai subscriptions (Free/Pro/Max) and the Anthropic **API** are billed separately.
+- An API key belongs to whichever API organization created it. That organization pays for its usage: from purchased credits, from any promotional credit balance, or from a card on file.
+- The key may belong to an organization you created and forgot, or to someone else's organization.
+
+### What the code investigation already established (no dashboard needed)
+
+| Question | Finding | Evidence |
+|---|---|---|
+| Where is the key used? | Only in `src/lib/ai/client.ts` (three functions: `generateText`, `generateWithImages`, `analyzeDocument`). No other variable name is read. If the key is missing, the app shows "AI analysis isn't configured yet" and makes **no** call. | Repository-wide search |
+| Can calls happen **automatically**? | **Yes, one path:** uploading a brand document or adding a brand link on the Overview page automatically runs a "brand intelligence refresh" (up to 4 model calls, including the whole PDF). Every other AI call needs a logged-in user to click an AI button (Brand Writer, Generate Design, Refresh insights). There are **no** scheduled jobs, cron routes or webhooks. The public landing page makes **no** AI calls (deliberately faked). | `overview-panels.tsx:829`, `overview.ts:519`; no `vercel.json`, no cron; `lib/landing/demo-create.ts` |
+| Who can trigger it? | Any logged-in account, for any project (no membership check). Anonymous visitors are stopped by the login redirect. | Audit SEC-02 |
+| Model | `claude-opus-5` | `client.ts` |
+| Was a key ever committed to the code? | **No.** No `sk-ant-` string appears in any commit in the repository's history, and no environment file was ever committed. | `git log -S` over all history |
+| When could it have been added? | Not before **2026-08-14**: my session notes from building the Brand Writer record that no key was configured then. It was added to Vercel afterwards, by someone with access to the Vercel project. The code can't tell who. | Session notes (project memory) |
+| Can I check Vercel from here? | **No.** This workspace has no Vercel link and no Vercel CLI, and I won't install or log into anything to find out. | No `.vercel` folder |
+| Placeholder, old key or working key? | **Can't be determined from the code.** The steps below settle it without spending money. | |
+
+### A0.1 Look at the variable's details in Vercel (without revealing its value)
+1. Vercel → your Flow:er project → **Settings → Environment Variables** → find `ANTHROPIC_API_KEY`.
+2. Note, **without clicking reveal**:
+   - Which environments it applies to (you said Production and Preview; also check Development).
+   - The **last updated / created** date shown next to it.
+   - Whether it's marked **Sensitive** (then even owners can't view it).
+   - Whether it shows an **integration** badge (meaning an integration added it, not a person).
+3. If your Vercel account is a **team**, open the team's **Activity** (audit log) page and search for "environment variable". It may show **who** added `ANTHROPIC_API_KEY` and **when**.
+4. Note anyone else who has, or had, access to this Vercel project (team members, a developer or agency).
+
+### A0.2 Identify what kind of value it is (private, optional)
+Do this only if the value is **not** marked Sensitive and you're alone. Use the reveal button and look **only at the beginning** of the value, then hide it immediately. **Don't copy it, don't screenshot it, don't send me any characters.** Just tell me which category it matches:
+
+| The value… | What it means |
+|---|---|
+| begins with `sk-ant-api` | A **real Anthropic API key**. It may be working; it belongs to some API organization. |
+| begins with `sk-ant-admin` | An Anthropic **Admin key**. It doesn't work for generating text but has **organization-management powers**. **Tell me immediately**; it shouldn't be in the app at all. |
+| begins with `sk-ant-oat` | A **Claude subscription login token**, not an API key. The app's code sends it in a way the API rejects, so AI calls would fail. Using subscription credentials in an app may also be outside Anthropic's terms (verify). **Tell me.** |
+| is empty, very short, or text like `your-key-here`, `xxx`, `test` | A **placeholder**. Not functional. |
+| anything else | Probably another provider's key, or garbage. Not functional with this code. |
+
+### A0.3 Find out whether *you* own an Anthropic API organization
+1. Go to the **Anthropic Console** (console.anthropic.com). If it redirects to a newer Claude platform address, follow it.
+2. Try to sign in with **each email or Google account you use**, including the one you use for Claude and for Vercel.
+3. For each: does it show an **organization** (a dashboard with API Keys, Usage, Billing)? Or does it ask you to create a new account or organization?
+   - **Don't create anything new yet.**
+4. If an organization appears: go to **Settings → API Keys** and look for a key whose **ending characters** match the Vercel value. The Console shows a short hint for each key. Compare privately, as in A2. Then continue with sections A1–A4 below.
+5. If **no** email leads to an existing organization, the key most likely belongs to **someone else's** organization. Go to A0.5.
+
+### A0.4 Check for traces of AI actually working (no cost, read-only)
+If the key ever worked, successful AI results were saved in your database. In **Supabase → SQL Editor**, run each query (they only count; they show no content):
+
+**Q-AI1: brand summaries and insights written by AI**
+```sql
+select count(*) filter (where ai_summary <> '') as projects_with_ai_summary,
+       count(*) filter (where ai_insights is not null) as projects_with_ai_insights,
+       max(ai_insights_updated_at) as last_ai_insights_at
+from public.brand_strategy;
+```
+
+**Q-AI2: what happened to uploaded brand documents**
+```sql
+select case
+         when ai_analysis = '' then 'empty'
+         when ai_analysis like 'AI analysis isn''t configured%' then 'key was missing at that time'
+         when ai_analysis like 'Links are used as context%' then 'link (no AI call made)'
+         when ai_analysis like 'Only PDF analysis%' then 'non-PDF (no AI call made)'
+         else 'looks like real AI output'
+       end as outcome,
+       count(*) as documents,
+       min(created_at) as first_upload,
+       max(created_at) as last_upload
+from public.brand_documents
+group by 1
+order by 1;
+```
+
+**Q-AI3: "AI finished analyzing" notifications (sent only after a fully successful AI refresh)**
+```sql
+select count(*) as ai_success_notifications,
+       min(created_at) as first_seen,
+       max(created_at) as last_seen
+from public.notifications
+where event_key = 'ai_analysis_complete';
+```
+
+How to read the results:
+- Any non-zero `projects_with_ai_insights`, any `looks like real AI output` rows, or any `ai_success_notifications` → **the key has worked at least once**, on those dates, and some organization was billed.
+- All zero, or only `key was missing at that time` → no evidence it has ever produced output.
+- Caveat: this doesn't prove the key is dead; it may simply never have been used since it was added.
+
+### A0.5 Check Vercel logs for AI errors (no cost, read-only)
+In Vercel → the project → **Logs** (or Observability → Logs), choose the longest period available and search for each term separately:
+
+| Search term | If you find it, it means |
+|---|---|
+| `authentication_error` or `invalid x-api-key` | The key is **invalid or revoked**: not functional |
+| `credit balance` | The key is **valid**, but its organization has **no money**: not currently functional, becomes functional the moment someone adds credit |
+| `permission_error` | The key exists but isn't allowed to do this |
+| `rate_limit_error` or `overloaded_error` | The key is **valid and was being used** |
+| `AI analysis isn't configured` | That deployment ran **without** the key |
+
+Note which terms appear, with approximate dates. Don't copy log lines that contain long random strings.
+
+### A0.6 Decide: who controls this key's billing?
+
+| Situation | What we do |
+|---|---|
+| **A.** The key is in **your** Anthropic organization (A0.3 found it) | Continue with A1–A5 (usage, cost, spend cap), then A6 (rotate it into a Production-only key you control). |
+| **B.** A known **collaborator** added it from **their** organization | Ask them for the usage and cost history. Then replace it with your own key (A6) and have them revoke theirs. Your customers' brand content should only go to an account **you** control. |
+| **C.** The value is a **placeholder**, a subscription token (`sk-ant-oat`), another provider's key, or logs show `authentication_error` | It's not functional. Remove it (A0.7). No billing risk from it, but it should not stay. |
+| **D.** It's a **real API key** and its **origin or billing owner can't be established** | Treat it as **uncontrolled**. Apply A0.7 containment now. Reasons: you can't see or cap its spending; you don't know under whose terms your customers' content is being processed; and whoever owns it can use it elsewhere or revoke it at any moment. |
+
+### A0.7 🔒 CONTAINMENT for an unknown or uncontrolled key (do only after we agree)
+If we end up in situation C or D:
+1. Vercel → Settings → Environment Variables → `ANTHROPIC_API_KEY` → **Remove** it from **all** environments (Production, Preview, Development).
+2. **Redeploy Production** (Deployments → latest Production → ⋯ → Redeploy). Changes only apply to new deployments.
+3. After the redeploy, open a post → Caption → the AI (Brand Writer) button. You should see **"AI analysis isn't configured yet"**. That confirms no AI calls are possible from Production.
+4. **Old Preview deployments still contain the old value.** Removing the variable doesn't change them, and we can't revoke a key we don't own. So do one of:
+   - (a) delete old Preview deployments (Deployments → filter Preview → ⋯ → Delete), or
+   - (b) turn on **Deployment Protection** (Vercel Authentication) for Preview deployments so only your Vercel team can open them.
+5. If you know who owns the key (situation B), ask them to **revoke** it. That's the only step that makes it permanently useless everywhere.
+6. Write down the date and time of each step.
+
+Effect on users: every AI feature shows "AI analysis isn't configured yet" until we set up **your own** Anthropic organization with spending limits (task P0-03, rewritten accordingly). Uploading a brand document still works; its analysis field will say AI isn't configured. Nothing else in the app changes.
+
+---
+
+## A. Anthropic (for an organization you control)
+
+Only continue here if A0.3 found **your** organization (situation A), or later, once you've created your own organization for Flow:er.
 
 Go to the Anthropic Console (console.anthropic.com) and sign in with the account that owns the API key Flow:er uses.
 
@@ -237,6 +367,19 @@ Use a **new test project** that you create just for this. Never use a client's p
 ## Results form (send this back; contains no secrets)
 
 ```
+A0.1 Vercel variable — environments: · last updated: · marked Sensitive? · integration badge?
+     Activity log shows who added it? (name/date, or "not available"):
+     Other people with Vercel project access:
+A0.2 Value category (only if checked): sk-ant-api / sk-ant-admin / sk-ant-oat / placeholder / other / not checked
+A0.3 Existing Anthropic organization under any of your emails? yes (which login) / no
+     Matching key found there? yes/no
+A0.4 Q-AI1 projects_with_ai_summary: · projects_with_ai_insights: · last_ai_insights_at:
+     Q-AI2 outcomes (outcome → documents, dates):
+     Q-AI3 ai_success_notifications: · first/last seen:
+A0.5 Log terms found (term → approx. dates):
+A0.6 Situation: A / B / C / D
+A0.7 (only if done) Removed from: · Production redeployed at: · "not configured" confirmed? · Old previews deleted or protected?
+
 A1 Organization / workspaces:
 A2 Key used by Flow:er — name / workspace / created / last used:
    Unrecognized other keys? yes/no

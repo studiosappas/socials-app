@@ -19,17 +19,17 @@
 | | |
 |---|---|
 | **Current phase** | Phase 0: Immediate risk containment and verification |
-| **Current task** | P0-01 (READY FOR APPROVAL, together with the whole plan) |
+| **Current task** | P0-01, **IN PROGRESS** (code-side investigation done 2026-09-27; waiting for your checklist A0 results). Key origin and billing ownership **unknown**. |
 | **Completed tasks** | none |
 | **Blocked tasks** | Every task that needs a migration is blocked until P0-07 (schema snapshot) and P1-03 (migration baseline) are done. |
-| **Open decisions** | D-01 … D-22 (§5). Decisions needed **before Phase 0 containment**: D-01, D-02. |
+| **Open decisions** | D-01 … D-23 (§5). Decisions needed **before Phase 0 containment**: D-01, D-02, D-23. |
 | **Top open risks** | R-1 AI spend exposure (live key); R-2 possible admin self-escalation (SEC-01, unverified); R-3 cross-tenant email exposure (SEC-05); R-4 preview deployments may run against production data (P0-05). |
 
 ### Task status index
 
 | Phase | Tasks | Status |
 |---|---|---|
-| 0 | P0-01 … P0-12 | NOT STARTED |
+| 0 | P0-01 … P0-12 | P0-01 IN PROGRESS (awaiting checklist A0 results); P0-02 … P0-12 NOT STARTED |
 | 1 | P1-01 … P1-12 | NOT STARTED |
 | 2 | P2-01 … P2-07 | NOT STARTED |
 | 3 | P3-01 … P3-09 (+ P3-M1 … P3-M4 deferred to monetization) | NOT STARTED |
@@ -170,6 +170,7 @@ Dashboard-only tasks (Phase 0) go NOT STARTED → READY FOR APPROVAL → IN PROG
 | D-20 | Transactional email provider, and whether Supabase Auth mail moves to custom SMTP | P5-05 | |
 | D-21 | Account deletion policy for projects the user owns (require transfer / delete / auto-transfer) | P5-02 | |
 | D-22 | Payment provider, plans, credit pack prices, subscription allowances | P3-M1 | Monetization only; not needed for the AI activation. |
+| D-23 | If the key's origin or billing owner can't be established (checklist situation C or D): apply A0.7 containment (remove the key everywhere; AI features show "not configured") | P0-03 | Recommended: yes. For old Previews: delete them, or enable Deployment Protection. |
 
 ---
 
@@ -194,11 +195,21 @@ What code inspection has already established (no dashboard needed):
 - The model is `claude-opus-5` in `src/lib/ai/client.ts` (listed at $5 / $25 per million input/output tokens in the Claude API reference, cached 2026-06-24; verify current pricing in the Console).
 - No usage is recorded anywhere in the app. **The only source of truth for current spend is the Anthropic Console.**
 
-#### P0-01: Anthropic key inventory and usage/spend review
-- **Objective:** establish whether the key has been used, by what, and how much it has cost.
+#### P0-01: Anthropic key investigation, inventory and usage/spend review
+- **Objective:** establish where the key came from, who controls its billing, whether it's functional, and what it has been used for and cost.
 - **Ref:** SEC-02, BUG-02, AI-readiness §6.
-- **Affected:** Anthropic Console (API keys, Usage, Cost, Billing).
-- **Implementation:** none. Checklist section A1–A4.
+- **New fact (2026-09-27):** the owner doesn't recall creating an Anthropic API account or buying API credits. Code-side investigation, done without Vercel or Anthropic access and without reading the key:
+  - The key is read only in `src/lib/ai/client.ts`.
+  - The only **automatic** trigger is the brand document/link upload refresh (`overview-panels.tsx:829`). There are no cron jobs, webhooks, or AI calls from the public landing page.
+  - No key ever appears in git history.
+  - The key was not configured as of 2026-08-14 (session notes), so it was added to Vercel after that by someone with project access.
+  - Whether it's a placeholder, an old key or a working key **can't be determined from the code**.
+  - Having no Claude subscription is **not** evidence that the key is inactive (API billing is separate).
+- **Affected:** Vercel (variable metadata, activity log, logs), Anthropic Console (organizations, API keys, usage, cost, billing), Supabase (read-only count queries).
+- **Implementation:** none by me. Checklist **A0** (origin investigation: A0.1 Vercel metadata, A0.2 private value-category check, A0.3 organization ownership, A0.4 zero-cost DB evidence of successful AI calls, A0.5 zero-cost log evidence, A0.6 decision table), then A1–A4 if the organization is yours.
+- **Outcome drives P0-03:**
+  - Situation A (your organization) → rotate within your organization.
+  - Situations B, C, D (a collaborator's, non-functional, or unknown) → **A0.7 containment** (remove the variable from all environments, redeploy Production, delete or protect old Previews; revocation only possible by the owning organization), then create your own organization later for AI activation.
 - **Dependencies:** none. **Risk:** none (read-only). **Complexity:** S.
 - **Automated tests:** n/a.
 - **Manual QA / completion:** you record, without any key values: the organization/workspace the key belongs to, the key's "last used" date, monthly usage and cost for the last 3 months, any unexplained spikes, and whether auto-reload or credit top-up is on.
@@ -627,6 +638,7 @@ Every P5 task gets the full field set (objective, rollback, completion criteria 
 | ID | Risk | Current mitigation | Closed by |
 |---|---|---|---|
 | R-1 | Unbounded Anthropic spend by any registered account | None yet | P0-02 (cap), P0-03/04, P1-01, Phase 3 |
+| R-1b | The key's origin and billing owner are unknown: customer content may be processed under an organization you don't control, and its spend can't be capped by you | None yet | P0-01 (A0) → A0.7 containment or P0-03 |
 | R-2 | Admin self-escalation to service-role access (if the production policy is old) | Unknown | P0-06 → P1-04 |
 | R-3 | Cross-tenant email exposure | None | P1-05 |
 | R-4 | Preview deployments with production data plus the AI key | Unknown | P0-03, P0-05, P0-10 |
