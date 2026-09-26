@@ -159,6 +159,11 @@ Note which terms appear, with approximate dates. Don't copy log lines that conta
 **4. Vercel access: not available to me.** No Vercel CLI, no project link, no Vercel credentials on this machine. Every Vercel step below is manual, and I guide you through it.
 
 #### Before you start (5 minutes, read-only)
+> **Update 2026-09-27: P1-00 is merged into `main` (`3c2737c`).**
+> - "Analyze" can no longer overwrite existing analyses, and new uploads no longer store error text.
+> - Step 1 below is therefore **informational only** (it tells us whether AI ever worked). It no longer gates the disconnection.
+> - **Make sure the Production deployment you redeploy in step C is built from `main` @ `3c2737c` or later.**
+
 1. **Run query Q-AI2 (section A0.4)** and note whether any row says **"looks like real AI output"**.
    - If **yes**, real analyses exist, and the "Analyze" button could overwrite them after disconnection. Choose one:
      - (i) Approve the small code fix **P1-00** first (see the roadmap).

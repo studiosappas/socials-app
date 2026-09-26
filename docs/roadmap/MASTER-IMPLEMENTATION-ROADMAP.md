@@ -19,8 +19,10 @@
 | | |
 |---|---|
 | **Current phase** | Phase 0: Immediate risk containment and verification |
-| **Current task** | P0-01 / D-23: **disconnection PREFLIGHT COMPLETE** (2026-09-27), **awaiting your explicit approval to execute** checklist A0.7 (manual Vercel steps; I have no Vercel access). The key's origin and billing owner **can't be established** (owner-confirmed). Its format resembles a genuine key; it was added August 7. Decision: disconnect from Flow:er only; don't revoke; don't change Claude Code. |
-| **Completed tasks** | none |
+| **Current task** | P0-01 / D-23: **disconnection PREFLIGHT COMPLETE** (2026-09-27), **awaiting your explicit approval to execute** checklist A0.7 (manual Vercel steps; I have no Vercel access). The key's origin and billing owner **can't be established** (owner-confirmed). Its format resembles a genuine key; it was added August 7. Decision: disconnect from Flow:er only; don't revoke; don't change Claude Code. **P1-00 is now merged**, so the A0.7 "Before you start" Q-AI2 prerequisite no longer blocks disconnection: Analyze can no longer overwrite analyses. |
+| **Next task candidates** | (1) **A0.7 execution** (recommended next: the live key is the top open risk, R-1/R-1b). (2) P1-01 AI access guard. (3) The remaining Phase 0 dashboard checks (P0-05 … P0-10). Each needs your approval. |
+| **Completed tasks** | **P1-00: MERGED** 2026-09-27. Branch `fix/ai-unavailable-data-protection` @ `70e7377`, merged into `main` as `3c2737c`. Post-merge checks: 75/75 tests (network blocked), tsc clean, lint 0 errors (1 old warning), build OK. |
+| **Code baseline now** | `main` @ `3c2737c` |
 | **Blocked tasks** | Every task that needs a migration is blocked until P0-07 (schema snapshot) and P1-03 (migration baseline) are done. |
 | **Open decisions** | D-01 … D-23 (§5). Decisions needed **before Phase 0 containment**: D-01, D-02, D-23. |
 | **Top open risks** | R-1 AI spend exposure (live key); R-2 possible admin self-escalation (SEC-01, unverified); R-3 cross-tenant email exposure (SEC-05); R-4 preview deployments may run against production data (P0-05). |
@@ -30,7 +32,7 @@
 | Phase | Tasks | Status |
 |---|---|---|
 | 0 | P0-01 … P0-12 | P0-01 IN PROGRESS (disconnection preflight complete; execution awaiting approval); P0-02 … P0-12 NOT STARTED |
-| 1 (added) | P1-00 | NOT STARTED (proposed by the D-23 preflight; see the ordering note) |
+| 1 (added) | P1-00 | **MERGED** (`3c2737c`, 2026-09-27). VERIFIED is pending: per the owner, AI isn't activated yet, so live AI behavior is verified in the Phase 4 end-to-end testing. Code-level verification done: tests, review, network-blocked run. |
 | 1 | P1-01 … P1-12 | NOT STARTED |
 | 2 | P2-01 … P2-07 | NOT STARTED |
 | 3 | P3-01 … P3-09 (+ P3-M1 … P3-M4 deferred to monetization) | NOT STARTED |
@@ -317,6 +319,21 @@ What code inspection has already established (no dashboard needed):
 - **Manual QA:** without the key, click Analyze on a document with existing analysis text → the text is unchanged and a message appears; upload a new PDF → its analysis stays empty and a message appears.
 - **Completion:** QA passes. **Rollback:** revert.
 - **Ordering:** before the Vercel disconnection **if** query Q-AI2 finds real analyses (otherwise it may follow it); it's also subsumed later by P1-01's guard. Separate branch from the latest `main`, never on the planning branch.
+- **Status: MERGED** 2026-09-27. `fix/ai-unavailable-data-protection` @ `70e7377` → `main` @ `3c2737c` (merged tree identical to the approved commit).
+  - **Delivered:**
+    - `src/lib/ai/result-safety.ts`: failure classification, strict validators, `runDocumentAnalysis`, legacy-text filters.
+    - `client.ts` wraps every call in `safeAiCall`.
+    - Every persisting AI action in `overview.ts` saves only validated results.
+    - The Overview UI shows the Analyze and refresh messages.
+    - Legacy error text is hidden and excluded from prompts; stored rows are **not** modified.
+    - 38 regression tests (`src/lib/ai/result-safety.test.ts`).
+  - **Owner decision (2026-09-27):** no manual AI testing until the owner's own Anthropic account is integrated.
+  - **Residual risks, carried forward:**
+    - The unidentified key is still in Vercel (A0.7).
+    - No AI access control yet (P1-01).
+    - Legacy error rows are hidden, not cleaned.
+    - The new messages haven't been seen in a browser.
+    - SDK default timeout and retries remain (Phase 2).
 
 #### P1-01: AI access guard (first slice of the gateway)
 - **Objective:** no AI call without authentication, project membership, an allowed role, the kill switch being on, and input within limits.
@@ -660,7 +677,7 @@ Every P5 task gets the full field set (objective, rollback, completion criteria 
 |---|---|---|---|
 | R-1 | Unbounded Anthropic spend by any registered account | None yet | P0-02 (cap), P0-03/04, P1-01, Phase 3 |
 | R-1b | The key's origin and billing owner are unknown: customer content may be processed under an organization you don't control, and its spend can't be capped by you. Owner-confirmed on 2026-09-27 that it can't be established. | Disconnection preflight done | A0.7 execution (removes it from new deployments). **Never fully closed** unless its owner revokes it; existing deployments keep it (protect or delete them per A0.7-E). |
-| R-13 | With AI unavailable, the "Analyze" button overwrites real brand-document analyses with a "not configured" message, and new PDF uploads store that message | None | P1-00 (or a team "don't click Analyze" rule until it ships) |
+| R-13 | With AI unavailable, the "Analyze" button overwrites real brand-document analyses with a "not configured" message, and new PDF uploads store that message | **Closed in code by P1-00** (merged `3c2737c`). Residual: legacy rows hidden, not cleaned. | P1-00 ✔ |
 | R-2 | Admin self-escalation to service-role access (if the production policy is old) | Unknown | P0-06 → P1-04 |
 | R-3 | Cross-tenant email exposure | None | P1-05 |
 | R-4 | Preview deployments with production data plus the AI key | Unknown | P0-03, P0-05, P0-10 |
