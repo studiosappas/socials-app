@@ -280,15 +280,13 @@ export async function getPostMediaLibraryPage(
   const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
   const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
 
-  // poster_storage_path is deliberately NOT fetched here -- MediaLibraryItem
-  // only ever renders `url` (the image, or the raw <video> for a video
-  // item; see the "Add from library" grid in post-editor.tsx), never a
-  // video's poster. The original combined fetch signed poster paths for
-  // every asset in the whole library and never used them for this list --
-  // real work for nothing, only worth doing for postAssets' own
-  // PostAssetItem.posterUrl, which now lives in getPostCoreData above.
+  // poster_storage_path is fetched for VIDEO items only (see posterRows
+  // below) -- it's what a video's library tile renders. The original
+  // combined fetch signed poster paths for every asset in the whole library
+  // (images included, which never have one worth showing here).
   const allMediaIds = (mediaAssets ?? []).map((a) => a.id);
-  const [{ data: previewRows }, { data: thumbnailRows }] = await Promise.all([
+  const videoIds = (mediaAssets ?? []).filter((a) => a.media_type === "video").map((a) => a.id);
+  const [{ data: previewRows }, { data: thumbnailRows }, { data: posterRows }] = await Promise.all([
     allMediaIds.length
       ? supabase.from("media_assets").select("id, preview_storage_path").in("id", allMediaIds)
       : Promise.resolve({ data: [] }),
@@ -304,7 +302,19 @@ export async function getPostMediaLibraryPage(
     allMediaIds.length
       ? supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", allMediaIds)
       : Promise.resolve({ data: [] }),
+    // Videos only, isolated like the two above. A video never has a
+    // thumbnail_storage_path (that's image-only), so its tile used to render
+    // a raw <video> of the full original -- blank/white on iOS, and a
+    // multi-MB range request per tile everywhere. Its poster (the same
+    // image Grid already shows for that video) is what the tile renders now.
+    videoIds.length
+      ? supabase.from("media_assets").select("id, poster_storage_path").in("id", videoIds)
+      : Promise.resolve({ data: [] }),
   ]);
+  const posterPathByMediaId = new Map<string, string | null>();
+  for (const r of posterRows ?? []) {
+    posterPathByMediaId.set(r.id, (r as { id: string; poster_storage_path: string | null }).poster_storage_path ?? null);
+  }
 
   const previewPathByMediaId = new Map<string, string | null>();
   for (const r of previewRows ?? []) {
@@ -322,6 +332,8 @@ export async function getPostMediaLibraryPage(
     if (preview) allPaths.add(preview);
     const thumbnail = thumbnailPathByMediaId.get(asset.id);
     if (thumbnail) allPaths.add(thumbnail);
+    const poster = posterPathByMediaId.get(asset.id);
+    if (poster) allPaths.add(poster);
   }
 
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(allPaths));
@@ -347,6 +359,10 @@ export async function getPostMediaLibraryPage(
       // page's next real fetch.
       originalUrl,
       mediaType: asset.media_type,
+      posterUrl: (() => {
+        const poster = posterPathByMediaId.get(asset.id);
+        return poster ? urlByPath.get(poster) ?? null : null;
+      })(),
       usedInCarousel: usedInCarouselIds.has(asset.id),
     };
   });

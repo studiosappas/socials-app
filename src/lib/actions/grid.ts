@@ -55,6 +55,9 @@ export type UploadMediaState =
       // shared signed-URL cache, so if this exact path gets read again by
       // another page in the same request window, it reuses this same URL.
       displayUrl?: string | null;
+      // A video's poster, signed -- becomes the library tile's posterUrl
+      // (see MediaLibraryItem.posterUrl) straight away.
+      posterDisplayUrl?: string | null;
     }
   | undefined;
 
@@ -225,11 +228,10 @@ export async function uploadMedia(
   // caller can immediately swap off its optimistic blob-URL placeholder
   // onto this cheap real one, without needing a page refresh to pick up
   // what grid/page.tsx would have resolved anyway on next load.
-  const displayUrl = await getCachedSignedUrl(
-    supabase,
-    "project-media",
-    mediaType === "image" ? (thumbnailStoragePath ?? storagePath) : storagePath,
-  );
+  const [displayUrl, posterDisplayUrl] = await Promise.all([
+    getCachedSignedUrl(supabase, "project-media", mediaType === "image" ? (thumbnailStoragePath ?? storagePath) : storagePath),
+    mediaType === "video" ? getCachedSignedUrl(supabase, "project-media", posterStoragePath) : Promise.resolve(null),
+  ]);
 
   // Not revalidating /grid (its own currently-mounted route -- Media
   // Library only ever renders there) -- that used to force a full fresh
@@ -239,7 +241,7 @@ export async function uploadMedia(
   // placeholder directly from the id/paths returned below, no page
   // refresh required. A real future navigation to /grid still picks up
   // the change regardless, since staleTimes.dynamic is 0.
-  return { id: mediaAsset.id, storagePath, posterStoragePath, clientTempId, displayUrl };
+  return { id: mediaAsset.id, storagePath, posterStoragePath, clientTempId, displayUrl, posterDisplayUrl };
 }
 
 // An asset still referenced by any post/story is archived (hidden from the

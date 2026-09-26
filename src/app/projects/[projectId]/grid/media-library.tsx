@@ -9,6 +9,7 @@ import { Dialog } from "@/components/ui/dialog";
 import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
+import { RecoverableImg } from "@/components/recoverable-img";
 
 export function MediaThumbPreview({
   item,
@@ -22,12 +23,34 @@ export function MediaThumbPreview({
   return (
     <div className={`relative h-full w-full overflow-hidden ${className}`}>
       {item.url && item.mediaType === "image" && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={item.url} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
+        <RecoverableImg
+          src={item.url}
+          assetId={item.id}
+          mediaKind="library-image"
+          loading="lazy"
+          decoding="async"
+          className="h-full w-full object-cover"
+          draggable={false}
+        />
       )}
-      {item.url && item.mediaType === "video" && (
-        <video src={item.url} className="h-full w-full object-cover" muted />
-      )}
+      {item.mediaType === "video" &&
+        (item.posterUrl ? (
+          // The video's poster image, lazy like every other tile -- see
+          // MediaLibraryItem.posterUrl for why not the raw <video>.
+          <RecoverableImg
+            src={item.posterUrl}
+            assetId={item.id}
+            mediaKind="library-video-poster"
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover"
+            draggable={false}
+          />
+        ) : (
+          // No poster (older upload / capture failed / optimistic upload
+          // still in flight): the video itself, metadata only.
+          item.url && <video src={item.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+        ))}
       {item.usedInGrid && !hideGridBadge && (
         <span
           title="Already on the Grid"

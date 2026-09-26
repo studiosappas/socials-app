@@ -126,7 +126,15 @@ export function useLibraryItems(
     setOverrideItems((current) =>
       (current ?? itemsRef.current).map((i) =>
         i.id === tempId
-          ? { ...i, id: realId, url: newUrl, storagePath: realStoragePath, posterStoragePath: realPosterStoragePath, pending: false }
+          ? {
+              ...i,
+              id: realId,
+              url: newUrl,
+              posterUrl: result.posterDisplayUrl ?? i.posterUrl ?? null,
+              storagePath: realStoragePath,
+              posterStoragePath: realPosterStoragePath,
+              pending: false,
+            }
           : i,
       ),
     );

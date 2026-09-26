@@ -86,6 +86,7 @@ import { gridInteractionReducer, initialGridInteractionState } from "./grid-inte
 import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { GRID_COVER_ASPECT_CLASS, GRID_COVER_RATIO_W, GRID_COVER_RATIO_H } from "./grid-constants";
+import { useMediaTiming } from "@/lib/media-diagnostics";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -256,6 +257,16 @@ function ScheduledIcon({ className }: { className?: string }) {
   );
 }
 
+// The Grid's video play glyph -- the exact same character Desktop has
+// always rendered (U+25B6), with U+FE0E (VARIATION SELECTOR-15, "text
+// presentation") appended. Without it, iOS/iPadOS render a bare U+25B6 as
+// the colour EMOJI (a blue rounded square with a white arrow, ▶️) instead
+// of the plain white triangle every desktop browser shows -- that's the
+// whole Mobile-vs-Desktop mismatch. On desktop browsers (already text
+// presentation) FE0E is a no-op, so Desktop renders byte-for-byte what it
+// did before.
+const PLAY_GLYPH = "\u25B6\uFE0E";
+
 export type MediaLibraryItem = {
   id: string;
   url: string | null;
@@ -273,6 +284,14 @@ export type MediaLibraryItem = {
   // restored without re-uploading (see restoreMediaAsset).
   storagePath?: string;
   posterStoragePath?: string | null;
+  // Signed URL of a VIDEO asset's poster image (the still frame captured at
+  // upload, or its saved Edit Cover). Library tiles render this as a small
+  // lazy <img> instead of a raw <video> of the full original -- which on
+  // iOS paints nothing at all (white tile) and on every browser costs a
+  // range request against a multi-MB file per video tile, all at once,
+  // even for tiles in a display:none sidebar. `url` itself is unchanged
+  // (still the video) for everything that needs the actual video.
+  posterUrl?: string | null;
   // True when this asset already appears in some OTHER carousel post in the
   // project -- purely informational (see the badge on MediaThumbPreview),
   // never blocks picking it again. Post Editor's own "already reused across
@@ -376,6 +395,10 @@ export function GridBoard({
   const router = useRouter();
   const { showError } = useToast();
   const [activeMedia, setActiveMedia] = useState<MediaLibraryItem | null>(null);
+  // Opt-in T1-T3 measurement of the Grid's own tiles (?mediaDiag=1) --
+  // no-op otherwise.
+  const gridTimingRef = useRef<HTMLDivElement>(null);
+  useMediaTiming("grid", gridTimingRef);
   const [activeSlot, setActiveSlot] = useState<GridBoardSlot | null>(null);
   // No activeRow/DragOverlay for rows (unlike activeMedia/activeSlot above)
   // -- rows deliberately use dnd-kit's OTHER supported pattern: with no
@@ -1178,7 +1201,7 @@ export function GridBoard({
           />
         </div>
 
-        <div className="flex flex-1 flex-col" style={{ gap: "2px" }}>
+        <div ref={gridTimingRef} className="flex flex-1 flex-col" style={{ gap: "2px" }}>
           {canManage && !demoMode && (
             <div className="mb-2 flex items-center justify-between gap-1">
               <div className="flex items-center gap-1">
@@ -2713,6 +2736,7 @@ const GridSlotBody = memo(function GridSlotBody({
           <CroppedCoverImage
             key={slot.coverMediaAssetId ?? slot.id}
             src={slot.thumbnailUrl}
+            assetId={slot.coverMediaAssetId}
             transform={transform}
             className="h-full w-full"
             imgClassName="animate-settle-in"
@@ -2723,7 +2747,7 @@ const GridSlotBody = memo(function GridSlotBody({
           // feature existed, or poster capture failed) -- still distinct
           // from a truly empty slot.
           <span className="flex flex-col items-center gap-1 text-muted">
-            <span className="text-lg leading-none">▶</span>
+            <span className="text-lg leading-none">{PLAY_GLYPH}</span>
             <span className="text-xs tracking-wide uppercase">Video</span>
           </span>
         ) : canManage ? (
@@ -2740,7 +2764,7 @@ const GridSlotBody = memo(function GridSlotBody({
           title="Video"
           className="absolute bottom-1 left-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-[9px] text-white"
         >
-          ▶
+          {PLAY_GLYPH}
         </span>
       )}
       {/* Top-left is the one corner not already claimed by the video badge

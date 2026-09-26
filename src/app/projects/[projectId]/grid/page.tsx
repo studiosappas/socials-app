@@ -162,6 +162,9 @@ export default async function GridPage({
       // page load, for a URL the client would never actually use.
       allPaths.add(asset.storage_path);
     }
+    // A video's library tile renders its poster image, not the video
+    // itself -- see MediaLibraryItem.posterUrl.
+    if (asset.media_type === "video" && asset.poster_storage_path) allPaths.add(asset.poster_storage_path);
   }
   for (const row of gridRowsWithPaths) {
     for (const slot of row.slots) {
@@ -216,6 +219,8 @@ export default async function GridPage({
     // restoreMediaAsset in lib/actions/grid.ts.
     storagePath: asset.storage_path,
     posterStoragePath: asset.poster_storage_path ?? null,
+    posterUrl:
+      asset.media_type === "video" && asset.poster_storage_path ? urlByPath.get(asset.poster_storage_path) ?? null : null,
     usedInGrid: usedInGridIds.has(asset.id),
     folderId: folderIdByAssetId.get(asset.id) ?? null,
     };
