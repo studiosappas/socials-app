@@ -638,11 +638,17 @@ export function BrandIntelligenceSection({
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [refreshing, setRefreshing] = useState(false);
+  // The refresh's own outcome message (e.g. AI unavailable) -- previously
+  // discarded, so a failed refresh after an upload looked like nothing
+  // happened at all. The upload itself is already saved by then.
+  const [refreshNotice, setRefreshNotice] = useState<string | undefined>();
 
   function handleIntelligenceRefresh(documentId?: string) {
     setRefreshing(true);
+    setRefreshNotice(undefined);
     startTransition(async () => {
-      await refreshBrandIntelligence(projectId, documentId);
+      const result = await refreshBrandIntelligence(projectId, documentId);
+      if (result?.message) setRefreshNotice(result.message);
       router.refresh();
       setRefreshing(false);
     });
@@ -655,6 +661,7 @@ export function BrandIntelligenceSection({
         documents={documents}
         canManage={canManage}
         refreshing={refreshing}
+        refreshNotice={refreshNotice}
         onIntelligenceRefresh={handleIntelligenceRefresh}
       />
       <BrandSpectrumPanel
@@ -672,12 +679,14 @@ export function BrandKnowledgePanel({
   documents,
   canManage,
   refreshing,
+  refreshNotice,
   onIntelligenceRefresh,
 }: {
   projectId: string;
   documents: BrandDocumentItem[];
   canManage: boolean;
   refreshing?: boolean;
+  refreshNotice?: string;
   onIntelligenceRefresh: (documentId?: string) => void;
 }) {
   const [manageOpen, setManageOpen] = useState(false);
@@ -815,7 +824,9 @@ export function BrandKnowledgePanel({
       <p className="text-center text-[10px] text-muted">
         {refreshing
           ? "AI is analyzing your brand knowledge..."
-          : `AI has analyzed: ${fileCount} File${fileCount === 1 ? "" : "s"}${
+          : refreshNotice
+            ? refreshNotice
+            : `AI has analyzed: ${fileCount} File${fileCount === 1 ? "" : "s"}${
               linkCount > 0 ? ` // ${linkCount} Link${linkCount === 1 ? "" : "s"}` : ""
             }${latest ? ` // Last updated ${relativeTime(latest.createdAt)}` : ""}`}
       </p>
@@ -827,6 +838,7 @@ export function BrandKnowledgePanel({
         documents={visibleDocuments}
         onDelete={handleDelete}
         onUploaded={onIntelligenceRefresh}
+        refreshNotice={refreshing ? undefined : refreshNotice}
       />
     </div>
   );
@@ -839,6 +851,7 @@ function BrandKnowledgeDialog({
   documents,
   onDelete,
   onUploaded,
+  refreshNotice,
 }: {
   projectId: string;
   open: boolean;
@@ -846,11 +859,15 @@ function BrandKnowledgeDialog({
   documents: BrandDocumentItem[];
   onDelete: (id: string) => void;
   onUploaded: (documentId?: string) => void;
+  refreshNotice?: string;
 }) {
   const [fileState, fileAction, filePending] = useActionState(uploadBrandDocument.bind(null, projectId), undefined);
   const [linkState, linkAction, linkPending] = useActionState(addBrandLink.bind(null, projectId), undefined);
   const [, startTransition] = useTransition();
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  // Per-document outcome of the last Analyze click (e.g. AI unavailable) --
+  // the stored analysis itself is never replaced by an error.
+  const [analyzeNotice, setAnalyzeNotice] = useState<{ documentId: string; message: string } | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | undefined>();
@@ -904,9 +921,11 @@ function BrandKnowledgeDialog({
 
   function handleAnalyze(documentId: string) {
     setAnalyzingId(documentId);
+    setAnalyzeNotice(null);
     startTransition(async () => {
-      await analyzeBrandDocument(projectId, documentId);
+      const result = await analyzeBrandDocument(projectId, documentId);
       setAnalyzingId(null);
+      if (result?.message) setAnalyzeNotice({ documentId, message: result.message });
       router.refresh();
     });
   }
@@ -964,6 +983,7 @@ function BrandKnowledgeDialog({
           </Button>
         </form>
         {linkState?.message && <p className="text-xs text-error">{linkState.message}</p>}
+        {refreshNotice && <p className="text-xs text-muted">{refreshNotice}</p>}
 
         <div className="flex flex-col gap-2">
           {documents.map((doc) => (
@@ -989,6 +1009,9 @@ function BrandKnowledgeDialog({
                 </div>
               </div>
               {doc.aiAnalysis && <p className="text-xs text-muted">{doc.aiAnalysis}</p>}
+              {analyzeNotice?.documentId === doc.id && (
+                <p className="text-xs text-error">{analyzeNotice.message}</p>
+              )}
             </div>
           ))}
           {documents.length === 0 && <p className="text-sm text-muted">No brand knowledge added yet.</p>}
