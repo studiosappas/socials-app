@@ -124,18 +124,115 @@ Note which terms appear, with approximate dates. Don't copy log lines that conta
 | **C.** The value is a **placeholder**, a subscription token (`sk-ant-oat`), another provider's key, or logs show `authentication_error` | It's not functional. Remove it (A0.7). No billing risk from it, but it should not stay. |
 | **D.** It's a **real API key** and its **origin or billing owner can't be established** | Treat it as **uncontrolled**. Apply A0.7 containment now. Reasons: you can't see or cap its spending; you don't know under whose terms your customers' content is being processed; and whoever owns it can use it elsewhere or revoke it at any moment. |
 
-### A0.7 🔒 CONTAINMENT for an unknown or uncontrolled key (do only after we agree)
-If we end up in situation C or D:
-1. Vercel → Settings → Environment Variables → `ANTHROPIC_API_KEY` → **Remove** it from **all** environments (Production, Preview, Development).
-2. **Redeploy Production** (Deployments → latest Production → ⋯ → Redeploy). Changes only apply to new deployments.
-3. After the redeploy, open a post → Caption → the AI (Brand Writer) button. You should see **"AI analysis isn't configured yet"**. That confirms no AI calls are possible from Production.
-4. **Old Preview deployments still contain the old value.** Removing the variable doesn't change them, and we can't revoke a key we don't own. So do one of:
-   - (a) delete old Preview deployments (Deployments → filter Preview → ⋯ → Delete), or
-   - (b) turn on **Deployment Protection** (Vercel Authentication) for Preview deployments so only your Vercel team can open them.
-5. If you know who owns the key (situation B), ask them to **revoke** it. That's the only step that makes it permanently useless everywhere.
-6. Write down the date and time of each step.
+### A0.7 🔒 DISCONNECTION RUNBOOK (decision D-23, owner-approved in principle on 2026-09-27; execution needs a separate approval)
 
-Effect on users: every AI feature shows "AI analysis isn't configured yet" until we set up **your own** Anthropic organization with spending limits (task P0-03, rewritten accordingly). Uploading a brand document still works; its analysis field will say AI isn't configured. Nothing else in the app changes.
+**Owner decision (2026-09-27):**
+- The key's owner, billing, validity and usage can't be established. Its format resembles a genuine Anthropic API key, and it was added to Vercel on August 7.
+- Flow:er will be **disconnected** from it.
+- The key will **not** be deleted or revoked at Anthropic. Claude Code authentication is **not** changed.
+- Production changes need a separate, explicit approval after the preflight report (below).
+
+#### Preflight findings (verified 2026-09-27, code inspection only, no paid calls)
+
+**1. What happens to each feature once the key is gone.** With no key, `src/lib/ai/client.ts` returns a "not configured" result **before** creating any Anthropic client. It doesn't throw, and no network call is made.
+
+| Feature | Where | Behavior without the key | Data impact |
+|---|---|---|---|
+| Brand Writer (Post Editor caption, Brief text) | `components/ai/brand-writer.tsx` → `brand-writer.ts:generateBrandCopy` | Shows the error text in the writer panel | None |
+| Generate Design (Brief) | `brief-board.tsx:690` → `brief.ts:generateBriefDesign` | Shows the error under the button. It returns **before** any upload or DB write. | None |
+| Refresh AI summary/sections (Overview) | `overview-panels.tsx:1062` → `generateBrandSummary`, `generateBrandSections` | Shows the error | None (returns before `upsert`) |
+| Suggest personality spectrum | `overview-panels.tsx:1073` → `suggestPersonalitySpectrum` | Shows the error | None |
+| AI insights refresh | `overview-panels.tsx:1312` → `generateAiInsights` | Shows the error | None |
+| **Automatic refresh after adding a brand link** | `overview-panels.tsx:829` → `refreshBrandIntelligence` | 3 attempts, each returns "not configured"; the result is **ignored by the client**. **Nothing is shown.** | None. The link row is saved **before** any AI runs. |
+| **Automatic analysis after uploading a PDF** | `refreshBrandIntelligence` → `analyzeBrandDocument` | **Writes the text "AI analysis isn't configured yet — set ANTHROPIC_API_KEY to enable this." into the new document's `ai_analysis`**, which then displays under the document | The document and file are saved **before** AI runs (not lost). The analysis field gets a placeholder message. |
+| **Manual "Analyze" button on any uploaded file** | `overview-panels.tsx:905/979` → `analyzeBrandDocument` | The button shows for **every** file document, including already-analyzed ones. It **overwrites** the existing `ai_analysis` with the same message. | ⚠ **Data loss:** any previously real AI analysis on that document is replaced |
+| Non-PDF uploads (.doc, .docx, .txt) | `analyzeBrandDocument` | Stores "Only PDF analysis is supported right now." (no AI call, same as today) | Unchanged |
+| Everything else: auth, projects, Grid, Library, Post Editor, scheduling, Stories, Calendar, Tasks, sharing, exports, landing page | none | **No dependency on AI.** No non-AI code path waits on or requires an AI response (verified by search: the only importers of `lib/ai/client` are `brand-writer.ts`, `overview.ts`, `brief.ts`). | None |
+
+**2. Other non-AI dependencies:** none. The key is read only in `src/lib/ai/client.ts`. No other code or configuration references it, and no cron jobs, webhooks or scheduled tasks exist.
+
+**3. Claude Code dependency: none.**
+- Neither the local shell nor the Windows user/machine environment defines `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL` (checked by **name only**; only Claude Code's own session variables exist).
+- There's no `~/.claude/settings.json`, and no project `.claude/settings*.json`, so there's no `apiKeyHelper` and no environment override.
+- Claude Code runs on your machine with your Claude Pro login. The Vercel variable is only read by Flow:er's server on Vercel. Removing it can't affect Claude Code, and nothing here changes Claude Code.
+
+**4. Vercel access: not available to me.** No Vercel CLI, no project link, no Vercel credentials on this machine. Every Vercel step below is manual, and I guide you through it.
+
+#### Before you start (5 minutes, read-only)
+1. **Run query Q-AI2 (section A0.4)** and note whether any row says **"looks like real AI output"**.
+   - If **yes**, real analyses exist, and the "Analyze" button could overwrite them after disconnection. Choose one:
+     - (i) Approve the small code fix **P1-00** first (see the roadmap).
+     - (ii) Proceed, and tell your team **not to click "Analyze"** on existing documents until P1-00 ships.
+   - If **no**, there's nothing to overwrite; proceed.
+2. Write down the **current Production deployment**: Vercel → Deployments → the one marked **Current** / Production: its date and commit (it should be `9300c00`, "Merge branch 'fix/media-loading-and-mobile-video-icon'"). It's your rollback target.
+3. Check **B2** (does Preview use the production database?) and **B3** (is Preview protected?). They decide step E below.
+
+#### A. Remove the variable from the Flow:er project only
+1. Vercel → Flow:er project → **Settings → Environment Variables**.
+2. Search `ANTHROPIC`. There may be **more than one row** with this name: one per environment, or a Preview row limited to a specific git branch. Note every row.
+3. For each row, check whether it's a **project** variable or a **shared/team** variable: shared ones show a link or "Shared" marker and are managed in **Team Settings → Environment Variables**.
+   - **Project variable:** open its ⋯ menu → **Remove**. Don't reveal or copy it.
+   - **Shared variable:** don't delete it globally, because other projects may use it. Open it in Team Settings and **unlink the Flow:er project only**. Note which other projects are linked.
+4. Remove it from **Production, Preview and Development**. Don't touch any other variable.
+5. Refresh the page and search `ANTHROPIC` again: **no rows** should remain for Flow:er.
+
+#### B. Make sure it can't come back
+1. **Team Settings → Environment Variables** (shared): search `ANTHROPIC` and confirm none is still linked to Flow:er.
+2. Project → **Integrations**: note any installed integration that says it manages environment variables. Don't remove anything; just tell me.
+3. Repository: already verified. No `.env` file is committed (`.env*` is git-ignored), there's no `vercel.json`, and the code has no hard-coded key.
+
+#### C. Redeploy Production without the variable
+1. Vercel → **Deployments** → the **Current** Production deployment → ⋯ → **Redeploy**. Keep the same commit; the build cache is fine.
+2. Wait for **Ready**, then confirm this new deployment is now marked **Current** and serves your production domain.
+3. Note the time.
+
+#### D. Verify Production (see "Regression checks" below)
+Run all checks. **Don't declare success until every check passes.**
+
+#### E. Existing deployments that still hold the key
+Removing the variable does **not** change deployments that already exist. This includes **old Preview deployments** and **old Production deployments**, which stay reachable through their own `…vercel.app` deployment URLs. They keep the key until its unknown owner revokes it. Options, in order of preference:
+1. **Protect them (reversible, keeps rollback targets):** Settings → **Deployment Protection** → turn on **Vercel Authentication** with the scope that covers **all deployment URLs except your production domain** (the wording varies, e.g. "Standard Protection"; choose the option that isn't limited to Previews only). After that, only members of your Vercel team can open those URLs.
+2. **Delete old Preview deployments** you don't need: Deployments → filter **Preview** → ⋯ → **Delete**. This can't be undone; that's fine for previews.
+3. Keep at least the **previous Production deployment** (your rollback target) until the new one is verified. Protect it rather than delete it.
+
+#### F. Future Preview deployments
+Because the variable no longer has a Preview scope, new Preview deployments are built without it. **Check** this on the next Preview deployment (the first feature branch we push): its AI buttons must show the "not configured" message.
+
+#### Expected user-visible changes after disconnection
+- Every AI button shows **"AI analysis isn't configured yet — set ANTHROPIC_API_KEY to enable this."** This wording exposes a technical variable name to customers. It becomes neutral wording in P1-00 / P1-01.
+- Newly uploaded PDFs show that same sentence as their "analysis".
+- Adding a brand link: saved normally. No AI message appears, and no new AI summary is produced.
+- Nothing else changes.
+
+#### Regression checks after redeploy (you, on the production domain, with a throwaway test project)
+| # | Check | Pass criteria |
+|---|---|---|
+| 1 | Log out → **register** a test account (or log in with an existing test account) → **log in** | Lands on Projects |
+| 2 | **Create a project**, open Overview, Grid, Calendar, Content/Stories, Brief, Tasks, Settings | Every page loads, no error page |
+| 3 | **Overview → Brand knowledge → upload a small PDF** | The document appears in the list; after a refresh it's still there; its analysis says AI isn't configured; no crash |
+| 4 | **Overview → add a brand link** | The link appears and persists after a refresh |
+| 5 | **Overview → Refresh AI / Suggest spectrum / Insights refresh** | A readable "not configured" message; existing text unchanged |
+| 6 | **Grid:** upload an image, place it in a slot, refresh | The image persists and shows |
+| 7 | **Media Library:** open, scroll, pick an image | Thumbnails load |
+| 8 | **Post Editor:** open a post, edit the caption, set the date and time, **Save**, close, reopen, refresh | All values persist |
+| 9 | **Post Editor → AI/Brand Writer button** | Shows the "not configured" message; the caption is untouched |
+| 10 | **Brief → Generate Design** | Shows the "not configured" message; no new asset is created |
+| 11 | **Client review link:** create a share link, open it in a private window | Gallery loads; Approve works |
+| 12 | **Anthropic spend:** you can't see this key's usage. Skip it; recorded as an unresolved risk. | n/a |
+| 13 | On a **Preview** deployment (next time one exists): the AI button shows "not configured" | Confirms F |
+
+#### Rollback
+- **If Production breaks for any reason after C:** Vercel → Deployments → your noted previous Production deployment → **Instant Rollback** (or "Promote to Production"). This restores the previous behavior, **including the old key**, because old deployments keep their environment. Then tell me.
+- **The variable itself can't be re-added** without its value, and we don't have the value and must not store it. So for this disconnection, rollback means **promoting the previous deployment**, not re-creating the variable.
+- Deployment Protection can be turned off again at any time.
+
+#### Unresolved risks (remain after disconnection)
+1. **The key stays valid** wherever else it's used, until its unknown owner revokes it. We can't say it's disabled.
+2. **Deployments you keep** (protected ones) still contain it. Protection limits who can reach them; it doesn't remove the key.
+3. **Past usage and cost are unknown.** If Q-AI1/Q-AI2/Q-AI3 show real AI output, some of your customers' brand content has already been sent to Anthropic under an organization you don't control.
+4. **Placeholder analysis text** accumulates on new PDF uploads until P1-00 or P1-01. It's recognizable by its fixed wording and can be cleaned later.
+5. **The "Analyze" overwrite risk** (see "Before you start") until P1-00.
+6. **Preview → production database** (B2) is still unknown. It doesn't affect the disconnection, but it affects how we test future branches.
 
 ---
 
@@ -378,7 +475,14 @@ A0.4 Q-AI1 projects_with_ai_summary: · projects_with_ai_insights: · last_ai_in
      Q-AI3 ai_success_notifications: · first/last seen:
 A0.5 Log terms found (term → approx. dates):
 A0.6 Situation: A / B / C / D
-A0.7 (only if done) Removed from: · Production redeployed at: · "not configured" confirmed? · Old previews deleted or protected?
+A0.7 Before-you-start: Q-AI2 "real AI output" rows? yes/no · Chosen path (P1-00 first / proceed + no-Analyze rule):
+     Rollback target (Production deployment date / commit):
+     A: rows found (count, project vs shared, other linked projects):  · removed at:
+     B: shared link remaining? · integrations managing env vars:
+     C: redeployed at: · new deployment is Current? yes/no
+     D: regression checks 1–11 passed? (list any failures)
+     E: protection enabled (which scope) / previews deleted (count) / previous Production kept?
+     F: (later) first new Preview shows "not configured"? yes/no
 
 A1 Organization / workspaces:
 A2 Key used by Flow:er — name / workspace / created / last used:

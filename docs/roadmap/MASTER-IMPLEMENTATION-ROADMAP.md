@@ -19,7 +19,7 @@
 | | |
 |---|---|
 | **Current phase** | Phase 0: Immediate risk containment and verification |
-| **Current task** | P0-01, **IN PROGRESS** (code-side investigation done 2026-09-27; waiting for your checklist A0 results). Key origin and billing ownership **unknown**. |
+| **Current task** | P0-01 / D-23: **disconnection PREFLIGHT COMPLETE** (2026-09-27), **awaiting your explicit approval to execute** checklist A0.7 (manual Vercel steps; I have no Vercel access). The key's origin and billing owner **can't be established** (owner-confirmed). Its format resembles a genuine key; it was added August 7. Decision: disconnect from Flow:er only; don't revoke; don't change Claude Code. |
 | **Completed tasks** | none |
 | **Blocked tasks** | Every task that needs a migration is blocked until P0-07 (schema snapshot) and P1-03 (migration baseline) are done. |
 | **Open decisions** | D-01 … D-23 (§5). Decisions needed **before Phase 0 containment**: D-01, D-02, D-23. |
@@ -29,7 +29,8 @@
 
 | Phase | Tasks | Status |
 |---|---|---|
-| 0 | P0-01 … P0-12 | P0-01 IN PROGRESS (awaiting checklist A0 results); P0-02 … P0-12 NOT STARTED |
+| 0 | P0-01 … P0-12 | P0-01 IN PROGRESS (disconnection preflight complete; execution awaiting approval); P0-02 … P0-12 NOT STARTED |
+| 1 (added) | P1-00 | NOT STARTED (proposed by the D-23 preflight; see the ordering note) |
 | 1 | P1-01 … P1-12 | NOT STARTED |
 | 2 | P2-01 … P2-07 | NOT STARTED |
 | 3 | P3-01 … P3-09 (+ P3-M1 … P3-M4 deferred to monetization) | NOT STARTED |
@@ -207,6 +208,12 @@ What code inspection has already established (no dashboard needed):
   - Having no Claude subscription is **not** evidence that the key is inactive (API billing is separate).
 - **Affected:** Vercel (variable metadata, activity log, logs), Anthropic Console (organizations, API keys, usage, cost, billing), Supabase (read-only count queries).
 - **Implementation:** none by me. Checklist **A0** (origin investigation: A0.1 Vercel metadata, A0.2 private value-category check, A0.3 organization ownership, A0.4 zero-cost DB evidence of successful AI calls, A0.5 zero-cost log evidence, A0.6 decision table), then A1–A4 if the organization is yours.
+- **Update 2026-09-27 (owner):**
+  - Claude Code runs on a Claude Pro login. The key was added on August 7, and its format resembles a genuine key.
+  - Owner, billing, validity and usage **can't be established** → situation D.
+  - D-23 approved in principle: disconnect from Flow:er only (no revocation, no Claude Code change); execution needs a separate approval.
+  - Preflight (checklist A0.7): no non-AI dependency, and no Claude Code dependency (no `ANTHROPIC_*` variables anywhere locally, no Claude settings overrides). No Vercel access for me, so the steps are manual.
+  - New finding **R-13** leads to proposed task **P1-00**.
 - **Outcome drives P0-03:**
   - Situation A (your organization) → rotate within your organization.
   - Situations B, C, D (a collaborator's, non-functional, or unknown) → **A0.7 containment** (remove the variable from all environments, redeploy Production, delete or protect old Previews; revocation only possible by the owning organization), then create your own organization later for AI activation.
@@ -296,6 +303,20 @@ What code inspection has already established (no dashboard needed):
 ---
 
 ### PHASE 1: Existing critical security fixes (and current data-loss items)
+
+#### P1-00: Safe behavior when AI is unavailable (added 2026-09-27 by the D-23 preflight)
+- **Objective:** a missing or disabled AI configuration must never overwrite or pollute user data, and must show a neutral message.
+- **Ref:** D-23 preflight (checklist A0.7); related to SEC-02 and BUG-02.
+- **Finding:** `analyzeBrandDocument` (`src/lib/actions/overview.ts`) writes the "not configured" text into `brand_documents.ai_analysis`. The Overview "Analyze" button (`overview-panels.tsx:979`) shows for every file document, so after disconnection it **overwrites existing real analyses**. The user-facing message also exposes the variable name `ANTHROPIC_API_KEY`.
+- **Affected:**
+  - `src/lib/actions/overview.ts` (`analyzeBrandDocument`: return the message instead of writing it; never replace a non-empty analysis with an error).
+  - `src/lib/ai/client.ts` (neutral `NOT_CONFIGURED` wording).
+  - `overview-panels.tsx` (show the returned message for Analyze and for the automatic refresh).
+- **Dependencies:** none. **Risk:** Low. **Complexity:** S. **Mig:** no. **Dash:** no.
+- **Automated tests:** a unit test with a mocked AI client: "not configured" → no DB write; an existing analysis is untouched.
+- **Manual QA:** without the key, click Analyze on a document with existing analysis text → the text is unchanged and a message appears; upload a new PDF → its analysis stays empty and a message appears.
+- **Completion:** QA passes. **Rollback:** revert.
+- **Ordering:** before the Vercel disconnection **if** query Q-AI2 finds real analyses (otherwise it may follow it); it's also subsumed later by P1-01's guard. Separate branch from the latest `main`, never on the planning branch.
 
 #### P1-01: AI access guard (first slice of the gateway)
 - **Objective:** no AI call without authentication, project membership, an allowed role, the kill switch being on, and input within limits.
@@ -638,7 +659,8 @@ Every P5 task gets the full field set (objective, rollback, completion criteria 
 | ID | Risk | Current mitigation | Closed by |
 |---|---|---|---|
 | R-1 | Unbounded Anthropic spend by any registered account | None yet | P0-02 (cap), P0-03/04, P1-01, Phase 3 |
-| R-1b | The key's origin and billing owner are unknown: customer content may be processed under an organization you don't control, and its spend can't be capped by you | None yet | P0-01 (A0) → A0.7 containment or P0-03 |
+| R-1b | The key's origin and billing owner are unknown: customer content may be processed under an organization you don't control, and its spend can't be capped by you. Owner-confirmed on 2026-09-27 that it can't be established. | Disconnection preflight done | A0.7 execution (removes it from new deployments). **Never fully closed** unless its owner revokes it; existing deployments keep it (protect or delete them per A0.7-E). |
+| R-13 | With AI unavailable, the "Analyze" button overwrites real brand-document analyses with a "not configured" message, and new PDF uploads store that message | None | P1-00 (or a team "don't click Analyze" rule until it ships) |
 | R-2 | Admin self-escalation to service-role access (if the production policy is old) | Unknown | P0-06 → P1-04 |
 | R-3 | Cross-tenant email exposure | None | P1-05 |
 | R-4 | Preview deployments with production data plus the AI key | Unknown | P0-03, P0-05, P0-10 |
