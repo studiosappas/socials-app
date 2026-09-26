@@ -11,6 +11,7 @@ import {
   minZoomForCoverage,
   normalizeRotationDeg,
 } from "@/lib/crop-geometry";
+import { useRecoverableSrc } from "@/components/recoverable-img";
 
 const MAX_ZOOM = 4;
 // Space the rotate handle needs ABOVE the frame (circle + connecting
@@ -577,6 +578,7 @@ export function CroppedCoverImage({
   imgClassName,
   alt = "",
   loading,
+  assetId,
 }: {
   src: string;
   transform: GridCoverTransform | null;
@@ -588,10 +590,24 @@ export function CroppedCoverImage({
   imgClassName?: string;
   alt?: string;
   loading?: "lazy" | "eager";
+  // Diagnostics only -- see RecoverableImg.
+  assetId?: string | null;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [frameSize, setFrameSize] = useState<{ w: number; h: number } | null>(null);
-  const natural = useNaturalSize(transform ? src : "");
+  // A failed load (expired signed URL, flaky network) recovers to a fresh
+  // URL for the SAME storage path instead of leaving the tile blank -- and
+  // natural-size measurement follows the recovered src too, so a recovered
+  // cover still renders with its saved crop rather than falling back to a
+  // plain object-cover.
+  const {
+    src: effectiveSrc,
+    retryKey,
+    attach,
+    onLoad: handleLoad,
+    onError: handleError,
+  } = useRecoverableSrc(src, { assetId, mediaKind: "cover" });
+  const natural = useNaturalSize(transform ? effectiveSrc : "");
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -619,7 +635,11 @@ export function CroppedCoverImage({
           return (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={src}
+              key={retryKey}
+              ref={attach}
+              src={effectiveSrc}
+              onLoad={handleLoad}
+              onError={handleError}
               alt={alt}
               draggable={false}
               loading={loading}
@@ -637,7 +657,11 @@ export function CroppedCoverImage({
       ) : (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={src}
+          key={retryKey}
+          ref={attach}
+          src={effectiveSrc}
+          onLoad={handleLoad}
+          onError={handleError}
           alt={alt}
           draggable={false}
           loading={loading}

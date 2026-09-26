@@ -49,6 +49,8 @@ import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { ScheduleTimeField } from "@/components/ui/schedule-time-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { CroppedCoverImage, GridCropOverlay } from "../../grid/grid-crop-overlay";
+import { RecoverableImg } from "@/components/recoverable-img";
+import { useMediaTiming } from "@/lib/media-diagnostics";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 import { normalizeScheduleDate, normalizeScheduleTime, type WorkspaceSettings } from "@/lib/account-settings";
 import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
@@ -697,6 +699,8 @@ function AddFromLibrarySection({
   // there, completely untouched.
   const desktopGridRef = useRef<HTMLDivElement>(null);
   const [desktopTileRowH, setDesktopTileRowH] = useState<number | null>(null);
+  // Opt-in T1-T4 measurement (?mediaDiag=1) -- no-op otherwise.
+  useMediaTiming("post-editor-library", desktopGridRef);
   useLayoutEffect(() => {
     const el = desktopGridRef.current;
     if (!el) return;
@@ -778,11 +782,33 @@ function AddFromLibrarySection({
             onClick={() => onAdd(item)}
             className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
           >
+            {/* Lazy + async decode: only the tiles actually scrolled into
+                this container's view are fetched/decoded, so a mobile
+                connection spends its bandwidth on what's visible first. */}
             {item.url && item.mediaType === "image" && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.url} alt="" className="h-full w-full object-cover" />
+              <RecoverableImg
+                src={item.url}
+                assetId={item.id}
+                mediaKind="library-image"
+                loading="lazy"
+                decoding="async"
+                className="h-full w-full object-cover"
+              />
             )}
-            {item.url && item.mediaType === "video" && (
+            {item.mediaType === "video" && item.posterUrl && (
+              // The video's own poster image -- a raw <video> here painted
+              // nothing on iOS (the white tiles) and pulled a range request
+              // against the full original for every video tile at once.
+              <RecoverableImg
+                src={item.posterUrl}
+                assetId={item.id}
+                mediaKind="library-video-poster"
+                loading="lazy"
+                decoding="async"
+                className="h-full w-full object-cover"
+              />
+            )}
+            {item.url && item.mediaType === "video" && !item.posterUrl && (
               // preload="metadata" -- mobile browsers commonly default video
               // preload to "none" to save cellular data, which otherwise
               // leaves this thumbnail with no visible frame at all until
