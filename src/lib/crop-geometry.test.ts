@@ -203,4 +203,127 @@ test("rotating back toward a less-restrictive angle never implies a lower floor 
   assert.equal(afterRotatingBackTo0, userZoom, "a zoom already above the new (lower) minimum must not be clamped down");
 });
 
+// ---------------------------------------------------------------------------
+// Landscape source in the portrait 3:4 Grid frame -- the horizontal-pan
+// regression. The squash itself was a CSS clamp (see grid-crop-overlay.tsx's
+// UNCLAMPED_IMG_SIZE, verified in a real browser by
+// grid-crop-render.check.mjs); these pin down the geometry the editor and
+// the Grid tile both rely on, simulating the editor's own pan flow exactly:
+// stored fraction -> px -> clamp -> stored fraction, zoom untouched.
+// ---------------------------------------------------------------------------
+
+const LANDSCAPE = { w: 1600, h: 900 }; // 16:9
+const PORTRAIT_FRAME = { w: 300, h: 400 }; // 3:4
+
+// Mirrors GridCropOverlay's handleImagePointerMove + clampStoredOffset.
+function panStored(
+  frame: { w: number; h: number },
+  natural: { w: number; h: number },
+  zoom: number,
+  startStored: { x: number; y: number },
+  dragPx: { x: number; y: number },
+) {
+  const base = coverBaseScale(frame.w, frame.h, natural.w, natural.h);
+  const imgW = natural.w * base;
+  const imgH = natural.h * base;
+  const raw = { x: startStored.x * imgW + dragPx.x, y: startStored.y * imgH + dragPx.y };
+  const { slackX, slackY } = coverageSlackPx(0, (imgW * zoom) / 2, (imgH * zoom) / 2, frame.w / 2, frame.h / 2);
+  const px = clampOffsetPx(raw, 0, slackX, slackY);
+  return { stored: { x: px.x / imgW, y: px.y / imgH }, px, imgW, imgH, slackX, slackY };
+}
+
+// Which part of the SOURCE (in natural-pixel fractions, 0..1) is visible
+// through the frame -- the frame-size-independent "what did the user crop"
+// answer, used to prove a saved crop reproduces identically at a different
+// render size (editor vs Grid tile vs refresh).
+function visibleSourceWindow(
+  frame: { w: number; h: number },
+  natural: { w: number; h: number },
+  zoom: number,
+  stored: { x: number; y: number },
+) {
+  const base = coverBaseScale(frame.w, frame.h, natural.w, natural.h);
+  const dispW = natural.w * base * zoom;
+  const dispH = natural.h * base * zoom;
+  const offX = stored.x * natural.w * base;
+  const offY = stored.y * natural.h * base;
+  // Image center sits at frame center + offset; frame spans +-frame/2.
+  const left = (dispW / 2 - offX - frame.w / 2) / dispW;
+  const top = (dispH / 2 - offY - frame.h / 2) / dispH;
+  return { left, top, width: frame.w / dispW, height: frame.h / dispH };
+}
+
+test("landscape in portrait frame: cover scale fills HEIGHT, extra width overflows horizontally, aspect preserved", () => {
+  const base = coverBaseScale(PORTRAIT_FRAME.w, PORTRAIT_FRAME.h, LANDSCAPE.w, LANDSCAPE.h);
+  const imgW = LANDSCAPE.w * base;
+  const imgH = LANDSCAPE.h * base;
+  assert.ok(Math.abs(imgH - PORTRAIT_FRAME.h) < 1e-9, "height must exactly fill the frame");
+  assert.ok(imgW > PORTRAIT_FRAME.w, "width must extend past the frame");
+  assert.ok(Math.abs(imgW / imgH - LANDSCAPE.w / LANDSCAPE.h) < 1e-9, "aspect ratio must be the source's own");
+  assert.equal(minZoomForCoverage(PORTRAIT_FRAME.w, PORTRAIT_FRAME.h, LANDSCAPE.w, LANDSCAPE.h, 0), 1);
+});
+
+test("landscape in portrait frame: horizontal drag reaches full left and right edges, never exposes empty space", () => {
+  const zoom = 1;
+  const farLeft = panStored(PORTRAIT_FRAME, LANDSCAPE, zoom, { x: 0, y: 0 }, { x: 10_000, y: 0 });
+  const farRight = panStored(PORTRAIT_FRAME, LANDSCAPE, zoom, { x: 0, y: 0 }, { x: -10_000, y: 0 });
+  assert.ok(farLeft.slackX > 0, "there must be horizontal room to pan");
+  assert.equal(farLeft.px.x, farLeft.slackX, "dragging right is clamped exactly at the left edge of the source");
+  assert.equal(farRight.px.x, -farRight.slackX, "dragging left is clamped exactly at the right edge of the source");
+  for (const r of [farLeft, farRight]) {
+    assert.ok(isFrameCovered(0, r.imgW / 2, r.imgH / 2, PORTRAIT_FRAME.w / 2, PORTRAIT_FRAME.h / 2, r.px));
+  }
+  const leftWin = visibleSourceWindow(PORTRAIT_FRAME, LANDSCAPE, zoom, farLeft.stored);
+  const rightWin = visibleSourceWindow(PORTRAIT_FRAME, LANDSCAPE, zoom, farRight.stored);
+  assert.ok(Math.abs(leftWin.left) < 1e-9, "far-left reveals the source's own left edge");
+  assert.ok(Math.abs(rightWin.left + rightWin.width - 1) < 1e-9, "far-right reveals the source's own right edge");
+});
+
+test("landscape in portrait frame: vertical drag is pinned at zoom 1 (no vertical slack), horizontal still free", () => {
+  const r = panStored(PORTRAIT_FRAME, LANDSCAPE, 1, { x: 0, y: 0 }, { x: 40, y: 80 });
+  assert.equal(r.px.x, 40);
+  assert.equal(r.px.y, 0);
+});
+
+test("landscape in portrait frame: dragging never changes zoom, and the visible window keeps the frame's own aspect", () => {
+  const zoom = 1.6;
+  let stored = { x: 0, y: 0 };
+  for (const dx of [-500, 120, 900, -2000, 33]) {
+    stored = panStored(PORTRAIT_FRAME, LANDSCAPE, zoom, stored, { x: dx, y: 0 }).stored;
+    const win = visibleSourceWindow(PORTRAIT_FRAME, LANDSCAPE, zoom, stored);
+    // Visible source region's own pixel aspect == frame aspect -> no stretch.
+    const aspect = (win.width * LANDSCAPE.w) / (win.height * LANDSCAPE.h);
+    assert.ok(Math.abs(aspect - PORTRAIT_FRAME.w / PORTRAIT_FRAME.h) < 1e-9, `aspect drifted to ${aspect}`);
+    // Width of the visible window depends only on zoom -- unchanged by pans.
+    assert.ok(Math.abs(win.width - PORTRAIT_FRAME.w / (LANDSCAPE.w * coverBaseScale(PORTRAIT_FRAME.w, PORTRAIT_FRAME.h, LANDSCAPE.w, LANDSCAPE.h) * zoom)) < 1e-12);
+    assert.ok(win.left >= -1e-9 && win.left + win.width <= 1 + 1e-9, "visible window left the source (empty space)");
+  }
+});
+
+test("saved crop reproduces the identical source window at a different render size (editor -> Grid tile / refresh)", () => {
+  const zoom = 1.25;
+  const saved = panStored(PORTRAIT_FRAME, LANDSCAPE, zoom, { x: 0, y: 0 }, { x: -140, y: 30 }).stored;
+  const inEditor = visibleSourceWindow(PORTRAIT_FRAME, LANDSCAPE, zoom, saved);
+  for (const tile of [{ w: 150, h: 200 }, { w: 90, h: 120 }, { w: 1080, h: 1440 }]) {
+    const onTile = visibleSourceWindow(tile, LANDSCAPE, zoom, saved);
+    for (const k of ["left", "top", "width", "height"] as const) {
+      assert.ok(Math.abs(onTile[k] - inEditor[k]) < 1e-9, `${k} differs at ${tile.w}x${tile.h}`);
+    }
+  }
+});
+
+test("portrait and square sources: existing behavior -- width fills, vertical pan only (portrait), no pan at zoom 1 (square in square)", () => {
+  const portrait = { w: 900, h: 1600 };
+  const p = panStored(PORTRAIT_FRAME, portrait, 1, { x: 0, y: 0 }, { x: 50, y: 10_000 });
+  assert.equal(p.px.x, 0, "portrait source taller than 3:4 has no horizontal slack at zoom 1");
+  assert.ok(p.px.y > 0 && p.px.y === p.slackY, "vertical pan clamps at the source's top edge");
+  assert.ok(isFrameCovered(0, p.imgW / 2, p.imgH / 2, PORTRAIT_FRAME.w / 2, PORTRAIT_FRAME.h / 2, p.px));
+
+  const square = { w: 1000, h: 1000 };
+  const sq = panStored({ w: 300, h: 300 }, square, 1, { x: 0, y: 0 }, { x: 80, y: -80 });
+  assert.deepEqual(sq.px, { x: 0, y: 0 });
+  const sqZoomed = panStored({ w: 300, h: 300 }, square, 2, { x: 0, y: 0 }, { x: 80, y: -80 });
+  assert.deepEqual(sqZoomed.px, { x: 80, y: -80 }, "square zoomed in pans freely within bounds");
+});
+
 console.log(`\n${passed} passed`);

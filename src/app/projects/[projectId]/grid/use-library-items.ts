@@ -11,6 +11,7 @@ import {
 } from "@/lib/actions/grid";
 import { uploadFilesConcurrently, type ConcurrentUploadOutcome } from "@/lib/video-poster";
 import { useToast } from "@/lib/hooks/use-toast";
+import { createInsertSequencer, insertOrderForNewestFirst } from "@/lib/upload-insert-order";
 import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import type { MediaLibraryItem } from "./grid-board";
 
@@ -81,7 +82,16 @@ export function useLibraryItems(
     pendingBlobUrlsRef.current = new Set();
   }, [items]);
 
+  // One sequencer for this hook's whole lifetime, so a second batch started
+  // while the first is still uploading also inserts strictly after it (and
+  // therefore sorts above it, matching where its placeholders were shown).
+  const [insertSequencer] = useState(createInsertSequencer);
+
   function handleUploadResult(outcome: ConcurrentUploadOutcome<UploadMediaState>) {
+    // First, before any early return below -- every outcome (success OR
+    // failure) must free this file's insert turn or later uploads would
+    // wait on it forever.
+    insertSequencer.release(outcome.tempId);
     endMutation();
     advanceUploadBatch();
 
@@ -178,6 +188,13 @@ export function useLibraryItems(
   // position on completion (handleUploadResult) -- never removed-and-
   // reappended, so finishing in a different order than selected (expected
   // with concurrency > 1) never reshuffles either surface.
+  //
+  // They go at the TOP, matching the server's canonical Library order (the
+  // Grid page's media_assets query, created_at DESC) -- they used to be
+  // appended at the bottom, so a fresh upload only jumped to the top after a
+  // refresh. The insert sequencer makes the rows' created_at follow the
+  // reverse of selection order (see insertOrderForNewestFirst), so the order
+  // shown here is exactly what the server returns after a refresh.
   const uploadFiles = useCallback(
     (files: File[]) => {
       setUploadError(null);
@@ -198,16 +215,25 @@ export function useLibraryItems(
           } satisfies MediaLibraryItem,
         };
       });
-      setOverrideItems((current) => [...(current ?? itemsRef.current), ...optimistic.map((o) => o.item)]);
+      setOverrideItems((current) => [...optimistic.map((o) => o.item), ...(current ?? itemsRef.current)]);
       for (let i = 0; i < optimistic.length; i++) beginMutation();
       setUploadBatch((current) => ({
         total: (current?.total ?? 0) + optimistic.length,
         done: current?.done ?? 0,
       }));
+      // Handed to the worker pool IN insert order, not just gated into it:
+      // a file only ever waits on files dispensed before it, which are
+      // already being worked on, so the pool can never deadlock on a turn.
+      const inInsertOrder = insertOrderForNewestFirst(optimistic);
+      insertSequencer.enqueue(inInsertOrder.map((o) => o.tempId));
       uploadFilesConcurrently(
         projectId,
-        optimistic.map((o) => ({ file: o.file, tempId: o.tempId })),
-        (formData) => uploadMedia(projectId, undefined, formData),
+        inInsertOrder.map((o) => ({ file: o.file, tempId: o.tempId })),
+        async (formData) => {
+          const tempId = formData.get("clientTempId");
+          if (typeof tempId === "string") await insertSequencer.waitTurn(tempId);
+          return uploadMedia(projectId, undefined, formData);
+        },
         handleUploadResult,
         UPLOAD_CONCURRENCY,
       );

@@ -37,3 +37,20 @@ export const POST_BODY_ASPECT_RATIO = POST_BODY_RATIO_W / POST_BODY_RATIO_H;
 export const POST_BODY_ASPECT_CLASS = "aspect-[4/5]";
 export const POST_BODY_EXPORT_WIDTH = 1080;
 export const POST_BODY_EXPORT_HEIGHT = Math.round(POST_BODY_EXPORT_WIDTH / POST_BODY_ASPECT_RATIO);
+
+// Both crop renderers in grid-crop-overlay.tsx (the editor and
+// CroppedCoverImage) size their <img> to the source's base-cover box
+// (naturalW/H * baseScale), which for any image wider than the frame -- a
+// landscape photo in the 3:4 portrait cover -- is WIDER than its
+// containing block. Tailwind's preflight (`img { max-width: 100% }`)
+// silently clamped that width back to the frame's own width while the
+// explicit inline height survived, squashing a landscape image to the
+// frame's aspect ratio; the pan bounds (computed from the real imgW) then
+// let a drag slide that squashed image off the frame and expose empty
+// space -- the "image shrinks when dragged horizontally" bug. Portrait
+// sources were never affected: they only ever overflow vertically, and
+// preflight sets no max-height. Measured in Chromium: a 16:9 source in a
+// 150x200 frame rendered 150x200 (aspect 0.75) before, 355.5x200 (1.778)
+// after. A plain object (not React.CSSProperties) so the Node-run browser
+// check grid-crop-render.check.mjs can import this exact value.
+export const UNCLAMPED_IMG_SIZE = { maxWidth: "none", maxHeight: "none" } as const;
