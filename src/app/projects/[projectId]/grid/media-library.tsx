@@ -10,6 +10,8 @@ import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { RecoverableImg } from "@/components/recoverable-img";
+import { useToast } from "@/lib/hooks/use-toast";
+import { isFileDrag, partitionDroppedFiles, rejectedFilesMessage } from "@/lib/media-drop";
 
 export function MediaThumbPreview({
   item,
@@ -155,6 +157,98 @@ export function MediaLibrary({
     activeFolderId ? item.folderId === activeFolderId : !item.folderId,
   );
 
+  // Every upload entry point (Upload Assets, the "+" tile, drag-and-drop)
+  // goes through here -> the ONE shared useLibraryItems pipeline, so drops
+  // get the exact same validation/storage/thumbnail/poster/error handling
+  // and optimistic placeholders as the picker. New uploads land at the top
+  // of the ROOT view (they're never foldered), so this returns there and
+  // scrolls the tile list up -- otherwise a user browsing a folder, or
+  // scrolled down a long library, wouldn't see them appear.
+  const tileListRef = useRef<HTMLDivElement>(null);
+  function startUpload(files: File[]) {
+    if (files.length === 0) return;
+    setActiveFolderId(null);
+    tileListRef.current?.scrollTo({ top: 0 });
+    uploadFiles(files);
+  }
+
+  // Desktop drag-and-drop from the OS onto the whole Library panel. Native
+  // HTML5 drag events only -- the Library's own asset->Grid drags are
+  // dnd-kit POINTER-event drags that never fire these, and isFileDrag
+  // additionally ignores any in-page text/link/image drag, so neither can
+  // trigger the drop state or an upload. Depth-counted (same pattern as
+  // stories-board.tsx) because dragenter/dragleave fire for every child
+  // element crossed.
+  const { showError } = useToast();
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const dragDepthRef = useRef(0);
+  const dropEnabled = !demoMode;
+
+  function handleDroppedFiles(fileList: FileList) {
+    const { accepted, rejected } = partitionDroppedFiles(Array.from(fileList));
+    const rejectedMessage = rejectedFilesMessage(rejected);
+    if (rejectedMessage) showError(rejectedMessage);
+    startUpload(accepted);
+  }
+
+  // While the Library is mounted, a file dropped anywhere OUTSIDE it is
+  // swallowed instead of making the browser navigate to/open the file
+  // (which would throw away the whole Grid page). Window + bubble phase and
+  // only when nothing closer already claimed the event
+  // (!defaultPrevented), so the Library's own drop target -- or any other
+  // real drop target -- still works; dropEffect "none" shows the no-drop
+  // cursor there, so nothing is uploaded.
+  useEffect(() => {
+    if (!dropEnabled) return;
+    function swallowStrayFileDrag(e: DragEvent) {
+      if (!isFileDrag(e.dataTransfer?.types) || e.defaultPrevented) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "none";
+    }
+    function resetDragState() {
+      dragDepthRef.current = 0;
+      setIsFileDragOver(false);
+    }
+    window.addEventListener("dragover", swallowStrayFileDrag);
+    window.addEventListener("drop", swallowStrayFileDrag);
+    window.addEventListener("drop", resetDragState);
+    window.addEventListener("dragend", resetDragState);
+    return () => {
+      window.removeEventListener("dragover", swallowStrayFileDrag);
+      window.removeEventListener("drop", swallowStrayFileDrag);
+      window.removeEventListener("drop", resetDragState);
+      window.removeEventListener("dragend", resetDragState);
+    };
+  }, [dropEnabled]);
+
+  const dropZoneHandlers = dropEnabled
+    ? {
+        onDragEnter: (e: React.DragEvent) => {
+          if (!isFileDrag(e.dataTransfer.types)) return;
+          e.preventDefault();
+          dragDepthRef.current += 1;
+          setIsFileDragOver(true);
+        },
+        onDragOver: (e: React.DragEvent) => {
+          if (!isFileDrag(e.dataTransfer.types)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        },
+        onDragLeave: (e: React.DragEvent) => {
+          if (!isFileDrag(e.dataTransfer.types)) return;
+          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+          if (dragDepthRef.current === 0) setIsFileDragOver(false);
+        },
+        onDrop: (e: React.DragEvent) => {
+          if (!isFileDrag(e.dataTransfer.types)) return;
+          e.preventDefault();
+          dragDepthRef.current = 0;
+          setIsFileDragOver(false);
+          if (e.dataTransfer.files.length > 0) handleDroppedFiles(e.dataTransfer.files);
+        },
+      }
+    : {};
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
@@ -205,7 +299,22 @@ export function MediaLibrary({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    // h-full: in Grid's sidebar this stretches to the full column height, so
+    // the drop target is the whole panel, not just however tall its current
+    // tiles happen to be.
+    <div className={`relative flex flex-col gap-3 ${dropEnabled ? "h-full" : ""}`} {...dropZoneHandlers}>
+      {isFileDragOver && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -inset-2 z-20 border-2 border-dashed border-foreground/50 bg-background/80"
+        >
+          <div className="sticky top-24 flex flex-col items-center gap-1 px-4 pt-16 text-center">
+            <UploadDropIcon className="h-6 w-6 text-foreground" />
+            <span className="text-xs tracking-wide text-foreground uppercase">Drop to upload</span>
+            <span className="text-[11px] text-muted">Images and videos</span>
+          </div>
+        </div>
+      )}
       {!demoMode && (
         <form ref={formRef} className="flex flex-col gap-2">
           <input
@@ -224,7 +333,7 @@ export function MediaLibrary({
               // bounded-concurrency upload pipeline itself now live in
               // useLibraryItems -- see its own comments for the full
               // reasoning (unchanged from before this was extracted).
-              uploadFiles(files);
+              startUpload(files);
             }}
           />
           <Button
@@ -280,6 +389,7 @@ export function MediaLibrary({
           guessed; the `wide` formula below follows the identical
           per-column-width * 4/3 derivation, just parameterized. */}
       <div
+        ref={tileListRef}
         className={`grid gap-1 auto-rows-[var(--tile-row-h)] ${wide ? "grid-cols-2 gap-2" : "grid-cols-3"} ${demoMode ? "" : "max-h-[620px] overflow-y-auto"}`}
         style={{
           ["--tile-row-h" as string]: wide
@@ -389,6 +499,15 @@ export function MediaLibrary({
         </form>
       </Dialog>
     </div>
+  );
+}
+
+function UploadDropIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path d="M12 15V4m0 0-4 4m4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" strokeLinecap="round" />
+    </svg>
   );
 }
 

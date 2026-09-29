@@ -251,20 +251,33 @@ export async function uploadFilesConcurrently<TResult>(
       nextIndex += 1;
       if (i >= files.length) return;
       const { file, tempId } = files[i];
+      onResult(await uploadOne(file, tempId));
+    }
+  }
 
+  // Each file's whole pipeline resolves to exactly ONE outcome, reported
+  // once by the worker above: anything unexpected thrown mid-pipeline
+  // (poster/thumbnail generation, a network rejection) becomes that file's
+  // error outcome instead of silently killing its worker -- which used to
+  // leave the placeholder spinning forever and skip every file queued behind
+  // it on that worker. The Library's insert sequencer
+  // (lib/upload-insert-order.ts) depends on this: an outcome is what
+  // releases a file's insert turn.
+  async function uploadOne(file: File, tempId: string): Promise<ConcurrentUploadOutcome<TResult>> {
+    const fail = (message: string): ConcurrentUploadOutcome<TResult> => ({
+      status: "error",
+      tempId,
+      fileName: file.name,
+      message,
+    });
+    try {
       const sizeCheck = validateUploadSize(file);
-      if (!sizeCheck.ok) {
-        onResult({ status: "error", tempId, fileName: file.name, message: sizeCheck.message });
-        continue;
-      }
+      if (!sizeCheck.ok) return fail(sizeCheck.message);
 
       const mediaType = file.type.startsWith("video/") ? "video" : file.type === "application/pdf" ? "pdf" : "image";
       const storagePath = newStoragePath(projectId, file.name);
       const uploaded = await uploadFileDirect("project-media", storagePath, file);
-      if ("error" in uploaded) {
-        onResult({ status: "error", tempId, fileName: file.name, message: uploaded.error });
-        continue;
-      }
+      if ("error" in uploaded) return fail(uploaded.error);
 
       const formData = new FormData();
       formData.set("storagePath", uploaded.path);
@@ -290,17 +303,10 @@ export async function uploadFilesConcurrently<TResult>(
         }
       }
 
-      try {
-        const result = await dispatch(formData);
-        onResult({ status: "success", tempId, fileName: file.name, result });
-      } catch (error) {
-        onResult({
-          status: "error",
-          tempId,
-          fileName: file.name,
-          message: error instanceof Error ? error.message : "Upload failed.",
-        });
-      }
+      const result = await dispatch(formData);
+      return { status: "success", tempId, fileName: file.name, result };
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : "Upload failed.");
     }
   }
 

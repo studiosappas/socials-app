@@ -12,6 +12,7 @@ import {
   normalizeRotationDeg,
 } from "@/lib/crop-geometry";
 import { useRecoverableSrc } from "@/components/recoverable-img";
+import { UNCLAMPED_IMG_SIZE } from "./grid-constants";
 
 const MAX_ZOOM = 4;
 // Space the rotate handle needs ABOVE the frame (circle + connecting
@@ -374,6 +375,7 @@ export function GridCropOverlay({
     left: "50%",
     width: imgW,
     height: imgH,
+    ...UNCLAMPED_IMG_SIZE,
     cursor: "move",
     touchAction: "none",
     transform: `translate(-50%, -50%) translate(${offset.x * imgW}px, ${offset.y * imgH}px) rotate(${rotation}deg) scale(${zoom})`,
@@ -649,6 +651,7 @@ export function CroppedCoverImage({
                 left: "50%",
                 width: imgW,
                 height: imgH,
+                ...UNCLAMPED_IMG_SIZE,
                 transform: `translate(-50%, -50%) translate(${clamped.x}px, ${clamped.y}px) rotate(${rotation}deg) scale(${zoom})`,
               }}
             />
