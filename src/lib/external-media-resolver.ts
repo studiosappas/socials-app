@@ -1,5 +1,11 @@
 import { safeFetch } from "@/lib/safe-fetch";
 import { MAX_IMAGE_UPLOAD_SIZE_BYTES } from "@/lib/upload-limits";
+import {
+  extractPinterestVideoMetadata,
+  isPinterestHost,
+  resolvePinterestVideo,
+  type MediaFetcher,
+} from "@/lib/pinterest-media";
 
 // The one real "paste a URL, figure out what it actually is" pipeline in
 // the app -- addBriefTaskLink (src/lib/actions/brief.ts) is its only caller
@@ -398,9 +404,34 @@ async function isLikelyGenericSiteImage(candidateImageUrl: string, pageUrl: stri
   }
 }
 
+// SSRF-safe "fetch this URL, but only accept it as the given media type"
+// -- the real MediaFetcher behind resolvePinterestVideo (pinterest-media.ts).
+// Same safeFetch + size-ceiling discipline as every other fetch here.
+const fetchMediaOfType: MediaFetcher = async (url, typePrefix) => {
+  const result = await safeFetch(url);
+  if (!result.ok || !result.response.ok) return { ok: false, reason: "unavailable" };
+  const type = cleanMimeType(result.response.headers.get("content-type") ?? "");
+  if (!type.startsWith(typePrefix)) return { ok: false, reason: "wrong_type" };
+  const contentLength = result.response.headers.get("content-length");
+  if (contentLength && Number(contentLength) > MAX_FETCH_BYTES) return { ok: false, reason: "too_large" };
+  const buffer = await readBodyWithLimit(result.response, MAX_FETCH_BYTES);
+  if (!buffer) return { ok: false, reason: "too_large" };
+  return { ok: true, buffer, contentType: type, finalUrl: result.finalUrl };
+};
+
 export type ResolvedExternalMedia =
   | { kind: "image"; buffer: Buffer; contentType: string; fileName: string; label: string | null }
-  | { kind: "video"; buffer: Buffer; contentType: string; fileName: string; label: string | null }
+  | {
+      kind: "video";
+      buffer: Buffer;
+      contentType: string;
+      fileName: string;
+      label: string | null;
+      // A source-published poster frame (Pinterest's VideoObject
+      // thumbnailUrl) -- stored as the attachment's poster, NEVER as the
+      // primary asset. Absent for every other video source.
+      poster?: { buffer: Buffer; contentType: string } | null;
+    }
   | { kind: "link"; url: string }
   | { kind: "error"; message: string };
 
@@ -499,6 +530,38 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
   const scrapedTitle = extractPageTitle(html);
 
   const declaredVideoUrl = extractDeclaredVideoUrl(html, first.finalUrl);
+
+  // Pinterest pages only (checked on the FINAL url, so pin.it short links
+  // and country domains are covered after redirects): a video pin publishes
+  // its poster as og:image, so the generic flow below would import that
+  // poster as an image. See pinterest-media.ts for the full reasoning. A
+  // pin that isn't a video falls through to the generic flow unchanged; a
+  // video pin either becomes a real video or a clear error -- never its
+  // poster.
+  let pinterestHost = false;
+  try {
+    pinterestHost = isPinterestHost(new URL(first.finalUrl).hostname);
+  } catch {
+    pinterestHost = false;
+  }
+  if (pinterestHost) {
+    const pinVideo = await resolvePinterestVideo(
+      extractPinterestVideoMetadata(html, first.finalUrl, declaredVideoUrl),
+      fetchMediaOfType,
+    );
+    if (pinVideo.kind === "error") return { kind: "error", message: pinVideo.message };
+    if (pinVideo.kind === "video") {
+      return {
+        kind: "video",
+        buffer: pinVideo.buffer,
+        contentType: pinVideo.contentType,
+        fileName: pinVideo.fileName,
+        label: scrapedTitle,
+        poster: pinVideo.poster,
+      };
+    }
+  }
+
   if (declaredVideoUrl) {
     const videoResult = await safeFetch(declaredVideoUrl);
     if (videoResult.ok && videoResult.response.ok) {

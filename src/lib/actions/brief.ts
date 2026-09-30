@@ -310,7 +310,8 @@ async function insertBriefMediaItem(
 // decoder in this app to substitute. The video item still saves and plays
 // correctly; the chip just falls back to a generic video icon instead of a
 // real poster frame, exactly like a poster-generation failure on a direct
-// upload does (see addBriefTaskVideo).
+// upload does (see addBriefTaskVideo). The one exception is a poster the
+// source itself published (Pinterest video pins -- see the `poster` param).
 async function createBriefMediaItem(
   projectId: string,
   taskId: string,
@@ -328,6 +329,11 @@ async function createBriefMediaItem(
   // contain a "." of its own (e.g. "Necklace by J.Crew") that would corrupt
   // extension detection if it were passed as fileName instead.
   labelOverride?: string | null,
+  // Video only: a poster the SOURCE itself published (Pinterest's
+  // VideoObject thumbnailUrl -- see pinterest-media.ts). Stored as the
+  // attachment's poster exactly like a client-generated one; best-effort,
+  // so a failed poster upload never costs the video.
+  poster?: { buffer: Buffer; contentType: string } | null,
 ): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string }> {
   const supabase = await createClient();
   // A dot in `fileName` only counts as a real extension if it's actually a
@@ -357,6 +363,16 @@ async function createBriefMediaItem(
     return { success: false, message: uploadError.message };
   }
 
+  let posterStoragePath: string | null = null;
+  if (kind === "video" && poster) {
+    const posterExt = extensionForContentType(poster.contentType);
+    const posterPath = `${projectId}/${crypto.randomUUID()}${posterExt ? `.${posterExt}` : ""}`;
+    const { error: posterError } = await supabase.storage
+      .from("brief-media")
+      .upload(posterPath, poster.buffer, { contentType: poster.contentType });
+    if (!posterError) posterStoragePath = posterPath;
+  }
+
   return insertBriefMediaItem(
     projectId,
     taskId,
@@ -366,7 +382,7 @@ async function createBriefMediaItem(
     storagePath,
     labelOverride || fileName,
     kind,
-    null,
+    posterStoragePath,
   );
 }
 
@@ -429,6 +445,7 @@ export async function addBriefTaskLink(
       resolved.fileName,
       resolved.kind,
       resolved.label,
+      resolved.kind === "video" ? resolved.poster : null,
     );
     return { ...result, kind: resolved.kind };
   }
