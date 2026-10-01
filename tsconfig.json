@@ -38,6 +38,7 @@
     "src/lib/ai/result-safety.test.ts",
     "src/lib/upload-insert-order.test.ts",
     "src/lib/media-drop.test.ts",
-    "src/lib/pinterest-media.test.ts"
+    "src/lib/pinterest-media.test.ts",
+    "src/lib/brief-media-import.test.ts"
   ]
 }

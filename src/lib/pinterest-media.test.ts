@@ -151,13 +151,40 @@ await test("6d. VideoObject with no contentUrl at all -> still recognized as vid
   assert.equal((await resolvePinterestVideo(meta, fakeFetcher({}).fetcher)).kind, "error");
 });
 
-await test("robustness: og:video is used as a fallback candidate; VideoObject for a DIFFERENT pin is ignored", async () => {
+await test("robustness: og:video is used as a fallback candidate", async () => {
   const withOg = extractPinterestVideoMetadata(IMAGE_PIN_HTML, IMAGE_PIN_URL, "https://v1.pinimg.com/videos/og.mp4");
   assert.deepEqual(withOg, { isVideo: true, videoUrls: ["https://v1.pinimg.com/videos/og.mp4"], posterUrl: null });
-  // The video pin's own VideoObject names pin 788411478524198894 -- viewed as
-  // if it appeared on another pin's page, it must not make that pin a video.
-  const foreign = extractPinterestVideoMetadata(VIDEO_PIN_HTML, IMAGE_PIN_URL, null);
-  assert.equal(foreign.isVideo, false);
+});
+
+// ---- RE-PINS: the case the first fix missed (QA failure, 2026-10-01) -------
+const REPIN_URL = "https://www.pinterest.com/pin/788411478522345343/";
+const REPIN_HTML = fixture("pinterest-video-repin.html");
+const REPIN_MP4 = "https://v1.pinimg.com/videos/mc/720p/11/54/fb/1154fb13d7c8b19b9108b96414298a0a.mp4";
+
+await test("re-pin fixture is real-shaped: VideoObject/og:url/canonical name the ORIGINAL pin, not the pasted id", () => {
+  assert.equal(pinIdFromUrl(REPIN_URL), "788411478522345343");
+  assert.match(REPIN_HTML, /"@id":"https:\/\/www\.pinterest\.com\/pin\/140806229581762\/"/);
+  assert.doesNotMatch(REPIN_HTML, /"@id":"[^"]*788411478522345343/);
+  assert.doesNotMatch(REPIN_HTML, /property="(og:video[^"]*|twitter:player[^"]*)"/);
+});
+
+await test("re-pin of a video -> the actual video (previously: poster imported as an image)", async () => {
+  const meta = extractPinterestVideoMetadata(REPIN_HTML, REPIN_URL, null);
+  assert.equal(meta.isVideo, true);
+  assert.deepEqual(meta.videoUrls, [REPIN_MP4]);
+  const { fetcher } = fakeFetcher({ [REPIN_MP4]: { type: "video/mp4", bytes: "MP4" } });
+  const r = await resolvePinterestVideo(meta, fetcher);
+  assert.equal(r.kind, "video");
+  if (r.kind === "video") assert.equal(r.buffer.toString(), "MP4");
+});
+
+await test("a VideoObject whose id matches NOTHING about this page: still a video pin -> error, never the poster image", async () => {
+  const html = `<meta content="https://www.pinterest.com/pin/222222222/" property="og:url"/>
+<meta content="https://i.pinimg.com/736x/poster.jpg" property="og:image"/>
+<script type="application/ld+json">{"@type":"VideoObject","@id":"https://www.pinterest.com/pin/111111111/","contentUrl":"https://v1.pinimg.com/videos/other.mp4"}</script>`;
+  const meta = extractPinterestVideoMetadata(html, "https://www.pinterest.com/pin/333333333/", null);
+  assert.deepEqual(meta, { isVideo: true, videoUrls: [], posterUrl: null }, "file untrusted, but the pin is still known to be a video");
+  assert.equal((await resolvePinterestVideo(meta, fakeFetcher({}).fetcher)).kind, "error");
 });
 
 await test("robustness: @graph / array JSON-LD shapes and malformed blocks", () => {

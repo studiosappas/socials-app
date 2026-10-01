@@ -79,6 +79,14 @@ function isVideoObject(node: JsonNode): boolean {
   return asArray(node["@type"]).some((t) => typeof t === "string" && /(^|\/)VideoObject$/.test(t));
 }
 
+function metaContent(html: string, property: string): string | null {
+  const p = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match =
+    html.match(new RegExp(`<meta[^>]+property=["']${p}["'][^>]+content=["']([^"']+)["']`, "i")) ??
+    html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+property=["']${p}["']`, "i"));
+  return match?.[1] ?? null;
+}
+
 function decodeBasicEntities(text: string): string {
   return text.replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
@@ -90,7 +98,31 @@ export function extractPinterestVideoMetadata(
   pageUrl: string,
   declaredOgVideoUrl: string | null,
 ): PinterestVideoMetadata {
-  const pinId = pinIdFromUrl(pageUrl);
+  // Every id this page legitimately answers to. A RE-PIN's page (the common
+  // case -- most pins a user saves or pastes are re-pins) describes the
+  // ORIGINAL pin: its og:url, canonical link and VideoObject @id all carry
+  // the original pin's id, not the id in the pasted URL. Verified live
+  // 2026-10-01: e.g. /pin/788411478522345343/ -> og:url + VideoObject @id
+  // /pin/140806229581762/. The first version of this module compared only
+  // against the pasted URL's id, rejected every re-pin's VideoObject as
+  // "another pin's", and fell back to the poster -- the QA failure.
+  const pageIds = new Set(
+    [
+      pageUrl,
+      metaContent(html, "og:url"),
+      html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)?.[1] ?? null,
+      html.match(/<link[^>]+href=["']([^"']+)["'][^>]+rel=["']canonical["']/i)?.[1] ?? null,
+    ]
+      .map((u) => {
+        if (!u) return null;
+        try {
+          return pinIdFromUrl(new URL(u, pageUrl).toString());
+        } catch {
+          return null;
+        }
+      })
+      .filter((id): id is string => Boolean(id)),
+  );
   const videoUrls: string[] = [];
   let posterUrl: string | null = null;
   let sawVideoObject = false;
@@ -108,10 +140,13 @@ export function extractPinterestVideoMetadata(
     }
     for (const node of jsonLdNodes(doc)) {
       if (!isVideoObject(node)) continue;
-      // A VideoObject that explicitly names a DIFFERENT pin isn't this pin's.
-      const nodeId = [node["@id"], node["url"]].map((v) => (typeof v === "string" ? pinIdFromUrl(v) : null)).find(Boolean);
-      if (pinId && nodeId && nodeId !== pinId) continue;
+      // Any VideoObject on a pin page means this pin is a video -- so even
+      // one whose identity can't be matched still forbids the image
+      // fallback (it becomes an error instead). Its FILE is only trusted
+      // when it names one of this page's own ids, or names no pin at all.
       sawVideoObject = true;
+      const nodeId = [node["@id"], node["url"]].map((v) => (typeof v === "string" ? pinIdFromUrl(v) : null)).find(Boolean);
+      if (nodeId && pageIds.size > 0 && !pageIds.has(nodeId)) continue;
       for (const candidate of asArray(node["contentUrl"])) {
         const url = toAbsoluteHttpUrl(candidate, pageUrl);
         if (url && !videoUrls.includes(url)) videoUrls.push(url);

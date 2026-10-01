@@ -16,6 +16,7 @@ import {
   KNOWN_VIDEO_EXTENSIONS,
 } from "@/lib/external-media-resolver";
 import { plainTextFromBody } from "@/lib/brief-rich-text";
+import { planBriefMediaImport } from "@/lib/brief-media-import";
 import type {
   BriefFrameSection,
   BriefItemKind,
@@ -353,24 +354,28 @@ async function createBriefMediaItem(
     rawExtFromName && (KNOWN_IMAGE_EXTENSIONS.has(rawExtFromName) || KNOWN_VIDEO_EXTENSIONS.has(rawExtFromName))
       ? rawExtFromName
       : undefined;
-  const ext = extFromName || extensionForContentType(contentType);
-  const storagePath = `${projectId}/${crypto.randomUUID()}${ext ? `.${ext}` : ""}`;
+  const plan = planBriefMediaImport({
+    projectId,
+    kind,
+    primary: { buffer: fileBytes, contentType },
+    primaryExt: extFromName || extensionForContentType(contentType),
+    poster: poster ? { ...poster, ext: extensionForContentType(poster.contentType) } : null,
+    newId: () => crypto.randomUUID(),
+  });
 
   const { error: uploadError } = await supabase.storage
     .from("brief-media")
-    .upload(storagePath, fileBytes, { contentType });
+    .upload(plan.original.path, plan.original.buffer, { contentType: plan.original.contentType });
   if (uploadError) {
     return { success: false, message: uploadError.message };
   }
 
   let posterStoragePath: string | null = null;
-  if (kind === "video" && poster) {
-    const posterExt = extensionForContentType(poster.contentType);
-    const posterPath = `${projectId}/${crypto.randomUUID()}${posterExt ? `.${posterExt}` : ""}`;
+  if (plan.poster) {
     const { error: posterError } = await supabase.storage
       .from("brief-media")
-      .upload(posterPath, poster.buffer, { contentType: poster.contentType });
-    if (!posterError) posterStoragePath = posterPath;
+      .upload(plan.poster.path, plan.poster.buffer, { contentType: plan.poster.contentType });
+    if (!posterError) posterStoragePath = plan.poster.path;
   }
 
   return insertBriefMediaItem(
@@ -379,9 +384,9 @@ async function createBriefMediaItem(
     section,
     notes,
     position,
-    storagePath,
+    plan.original.path,
     labelOverride || fileName,
-    kind,
+    plan.itemKind,
     posterStoragePath,
   );
 }
