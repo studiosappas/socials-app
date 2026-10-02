@@ -49,6 +49,9 @@ import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { ScheduleTimeField } from "@/components/ui/schedule-time-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
 import { CroppedCoverImage, GridCropOverlay } from "../../grid/grid-crop-overlay";
+import type { FlatMedia } from "@/components/media-gallery";
+import { PostMediaViewer } from "./post-media-viewer";
+import { buildPostViewerMedia, isClickRightAfterDrag, viewerIndexFor } from "./post-media-viewer-model";
 import { RecoverableImg } from "@/components/recoverable-img";
 import { useMediaTiming } from "@/lib/media-diagnostics";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
@@ -137,6 +140,7 @@ export function PostEditor({
   customFonts = [],
   dateFormat,
   hideBackLink = false,
+  enableMediaViewer = false,
 }: {
   projectId: string;
   post: PostRecord;
@@ -162,6 +166,12 @@ export function PostEditor({
   // date's display uses this, see ScheduleDateField.
   dateFormat: WorkspaceSettings["date_format"];
   hideBackLink?: boolean;
+  // Click a frame's media to open it in Review Content's large viewer, above
+  // this editor. Opt-in and passed ONLY by the Grid's intercepted Post Editor
+  // popup (@modal/(.)posts/[postId]/page.tsx): the full-page post route and
+  // the Tasks page's linked-content popup render this editor without it,
+  // exactly as before. Grid itself never opens the viewer.
+  enableMediaViewer?: boolean;
 }) {
   const router = useRouter();
   const { showError } = useToast();
@@ -224,6 +234,30 @@ export function PostEditor({
     setOverrideCoverTransform(undefined);
   }
   const effectiveCoverTransform = overrideCoverTransform !== undefined ? overrideCoverTransform : post.coverTransform;
+
+  // Large media viewer (enableMediaViewer only). Snapshot of what to show,
+  // taken when a frame is clicked; held HERE (not in the clicked tile) so
+  // it's independent of the tile's own re-renders and sits above the whole
+  // editor. Closing it only clears this state -- the editor underneath is
+  // never unmounted, reset or re-opened.
+  const [viewer, setViewer] = useState<{ media: FlatMedia[]; startIndex: number } | null>(null);
+  // The crop the COVER TILE is currently showing. Its crop saves
+  // optimistically and doesn't refresh this editor's props
+  // (updatePostCoverTransform doesn't revalidate), so post.coverTransform can
+  // lag behind a crop made in this same session; the cover tile reports its
+  // live value here and the viewer uses that.
+  const liveCoverTransformRef = useRef<GridCoverTransform | null>(effectiveCoverTransform);
+  const reportCoverTransform = useCallback((transform: GridCoverTransform | null) => {
+    liveCoverTransformRef.current = transform;
+  }, []);
+  const closeViewer = useCallback(() => setViewer(null), []);
+
+  function openViewer(postAssetId: string) {
+    const media = buildPostViewerMedia(orderedAssets, liveCoverTransformRef.current);
+    const startIndex = viewerIndexFor(media, postAssetId);
+    if (startIndex === null) return;
+    setViewer({ media, startIndex });
+  }
 
   // Feature-detected (pointer: coarse), never user-agent sniffed -- gates
   // whether "Download Media" prefers the native OS share sheet (Web Share
@@ -510,6 +544,8 @@ export function PostEditor({
                   postId={post.id}
                   onRemove={() => handleRemoveAsset(asset.postAssetId)}
                   onChooseFromLibrary={handleChooseFromLibrary}
+                  onPreview={enableMediaViewer ? () => openViewer(asset.postAssetId) : undefined}
+                  reportCoverTransform={index === 0 ? reportCoverTransform : undefined}
                   onEditImage={() =>
                     asset.mediaAssetId &&
                     asset.originalUrl &&
@@ -551,6 +587,8 @@ export function PostEditor({
           </button>
         )}
       </div>
+
+      {viewer && <PostMediaViewer media={viewer.media} startIndex={viewer.startIndex} onClose={closeViewer} />}
 
       {orderedAssets.length > 0 ? (
         <Button
@@ -886,6 +924,8 @@ function SortableAsset({
   onRemove,
   onEditImage,
   onChooseFromLibrary,
+  onPreview,
+  reportCoverTransform,
 }: {
   asset: PostAssetItem;
   canManage: boolean;
@@ -895,6 +935,12 @@ function SortableAsset({
   postId: string;
   onRemove: () => void;
   onEditImage: () => void;
+  // Present only when the editor's media viewer is enabled (Grid's Post
+  // Editor popup). Undefined -> this tile behaves exactly as before.
+  onPreview?: () => void;
+  // Cover tile only: reports the crop it is currently showing (see
+  // PostEditor's liveCoverTransformRef).
+  reportCoverTransform?: (transform: GridCoverTransform | null) => void;
   // Replace's "choose from library" option no longer opens its own
   // duplicate library grid -- it hands the target identity up to
   // PostEditor, which puts the ALREADY-VISIBLE "Add from library"
@@ -949,6 +995,32 @@ function SortableAsset({
   }
   const effectiveTransform = overrideTransform !== undefined ? overrideTransform : coverTransform;
 
+  useEffect(() => {
+    reportCoverTransform?.(effectiveTransform);
+  }, [reportCoverTransform, effectiveTransform]);
+
+  // Media viewer click guards. A reorder drag ends with a pointerup over
+  // the tile that browsers can follow with a click -- remembered here so
+  // that click doesn't open the viewer. And a click whose pointerdown
+  // happened while this tile's ⋮ menu was open is the "click outside to
+  // close the menu" gesture, not a request to preview.
+  const lastDragEndedAtRef = useRef<number | null>(null);
+  const wasDraggingRef = useRef(false);
+  useEffect(() => {
+    if (isDragging) wasDraggingRef.current = true;
+    else if (wasDraggingRef.current) {
+      wasDraggingRef.current = false;
+      lastDragEndedAtRef.current = Date.now();
+    }
+  }, [isDragging]);
+  const menuOpenAtPointerDownRef = useRef(false);
+
+  function handleMediaClick() {
+    if (!onPreview || cropMode || replaceOpen || menuOpen || menuOpenAtPointerDownRef.current) return;
+    if (isClickRightAfterDrag(lastDragEndedAtRef.current, Date.now())) return;
+    onPreview();
+  }
+
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -1000,7 +1072,18 @@ function SortableAsset({
           the ⋮ dropdown below is a sibling, not a descendant, of this
           clipped box, so it isn't clipped along with it. Same fix as the
           Grid slot's own ⋮ menu (grid-board.tsx). */}
-      <div className={`absolute inset-0 ${cropMode ? "" : "overflow-hidden"}`}>
+      {/* With the media viewer enabled, a click on THIS media layer (and only
+          it) opens the large viewer. The ⋮ menu, crop overlay and Replace
+          popover are siblings of this layer, never descendants, so their
+          clicks can't reach it. No preventDefault/stopPropagation here --
+          dnd-kit's drag listeners on the tile root keep working unchanged. */}
+      <div
+        className={`absolute inset-0 ${cropMode ? "" : "overflow-hidden"} ${onPreview && !canManage ? "cursor-zoom-in" : ""}`}
+        onPointerDown={onPreview ? () => (menuOpenAtPointerDownRef.current = menuOpen) : undefined}
+        onClick={onPreview ? handleMediaClick : undefined}
+        title={onPreview ? (canManage ? "Click to view larger · drag to reorder" : "View larger") : undefined}
+        data-post-media-preview={onPreview ? "" : undefined}
+      >
         <AssetPreview asset={asset} coverTransform={isCover ? effectiveTransform : null} />
       </div>
       {canManage && (
