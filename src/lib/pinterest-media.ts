@@ -225,3 +225,375 @@ export async function resolvePinterestVideo(meta: PinterestVideoMetadata, fetchM
 
   return { kind: "error", message: sawTooLarge ? PINTEREST_VIDEO_TOO_LARGE_MESSAGE : PINTEREST_VIDEO_UNAVAILABLE_MESSAGE };
 }
+
+// ===========================================================================
+// Pin data -> media items (carousels, Idea Pin pages, single media).
+//
+// Approved 2026-10-02 ("Option 2"). Some video Pins -- notably CAROUSELS of
+// videos -- publish no VideoObject at all (the Pin itself reports
+// is_video:false); their media only exists in the Pin's own entry inside
+// Pinterest's page data. That data comes in two formats, and which one a
+// request gets varies between requests for the same Pin (measured: ~1 in 10):
+//
+//   REDUX  -- <script id="__PWS_INITIAL_PROPS__">, initialReduxState.pins[id],
+//             snake_case; carousel slots include their videos.
+//   RELAY  -- __PWS_RELAY_REGISTER_COMPLETED_REQUEST__("<request>", <json>)
+//             calls, camelCase; carousel slots carry ONLY image fields -- a
+//             video slot is indistinguishable from an image slot there.
+//
+// When the page can't say what each slot is, ONE request to Pinterest's
+// internal PinResource endpoint (same snake_case shape as REDUX) supplies it
+// -- see lib/pinterest-pin-resource.ts, injected here as fetchPinResource.
+//
+// Scoping (never scan arbitrary entries): REDUX is read only at
+// pins[<requested id>]; a RELAY block is used only when its request's
+// variables.pinId AND its response's entityId both equal the requested id;
+// a PinResource response only when resource_response.data.id equals it.
+// Related/recommended Pins on the same page are never read.
+//
+// Defensive by construction: every field is type-checked; any shape this
+// code doesn't recognize makes the Pin "unknown" -> a clear error, never a
+// guess. Media URLs taken from Pin data must be https on *.pinimg.com.
+// ===========================================================================
+
+export type PinterestMediaItem =
+  | { type: "video"; mp4Urls: string[]; posterUrl: string | null; previewUrl: string | null; durationMs: number | null }
+  | { type: "image"; imageUrl: string; previewUrl: string | null };
+
+export type PinterestPinMedia =
+  | { layout: "single"; item: PinterestMediaItem | null }
+  // perItemTypesKnown=false: the Pin has several items but this source can't
+  // say which are videos (RELAY carousels) -- must not be offered or imported.
+  | { layout: "multi"; items: PinterestMediaItem[]; perItemTypesKnown: boolean };
+
+// What the picker shows -- deliberately no media URLs beyond a preview image;
+// the server re-resolves the chosen item from the Pin itself.
+export type PinterestChoice = { index: number; type: "video" | "image"; previewUrl: string | null; durationMs: number | null };
+
+const MAX_PIN_ITEMS = 50;
+
+function isObj(v: unknown): v is JsonNode {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function pinimgUrl(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  try {
+    const url = new URL(v);
+    return url.protocol === "https:" && /(^|\.)pinimg\.com$/i.test(url.hostname) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+// H.264 progressive MP4 only: HLS playlists (.m3u8) aren't a storable file,
+// and Pinterest's "hevc" variants don't play in every browser.
+function isPlayableMp4(url: string): boolean {
+  const path = new URL(url).pathname.toLowerCase();
+  return path.endsWith(".mp4") && !path.includes("hevc");
+}
+
+// A video_list / videoList object: { V_720P: {url,width,height,duration,thumbnail}, V_HLSV4: {...}, __typename: "..." }
+function videoFromList(list: JsonNode, previewUrl: string | null): PinterestMediaItem {
+  const entries = Object.entries(list)
+    .filter((e): e is [string, JsonNode] => isObj(e[1]))
+    .map(([key, v]) => ({ key, v, url: pinimgUrl(v.url) }));
+  const mp4 = entries
+    .filter((e): e is typeof e & { url: string } => !!e.url && isPlayableMp4(e.url))
+    .sort((a, b) => {
+      const a720 = /720/.test(a.key) ? 1 : 0;
+      const b720 = /720/.test(b.key) ? 1 : 0;
+      if (a720 !== b720) return b720 - a720;
+      return (Number(b.v.height) || 0) - (Number(a.v.height) || 0);
+    });
+  const withThumb = [...mp4, ...entries].find((e) => pinimgUrl(e.v.thumbnail));
+  const withDuration = [...mp4, ...entries].find((e) => typeof e.v.duration === "number" && e.v.duration > 0);
+  return {
+    type: "video",
+    mp4Urls: [...new Set(mp4.map((e) => e.url))],
+    posterUrl: withThumb ? pinimgUrl(withThumb.v.thumbnail) : null,
+    // Small cover image for the picker when there is one; else the poster.
+    previewUrl: previewUrl ?? (withThumb ? pinimgUrl(withThumb.v.thumbnail) : null),
+    durationMs: withDuration ? Number(withDuration.v.duration) : null,
+  };
+}
+
+// snake_case images map: { "236x": {url,width,height}, ..., orig: {...} }
+function snakeImages(images: unknown): { full: string | null; preview: string | null } {
+  if (!isObj(images)) return { full: null, preview: null };
+  const at = (k: string) => (isObj(images[k]) ? pinimgUrl(images[k].url) : null);
+  const largest = Object.values(images)
+    .filter(isObj)
+    .sort((a, b) => (Number(b.width) || 0) - (Number(a.width) || 0))
+    .map((v) => pinimgUrl(v.url))
+    .find(Boolean);
+  return { full: at("orig") ?? largest ?? null, preview: at("236x") ?? at("474x") ?? at("736x") ?? largest ?? null };
+}
+
+// camelCase relay images: images_236x, images_736x, imageSpec_orig, ... -> {url}
+function camelImages(node: JsonNode): { full: string | null; preview: string | null } {
+  const at = (k: string) => (isObj(node[k]) ? pinimgUrl(node[k].url) : null);
+  return {
+    full: at("imageSpec_orig") ?? at("images_orig") ?? at("images_1200x") ?? at("images_736x"),
+    preview: at("images_236x") ?? at("imageSpec_236x") ?? at("images_474x") ?? at("images_736x"),
+  };
+}
+
+// Deep search for the first object under `key`, confined to ONE subtree (an
+// Idea Pin page) -- never applied to a whole page.
+function findWithin(node: unknown, key: string, depth = 0): JsonNode | null {
+  if (depth > 8 || !node || typeof node !== "object") return null;
+  if (isObj(node) && isObj(node[key])) return node[key];
+  for (const v of Object.values(node)) {
+    const hit = findWithin(v, key, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// REDUX page entry and PinResource data share this snake_case shape.
+export function mediaFromSnakePin(pin: JsonNode): PinterestPinMedia {
+  const carousel = isObj(pin.carousel_data) ? pin.carousel_data.carousel_slots : null;
+  if (Array.isArray(carousel) && carousel.length >= 2) {
+    const items = carousel.slice(0, MAX_PIN_ITEMS).map((slot): PinterestMediaItem | null => {
+      if (!isObj(slot)) return null;
+      const img = snakeImages(slot.images);
+      if (isObj(slot.videos) && isObj(slot.videos.video_list)) return videoFromList(slot.videos.video_list, img.preview);
+      return img.full ? { type: "image", imageUrl: img.full, previewUrl: img.preview } : null;
+    });
+    return items.every(Boolean)
+      ? { layout: "multi", items: items as PinterestMediaItem[], perItemTypesKnown: true }
+      : { layout: "multi", items: [], perItemTypesKnown: false };
+  }
+
+  const pages = isObj(pin.story_pin_data) ? pin.story_pin_data.pages : null;
+  if (Array.isArray(pages) && pages.length >= 2) {
+    const items = pages.slice(0, MAX_PIN_ITEMS).map((page): PinterestMediaItem | null => {
+      const videoList = findWithin(page, "video_list");
+      const img = snakeImages(findWithin(page, "images"));
+      if (videoList) return videoFromList(videoList, img.preview);
+      return img.full ? { type: "image", imageUrl: img.full, previewUrl: img.preview } : null;
+    });
+    return items.every(Boolean)
+      ? { layout: "multi", items: items as PinterestMediaItem[], perItemTypesKnown: true }
+      : { layout: "multi", items: [], perItemTypesKnown: false };
+  }
+
+  const img = snakeImages(pin.images);
+  if (isObj(pin.videos) && isObj(pin.videos.video_list)) return { layout: "single", item: videoFromList(pin.videos.video_list, img.preview) };
+  const singlePageVideo = Array.isArray(pages) && pages.length === 1 ? findWithin(pages[0], "video_list") : null;
+  if (singlePageVideo) return { layout: "single", item: videoFromList(singlePageVideo, img.preview) };
+  return { layout: "single", item: img.full ? { type: "image", imageUrl: img.full, previewUrl: img.preview } : null };
+}
+
+// RELAY page entry (camelCase). Its carousel slots never carry video data, so
+// a slot only counts as known when it explicitly has videos.videoList.
+export function mediaFromCamelPin(pin: JsonNode): PinterestPinMedia {
+  const carousel = isObj(pin.carouselData) ? pin.carouselData.carouselSlots : null;
+  if (Array.isArray(carousel) && carousel.length >= 2) {
+    const items = carousel.slice(0, MAX_PIN_ITEMS).map((slot): PinterestMediaItem | null => {
+      if (!isObj(slot)) return null;
+      const img = camelImages(slot);
+      return isObj(slot.videos) && isObj(slot.videos.videoList) ? videoFromList(slot.videos.videoList, img.preview) : null;
+    });
+    return items.every(Boolean)
+      ? { layout: "multi", items: items as PinterestMediaItem[], perItemTypesKnown: true }
+      : { layout: "multi", items: [], perItemTypesKnown: false };
+  }
+  const pages = isObj(pin.storyPinData) ? pin.storyPinData.pages : null;
+  if (Array.isArray(pages) && pages.length >= 2) return { layout: "multi", items: [], perItemTypesKnown: false };
+
+  const img = camelImages(pin);
+  if (isObj(pin.videos) && isObj(pin.videos.videoList)) return { layout: "single", item: videoFromList(pin.videos.videoList, img.preview) };
+  return { layout: "single", item: img.full ? { type: "image", imageUrl: img.full, previewUrl: img.preview } : null };
+}
+
+// Each relay call: __PWS_RELAY_REGISTER_COMPLETED_REQUEST__("<urlencoded request JSON>", <response JSON>)
+export function parseRelayBlocks(html: string): { request: JsonNode; response: JsonNode }[] {
+  const out: { request: JsonNode; response: JsonNode }[] = [];
+  const re = /__PWS_RELAY_REGISTER_COMPLETED_REQUEST__\(\s*"([^"]*)"\s*,\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    let request: unknown;
+    try {
+      request = JSON.parse(decodeURIComponent(m[1]));
+    } catch {
+      continue;
+    }
+    // The response is a JSON object literal -- find its end by brace
+    // matching (string-aware), then parse exactly that slice.
+    const start = re.lastIndex;
+    if (html[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let i = start; i < html.length; i++) {
+      const c = html[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') inString = false;
+      } else if (c === '"') inString = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end < 0) continue;
+    try {
+      const response = JSON.parse(html.slice(start, end));
+      if (isObj(request) && isObj(response)) out.push({ request, response });
+    } catch {
+      // malformed block -- ignored
+    }
+    re.lastIndex = end;
+  }
+  return out;
+}
+
+// The requested Pin's own entry from the page, if the page carries one.
+export function pinMediaFromPage(html: string, pinId: string): { source: "redux" | "relay"; media: PinterestPinMedia } | null {
+  const props = html.match(/<script[^>]*id=["']__PWS_INITIAL_PROPS__["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (props) {
+    try {
+      const root: unknown = JSON.parse(props[1]);
+      const pins = isObj(root) && isObj(root.initialReduxState) ? root.initialReduxState.pins : null;
+      const pin = isObj(pins) ? pins[pinId] : null;
+      if (isObj(pin) && pin.id === pinId) return { source: "redux", media: mediaFromSnakePin(pin) };
+    } catch {
+      // fall through to relay
+    }
+  }
+
+  const candidates: PinterestPinMedia[] = [];
+  for (const { request, response } of parseRelayBlocks(html)) {
+    const variables = request.variables;
+    if (!isObj(variables) || variables.pinId !== pinId || !isObj(response.data)) continue;
+    for (const query of Object.values(response.data)) {
+      const data = isObj(query) ? query.data : null;
+      if (isObj(data) && data.entityId === pinId) candidates.push(mediaFromCamelPin(data));
+    }
+  }
+  if (candidates.length === 0) return null;
+  // Several relay queries describe the same Pin with different field sets:
+  // prefer a known multi, then any multi, then a video with a poster, then a video.
+  const pick =
+    candidates.find((c) => c.layout === "multi" && c.perItemTypesKnown) ??
+    candidates.find((c) => c.layout === "multi") ??
+    candidates.find((c) => c.layout === "single" && c.item?.type === "video" && c.item.posterUrl) ??
+    candidates.find((c) => c.layout === "single" && c.item?.type === "video") ??
+    candidates[0];
+  return { source: "relay", media: pick };
+}
+
+// PinResource JSON -> the requested Pin's media, ONLY if the response is for
+// exactly that Pin id. Anything else (malformed, wrong id, error payload) -> null.
+export function pinMediaFromPinResource(json: unknown, pinId: string): PinterestPinMedia | null {
+  if (!isObj(json) || !isObj(json.resource_response)) return null;
+  const data = json.resource_response.data;
+  if (!isObj(data) || typeof data.id !== "string" || data.id !== pinId) return null;
+  return mediaFromSnakePin(data);
+}
+
+// Returns raw PinResource JSON, or null on ANY failure (disabled, network,
+// timeout, non-2xx such as 403/429, oversize, unparseable).
+export type PinResourceFetcher = (pinId: string) => Promise<unknown | null>;
+
+export type PinterestSelection = { index: number; count: number };
+
+export type PinterestPinResolution =
+  | { kind: "not_handled" }
+  | { kind: "choose"; choices: PinterestChoice[] }
+  | { kind: "video"; buffer: Buffer; contentType: string; fileName: string; poster: { buffer: Buffer; contentType: string } | null }
+  | { kind: "image"; buffer: Buffer; contentType: string; fileName: string }
+  | { kind: "error"; message: string };
+
+export const PINTEREST_ITEMS_UNAVAILABLE_MESSAGE =
+  "This Pinterest Pin's items couldn't be loaded right now. Please try again later, or download the item and upload it instead.";
+export const PINTEREST_PIN_CHANGED_MESSAGE = "This Pinterest Pin has changed. Please paste the link again.";
+export const PINTEREST_ITEM_UNAVAILABLE_MESSAGE =
+  "That item couldn't be imported. Try again, or download it and upload it instead.";
+
+async function importItem(item: PinterestMediaItem, fetchMedia: MediaFetcher): Promise<PinterestPinResolution> {
+  if (item.type === "video") {
+    const r = await resolvePinterestVideo({ isVideo: true, videoUrls: item.mp4Urls, posterUrl: item.posterUrl }, fetchMedia);
+    return r.kind === "not_video" ? { kind: "error", message: PINTEREST_VIDEO_UNAVAILABLE_MESSAGE } : r;
+  }
+  const image = await fetchMedia(item.imageUrl, "image/").catch(() => null);
+  if (!image?.ok) return { kind: "error", message: PINTEREST_ITEM_UNAVAILABLE_MESSAGE };
+  return { kind: "image", buffer: image.buffer, contentType: image.contentType, fileName: fileNameFromUrl(image.finalUrl) };
+}
+
+// The Pinterest decision for one request. `selection` is present only on the
+// second call, after the user picked an item: the Pin is resolved again from
+// scratch (nothing from the browser but index/count is trusted).
+//
+//   not_handled -> the caller's existing flow continues (single IMAGE Pins
+//                  keep importing exactly as before).
+//   choose      -> several items: show the picker, persist nothing.
+//   video/image -> the one item to import.
+//   error       -> clear message, persist nothing.
+export async function resolvePinterestPin(input: {
+  html: string;
+  pageUrl: string;
+  pinId: string | null;
+  declaredOgVideoUrl: string | null;
+  selection?: PinterestSelection;
+  fetchMedia: MediaFetcher;
+  fetchPinResource: PinResourceFetcher;
+}): Promise<PinterestPinResolution> {
+  const { html, pageUrl, pinId, declaredOgVideoUrl, selection, fetchMedia } = input;
+  const page = pinId ? pinMediaFromPage(html, pinId) : null;
+
+  let multi: PinterestMediaItem[] | null = null;
+  if (page?.media.layout === "multi") {
+    if (page.media.perItemTypesKnown) {
+      multi = page.media.items;
+    } else {
+      // The ONE fallback request -- only reached for a multi-item Pin whose
+      // page couldn't say what each item is.
+      const json = await input.fetchPinResource(pinId!).catch(() => null);
+      const fallback = json === null ? null : pinMediaFromPinResource(json, pinId!);
+      if (!fallback || fallback.layout !== "multi" || !fallback.perItemTypesKnown || fallback.items.length === 0) {
+        return { kind: "error", message: PINTEREST_ITEMS_UNAVAILABLE_MESSAGE };
+      }
+      multi = fallback.items;
+    }
+  }
+
+  if (multi) {
+    if (!selection) {
+      return {
+        kind: "choose",
+        choices: multi.map((item, index) => ({
+          index,
+          type: item.type,
+          previewUrl: item.previewUrl,
+          durationMs: item.type === "video" ? item.durationMs : null,
+        })),
+      };
+    }
+    const { index, count } = selection;
+    if (count !== multi.length || !Number.isInteger(index) || index < 0 || index >= multi.length) {
+      return { kind: "error", message: PINTEREST_PIN_CHANGED_MESSAGE };
+    }
+    return importItem(multi[index], fetchMedia);
+  }
+
+  // Single-media (or no usable Pin data). A selection here means the Pin no
+  // longer has the items the picker showed.
+  if (selection) return { kind: "error", message: PINTEREST_PIN_CHANGED_MESSAGE };
+
+  const meta = extractPinterestVideoMetadata(html, pageUrl, declaredOgVideoUrl);
+  const pageItem = page?.media.layout === "single" ? page.media.item : null;
+  const pageVideo = pageItem?.type === "video" ? pageItem : null;
+  const merged: PinterestVideoMetadata = {
+    isVideo: meta.isVideo || pageVideo !== null,
+    videoUrls: [...new Set([...meta.videoUrls, ...(pageVideo?.mp4Urls ?? [])])],
+    posterUrl: meta.posterUrl ?? pageVideo?.posterUrl ?? null,
+  };
+  const video = await resolvePinterestVideo(merged, fetchMedia);
+  return video.kind === "not_video" ? { kind: "not_handled" } : video;
+}

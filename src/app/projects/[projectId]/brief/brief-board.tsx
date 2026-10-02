@@ -59,6 +59,7 @@ import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
 import { generateVideoPosterBlob } from "@/lib/video-poster";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskStatus, BriefTaskType } from "@/types/database";
+import type { PinterestChoice, PinterestSelection } from "@/lib/pinterest-media";
 
 export type BriefTaskItem = {
   id: string;
@@ -1215,17 +1216,38 @@ function ItemSection({
   function handleAddLink() {
     const url = urlRef.current?.value.trim() ?? "";
     if (!url) return;
-    const notes = linkNotesRef.current?.value ?? "";
+    submitLink(url, linkNotesRef.current?.value ?? "");
+  }
+
+  // A multi-item Pinterest Pin (carousel / multi-page): the server returned
+  // the items instead of importing anything. Nothing is persisted while this
+  // is open -- choosing re-submits the SAME link with just the item's
+  // index/count (the server re-resolves the Pin itself); Cancel just closes it.
+  const [pinterestPicker, setPinterestPicker] = useState<{ url: string; notes: string; choices: PinterestChoice[] } | null>(
+    null,
+  );
+  const [choosingIndex, setChoosingIndex] = useState<number | null>(null);
+
+  function submitLink(url: string, notes: string, selection?: PinterestSelection) {
     const position = items.length;
     setLinkError(undefined);
     setLinkPending(true);
+    setChoosingIndex(selection ? selection.index : null);
+    // A fresh Add (not a choice from the picker) replaces any open picker.
+    if (!selection) setPinterestPicker(null);
     startTransition(async () => {
-      const result = await addBriefTaskLink(projectId, taskId, section, url, notes, position);
+      const result = await addBriefTaskLink(projectId, taskId, section, url, notes, position, selection);
       setLinkPending(false);
+      setChoosingIndex(null);
       if (!result.success) {
         setLinkError(result.message ?? "Couldn't add that link.");
         return;
       }
+      if (result.kind === "choose") {
+        setPinterestPicker({ url, notes, choices: result.choices ?? [] });
+        return;
+      }
+      setPinterestPicker(null);
       if (urlRef.current) urlRef.current.value = "";
       if (linkNotesRef.current) linkNotesRef.current.value = "";
       router.refresh();
@@ -1589,9 +1611,23 @@ function ItemSection({
                 disabled={linkPending}
                 className="w-full sm:w-auto"
               >
-                {linkPending ? "Adding..." : "Add"}
+                {linkPending && choosingIndex === null ? "Adding..." : "Add"}
               </Button>
             </div>
+            {pinterestPicker && (
+              <PinterestItemPicker
+                choices={pinterestPicker.choices}
+                choosingIndex={choosingIndex}
+                disabled={linkPending}
+                onChoose={(index) =>
+                  submitLink(pinterestPicker.url, pinterestPicker.notes, { index, count: pinterestPicker.choices.length })
+                }
+                onCancel={() => {
+                  setPinterestPicker(null);
+                  setLinkError(undefined);
+                }}
+              />
+            )}
             {linkError && <p className="text-xs text-error">{linkError}</p>}
           </div>
           <div className="flex flex-col gap-2">
@@ -1861,6 +1897,99 @@ function ImageItemChip({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(1, Math.round(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+// Picker for a multi-item Pinterest Pin -- one tile per item, in the Pin's
+// own order. Previews are Pinterest's own thumbnail images, shown only here
+// (never stored); what gets imported is resolved server-side from the Pin.
+function PinterestItemPicker({
+  choices,
+  choosingIndex,
+  disabled,
+  onChoose,
+  onCancel,
+}: {
+  choices: PinterestChoice[];
+  choosingIndex: number | null;
+  disabled: boolean;
+  onChoose: (index: number) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div role="group" aria-label="Choose one item to import" className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[11px] text-muted">
+          This Pin has {choices.length} items — choose one to import
+        </span>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={disabled}
+          className="shrink-0 text-[11px] text-muted underline-offset-2 transition-colors hover:text-foreground hover:underline disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+      <div className="flex gap-2 overflow-x-auto pb-0.5">
+        {choices.map((choice) => {
+          const isVideo = choice.type === "video";
+          const duration = isVideo && choice.durationMs ? formatDuration(choice.durationMs) : null;
+          return (
+            <button
+              key={choice.index}
+              type="button"
+              disabled={disabled}
+              onClick={() => onChoose(choice.index)}
+              aria-label={`Import item ${choice.index + 1}: ${isVideo ? `video${duration ? `, ${duration}` : ""}` : "image"}`}
+              title={`Item ${choice.index + 1} · ${isVideo ? `Video${duration ? ` · ${duration}` : ""}` : "Image"}`}
+              className="relative h-24 w-[4.5rem] shrink-0 overflow-hidden rounded-md border border-border bg-black/5 transition-colors hover:border-foreground disabled:cursor-wait disabled:opacity-60"
+            >
+              {choice.previewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={choice.previewUrl}
+                  alt=""
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  draggable={false}
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <span className="flex h-full w-full items-center justify-center text-[10px] text-muted">
+                  {isVideo ? "Video" : "Image"}
+                </span>
+              )}
+              <span className="absolute left-1 top-1 rounded bg-black/60 px-1 text-[9px] leading-4 text-white">
+                {choice.index + 1}
+              </span>
+              <span className="absolute bottom-1 left-1 flex items-center gap-0.5 rounded bg-black/70 px-1 text-[9px] leading-4 text-white">
+                {isVideo ? (
+                  <>
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="h-2 w-2" aria-hidden>
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                    {duration ?? "Video"}
+                  </>
+                ) : (
+                  "Image"
+                )}
+              </span>
+              {choosingIndex === choice.index && (
+                <span className="absolute inset-0 flex items-center justify-center bg-black/35">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

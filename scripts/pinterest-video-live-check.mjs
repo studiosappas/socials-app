@@ -32,6 +32,7 @@ const { resolveExternalMedia } = await import("../src/lib/external-media-resolve
 const { chromium } = await import("playwright");
 
 const DEFAULT_PINS = [
+  "https://www.pinterest.com/pin/50595195810299403/", // CAROUSEL of 4 videos -> picker; each choice imported + played
   "https://www.pinterest.com/pin/788411478524198894/", // original video pin
   "https://www.pinterest.com/pin/788411478522345343/", // video RE-PIN (the case the first fix missed)
   "https://in.pinterest.com/pin/healthy-winter-drink-ginger-tea--623396773427706365/", // country domain + slug
@@ -42,6 +43,18 @@ const pins = process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT_PINS
 const resolved = [];
 for (const url of pins) {
   const r = await resolveExternalMedia(url);
+  if (r.kind === "choose") {
+    // Multi-item Pin: nothing would be persisted yet. Import each choice the
+    // way the picker does (index/count only) and verify each one below.
+    console.log(`${url}
+  -> choose ${r.choices.length}: ${r.choices.map((c) => `${c.index + 1}=${c.type}`).join(" ")}`);
+    for (const c of r.choices) {
+      const picked = await resolveExternalMedia(url, { pinterestSelection: { index: c.index, count: r.choices.length } });
+      resolved.push({ url: `${url} [item ${c.index + 1}]`, r: picked });
+      console.log(`  item ${c.index + 1} -> ${picked.kind}${picked.contentType ? ` ${picked.contentType}` : ""}${picked.buffer ? ` ${(picked.buffer.length / 1048576).toFixed(2)}MB` : ""}${picked.poster ? " +poster" : ""}${picked.message ? ` "${picked.message}"` : ""}`);
+    }
+    continue;
+  }
   resolved.push({ url, r });
   console.log(`${url}\n  -> ${r.kind}${r.contentType ? ` ${r.contentType}` : ""}${r.buffer ? ` ${(r.buffer.length / 1048576).toFixed(2)}MB` : ""}${r.poster ? " +poster" : ""}${r.message ? ` "${r.message}"` : ""}`);
 }

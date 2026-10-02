@@ -15,6 +15,7 @@ import {
   KNOWN_IMAGE_EXTENSIONS,
   KNOWN_VIDEO_EXTENSIONS,
 } from "@/lib/external-media-resolver";
+import type { PinterestChoice, PinterestSelection } from "@/lib/pinterest-media";
 import { plainTextFromBody } from "@/lib/brief-rich-text";
 import { planBriefMediaImport } from "@/lib/brief-media-import";
 import type {
@@ -289,7 +290,12 @@ async function insertBriefMediaItem(
     })
     .select("id")
     .single();
-  if (itemError) return { success: false, message: itemError.message };
+  if (itemError) {
+    // Don't leave an attachment row nothing points at. Best-effort: a
+    // failed cleanup must not mask the original error.
+    await supabase.from("brief_attachments").delete().eq("id", attachment.id);
+    return { success: false, message: itemError.message };
+  }
 
   // Not revalidating -- every caller chain (addBriefTaskImage,
   // addBriefTaskVideo, addBriefTaskLink's image/video path) ends at a
@@ -378,7 +384,7 @@ async function createBriefMediaItem(
     if (!posterError) posterStoragePath = plan.poster.path;
   }
 
-  return insertBriefMediaItem(
+  const inserted = await insertBriefMediaItem(
     projectId,
     taskId,
     section,
@@ -389,6 +395,15 @@ async function createBriefMediaItem(
     plan.itemKind,
     posterStoragePath,
   );
+  if (!inserted.success) {
+    // These objects were uploaded by THIS server-side import and nothing
+    // references them now -- remove them rather than leave orphans.
+    // Best-effort; the original failure is what the user sees.
+    await supabase.storage
+      .from("brief-media")
+      .remove([plan.original.path, ...(posterStoragePath ? [posterStoragePath] : [])]);
+  }
+  return inserted;
 }
 
 async function createBriefLinkItem(
@@ -428,14 +443,50 @@ export async function addBriefTaskLink(
   url: string,
   notes: string,
   position: number,
-): Promise<ActionResult & { itemId?: string; attachmentId?: string; label?: string; kind?: BriefItemKind }> {
+  // Second call from the Pinterest item picker: which item of a multi-item
+  // Pin the user chose. Only index/count cross the wire -- the server
+  // re-resolves the Pin itself (see resolvePinterestPin) and never accepts a
+  // media URL from the browser.
+  pinterestSelection?: PinterestSelection,
+): Promise<
+  ActionResult & {
+    itemId?: string;
+    attachmentId?: string;
+    label?: string;
+    kind?: BriefItemKind | "choose";
+    choices?: PinterestChoice[];
+  }
+> {
   const trimmedUrl = url.trim();
   if (!trimmedUrl) return { success: false, message: "URL is required." };
+  if (
+    pinterestSelection !== undefined &&
+    !(
+      Number.isInteger(pinterestSelection?.index) &&
+      Number.isInteger(pinterestSelection?.count) &&
+      pinterestSelection.count >= 2 &&
+      pinterestSelection.count <= 50 &&
+      pinterestSelection.index >= 0 &&
+      pinterestSelection.index < pinterestSelection.count
+    )
+  ) {
+    return { success: false, message: "That item couldn't be imported. Please paste the link again." };
+  }
 
-  const resolved = await resolveExternalMedia(trimmedUrl);
+  const resolved = await resolveExternalMedia(
+    trimmedUrl,
+    pinterestSelection ? { pinterestSelection: { index: pinterestSelection.index, count: pinterestSelection.count } } : undefined,
+  );
 
   if (resolved.kind === "error") {
     return { success: false, message: resolved.message };
+  }
+
+  // Several items -> the client shows the picker. Returned BEFORE any
+  // Storage upload or row insert: nothing exists for this Pin until the
+  // user picks one (and Cancel therefore has nothing to clean up).
+  if (resolved.kind === "choose") {
+    return { success: true, kind: "choose", choices: resolved.choices };
   }
 
   if (resolved.kind === "image" || resolved.kind === "video") {

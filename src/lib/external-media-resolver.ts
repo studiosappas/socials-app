@@ -1,11 +1,15 @@
 import { safeFetch } from "@/lib/safe-fetch";
 import { MAX_IMAGE_UPLOAD_SIZE_BYTES } from "@/lib/upload-limits";
 import {
-  extractPinterestVideoMetadata,
   isPinterestHost,
-  resolvePinterestVideo,
+  pinIdFromUrl,
+  resolvePinterestPin,
+  PINTEREST_ITEM_UNAVAILABLE_MESSAGE,
   type MediaFetcher,
+  type PinterestChoice,
+  type PinterestSelection,
 } from "@/lib/pinterest-media";
+import { fetchPinterestPinResource } from "@/lib/pinterest-pin-resource";
 
 // The one real "paste a URL, figure out what it actually is" pipeline in
 // the app -- addBriefTaskLink (src/lib/actions/brief.ts) is its only caller
@@ -433,6 +437,9 @@ export type ResolvedExternalMedia =
       poster?: { buffer: Buffer; contentType: string } | null;
     }
   | { kind: "link"; url: string }
+  // A multi-item Pinterest Pin: the user must pick one -- nothing is
+  // persisted for this result.
+  | { kind: "choose"; choices: PinterestChoice[] }
   | { kind: "error"; message: string };
 
 function fileNameFromUrl(url: string): string {
@@ -448,7 +455,12 @@ function fileNameFromUrl(url: string): string {
 // network goes through safeFetch, so SSRF protection applies uniformly to
 // the initial URL, a provider-normalized direct-asset URL, a scraped
 // og:image/og:video URL, and the root-page comparison fetch alike.
-export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExternalMedia> {
+export async function resolveExternalMedia(
+  rawUrl: string,
+  // Present only on the picker's second call: which item of a multi-item
+  // Pinterest Pin to import. Index/count only -- never a media URL.
+  options?: { pinterestSelection?: PinterestSelection },
+): Promise<ResolvedExternalMedia> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -465,7 +477,16 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
     if (first.error.reason === "blocked_host") {
       return { kind: "error", message: "This link isn't allowed." };
     }
-    return { kind: "link", url: rawUrl };
+    return options?.pinterestSelection ? { kind: "error", message: PINTEREST_ITEM_UNAVAILABLE_MESSAGE } : { kind: "link", url: rawUrl };
+  }
+  // A picker selection is only meaningful for a Pinterest Pin page; never let
+  // it fall through to the generic flows below (which could save a link or a
+  // different image).
+  if (options?.pinterestSelection) {
+    const isHtml = cleanMimeType(first.response.headers.get("content-type") ?? "").startsWith("text/html");
+    if (!first.response.ok || !isHtml || !isPinterestHost(new URL(first.finalUrl).hostname)) {
+      return { kind: "error", message: PINTEREST_ITEM_UNAVAILABLE_MESSAGE };
+    }
   }
   if (!first.response.ok) {
     // A provider-normalized URL that 403/404s (e.g. Drive's uc?download for
@@ -534,32 +555,48 @@ export async function resolveExternalMedia(rawUrl: string): Promise<ResolvedExte
   // Pinterest pages only (checked on the FINAL url, so pin.it short links
   // and country domains are covered after redirects): a video pin publishes
   // its poster as og:image, so the generic flow below would import that
-  // poster as an image. See pinterest-media.ts for the full reasoning. A
-  // pin that isn't a video falls through to the generic flow unchanged; a
-  // video pin either becomes a real video or a clear error -- never its
-  // poster.
-  let pinterestHost = false;
-  try {
-    pinterestHost = isPinterestHost(new URL(first.finalUrl).hostname);
-  } catch {
-    pinterestHost = false;
-  }
-  if (pinterestHost) {
-    const pinVideo = await resolvePinterestVideo(
-      extractPinterestVideoMetadata(html, first.finalUrl, declaredVideoUrl),
-      fetchMediaOfType,
-    );
-    if (pinVideo.kind === "error") return { kind: "error", message: pinVideo.message };
-    if (pinVideo.kind === "video") {
-      return {
-        kind: "video",
-        buffer: pinVideo.buffer,
-        contentType: pinVideo.contentType,
-        fileName: pinVideo.fileName,
-        label: scrapedTitle,
-        poster: pinVideo.poster,
-      };
+  // poster as an image. resolvePinterestPin (pinterest-media.ts) decides:
+  // a multi-item Pin -> the picker (nothing persisted); a selected item or a
+  // single video -> the real media; a single image Pin -> the generic flow
+  // below, unchanged. Never the poster in place of a video.
+  if (isPinterestHost(new URL(first.finalUrl).hostname)) {
+    let pinHtml = html;
+    let pinPageUrl = first.finalUrl;
+    const pinId = pinIdFromUrl(first.finalUrl);
+    // A share link (pin.it -> /pin/{id}/sent/?invite_code=...) lands on a
+    // page that carries no Pin media data at all (verified 2026-10-02) --
+    // read the Pin's own page instead. Same safeFetch path.
+    if (pinId && !/^\/pin\/[^/]+\/?$/.test(new URL(first.finalUrl).pathname)) {
+      const canonical = await safeFetch(`https://www.pinterest.com/pin/${pinId}/`);
+      if (canonical.ok && canonical.response.ok) {
+        pinHtml = await canonical.response.text();
+        pinPageUrl = canonical.finalUrl;
+      }
     }
+    const pin = await resolvePinterestPin({
+      html: pinHtml,
+      pageUrl: pinPageUrl,
+      pinId,
+      declaredOgVideoUrl: extractDeclaredVideoUrl(pinHtml, pinPageUrl),
+      selection: options?.pinterestSelection,
+      fetchMedia: fetchMediaOfType,
+      fetchPinResource: fetchPinterestPinResource,
+    });
+    const pinTitle = pinHtml === html ? scrapedTitle : extractPageTitle(pinHtml);
+    switch (pin.kind) {
+      case "choose":
+        return { kind: "choose", choices: pin.choices };
+      case "error":
+        return { kind: "error", message: pin.message };
+      case "video":
+        return { kind: "video", buffer: pin.buffer, contentType: pin.contentType, fileName: pin.fileName, label: pinTitle, poster: pin.poster };
+      case "image":
+        return { kind: "image", buffer: pin.buffer, contentType: pin.contentType, fileName: pin.fileName, label: pinTitle };
+      case "not_handled":
+        break;
+    }
+  } else if (options?.pinterestSelection) {
+    return { kind: "error", message: PINTEREST_ITEM_UNAVAILABLE_MESSAGE };
   }
 
   if (declaredVideoUrl) {
