@@ -39,6 +39,9 @@ export default async function InterceptedPostPage({
         customFonts={data.customFonts}
         dateFormat={data.dateFormat}
         hideBackLink
+        // Grid's Post Editor popup is the ONLY place the large media viewer
+        // is enabled (see PostEditor's enableMediaViewer).
+        enableMediaViewer
       />
     </Modal>
   );
