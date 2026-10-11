@@ -42,11 +42,22 @@ export async function downloadAssetsAsZip(assets: ZipAsset[], zipName: string) {
 // a plain <a download> often just navigates instead of downloading for
 // cross-origin storage URLs without the right Content-Disposition header, so
 // this fetches the real bytes and hands them to file-saver directly.
-export async function downloadAsset(url: string, filename: string) {
-  const response = await fetch(url);
-  if (!response.ok) return;
+//
+// Resolves to whether a file was actually handed to the browser. Callers
+// that never checked this before keep working unchanged; Post Editor uses
+// it to tell the user when a download didn't happen instead of doing
+// nothing silently.
+export async function downloadAsset(url: string, filename: string): Promise<boolean> {
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch {
+    return false;
+  }
+  if (!response.ok) return false;
   const blob = await response.blob();
   saveAs(blob, filename);
+  return true;
 }
 
 // Derives a filename from a signed/public asset URL's path (media_assets doesn't
@@ -113,6 +124,10 @@ export async function canShareFiles(files: File[]): Promise<boolean> {
 
 async function fetchAsFile(url: string, filename: string): Promise<File> {
   const response = await fetch(url);
+  // Without this, a failed request's error body (an expired signed URL's
+  // JSON, the export route's error message) was wrapped up as if it were
+  // the image and offered to the share sheet under the image's filename.
+  if (!response.ok) throw new Error(`download failed (${response.status})`);
   const blob = await response.blob();
   return new File([blob], filename, { type: resolveMimeType(blob.type, filename) });
 }
@@ -157,10 +172,11 @@ function logShareDiagnostic(diagnostic: {
 // make, which was opening the OS share dialog on desktop "Save Media"
 // clicks. Capability detection alone is not enough to tell mobile and
 // desktop apart, so the caller's own device hint gates it.
-export async function shareOrDownloadAsset(url: string, filename: string, preferMobileUx: boolean) {
+// Resolves to false only when nothing reached the user at all (the share
+// wasn't possible AND the fallback download failed too).
+export async function shareOrDownloadAsset(url: string, filename: string, preferMobileUx: boolean): Promise<boolean> {
   if (!preferMobileUx) {
-    await downloadAsset(url, filename);
-    return;
+    return downloadAsset(url, filename);
   }
   const diag = {
     preferMobileUx,
@@ -181,7 +197,7 @@ export async function shareOrDownloadAsset(url: string, filename: string, prefer
       diag.shareAttempted = true;
       await navigator.share({ files: [file] });
       logShareDiagnostic(diag);
-      return;
+      return true;
     }
   } catch (error) {
     diag.shareError = error instanceof Error ? error.name || error.message : String(error);
@@ -191,14 +207,14 @@ export async function shareOrDownloadAsset(url: string, filename: string, prefer
     // nothing.
     if (error instanceof DOMException && error.name === "AbortError") {
       logShareDiagnostic(diag);
-      return;
+      return true;
     }
     // Any other failure (network, mid-flight unsupported, etc.) falls
     // through to the plain download below instead.
   }
   diag.fallbackUsed = true;
   logShareDiagnostic(diag);
-  await downloadAsset(url, filename);
+  return downloadAsset(url, filename);
 }
 
 // The mobile-preferred path for a whole post's worth of images: fetches
@@ -265,4 +281,41 @@ export async function shareOriginalAssets(assets: { url: string; filename: strin
   diag.fallbackUsed = true;
   logShareDiagnostic(diag);
   return false;
+}
+
+// shareOriginalAssets above was named for its first use; it shares whatever
+// URLs it is given. Post Editor's "Save Media" now passes each asset's
+// EDITED result through the very same path, under this name.
+export const shareAssetFiles = shareOriginalAssets;
+
+const GENERIC_EXPORT_ERROR = "Couldn't prepare the download. Please try again.";
+
+// Fetches one of the app's own export routes and saves the result. Those
+// routes answer a failure with JSON `{ message }` meant to be shown as-is
+// (see posts/[postId]/export/route.ts) -- this surfaces that message instead
+// of dropping it, and never saves an error body as if it were the file.
+export async function downloadFromExportRoute(
+  url: string,
+  filename: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch {
+    return { ok: false, message: "Couldn't reach the server. Check your connection and try again." };
+  }
+  if (!response.ok) {
+    let message = GENERIC_EXPORT_ERROR;
+    try {
+      const body = (await response.json()) as { message?: unknown };
+      if (typeof body?.message === "string" && body.message) message = body.message;
+    } catch {
+      // not JSON -- keep the generic message
+    }
+    return { ok: false, message };
+  }
+  const blob = await response.blob();
+  if (blob.size === 0) return { ok: false, message: GENERIC_EXPORT_ERROR };
+  saveAs(blob, filename);
+  return { ok: true };
 }

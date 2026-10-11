@@ -33,8 +33,14 @@ import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { filenameFromUrl, shareOrDownloadAsset, shareOriginalAssets } from "@/lib/download-zip";
-import { saveAs } from "file-saver";
+import {
+  downloadFromExportRoute,
+  filenameFromUrl,
+  shareAssetFiles,
+  shareOrDownloadAsset,
+  shareOriginalAssets,
+} from "@/lib/download-zip";
+import { editedDownloadSource, originalDownloadSource, postExportUrl } from "@/lib/post-export-plan";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
@@ -442,43 +448,68 @@ export function PostEditor({
 
   const usedMediaIds = new Set(orderedAssets.map((a) => a.mediaAssetId));
 
-  const [downloading, setDownloading] = useState(false);
+  // Which whole-post download is in flight, if any -- one at a time.
+  const [downloading, setDownloading] = useState<"edited" | "original" | null>(null);
+
+  // "Download Media" / "Save Media": the post's EDITED media -- what the app
+  // shows. Every image exports its saved edit (crop, adjustments, text,
+  // drawing) when it has one, the cover additionally gets its saved Grid
+  // framing, videos stay the real file. The rules live in
+  // lib/post-export-plan.ts, shared with the export route, so desktop and
+  // mobile can't drift apart. This used to hand back the untouched
+  // originals on a touch device and to ignore saved edits everywhere.
   async function handleDownloadAll() {
-    setDownloading(true);
+    if (downloading) return;
+    setDownloading("edited");
     try {
-      // Prefer sharing each asset's real ORIGINAL directly (image or
-      // video) as individual native-share Files -- no server export, no
-      // zip, no client-side unzip. This is genuinely simpler than the
-      // previous "fetch the server's crop-applied export zip, then unzip
-      // it client-side just to get individual files back" round trip,
-      // and matches what the single-asset Download/Share action already
-      // does (asset.originalUrl, not a composited export). Only the
-      // COVER (position 0) can ever have a saved crop in this app --
-      // every other carousel slide has none to begin with -- so using
-      // originals here doesn't silently drop anything meaningful for the
-      // common multi-image case this path exists for.
+      // Touch devices: individual Files in ONE native share sheet (so they
+      // can go straight to Photos), same UX as before. Each file is fetched
+      // from wherever its edited result already lives -- a storage URL the
+      // editor holds, or, for a cover with a saved framing, the export
+      // route's single-asset response. No zip, no client-side unzip.
+      // liveCoverTransformRef, not post.coverTransform: a crop saved in this
+      // session doesn't revalidate the editor's props.
       //
       // Gated on isTouchDevice -- some desktop browsers do support
-      // canShare({files}), so shareOriginalAssets' own preferMobileUx
-      // parameter is what actually keeps the OS share dialog off desktop
-      // "Download Media" clicks; on desktop this falls straight through
-      // to the exact same server-export zip download it always has.
+      // canShare({files}), so shareAssetFiles' own preferMobileUx parameter
+      // is what keeps the OS share dialog off desktop clicks.
       const shareable = orderedAssets
-        .map((a) => a.originalUrl ?? a.url)
-        .filter((url): url is string => !!url)
-        .map((url) => ({ url, filename: filenameFromUrl(url, "asset") }));
-      if (shareable.length > 0 && (await shareOriginalAssets(shareable, isTouchDevice))) return;
+        .map((a, index) => {
+          const source = editedDownloadSource(a, index === 0, liveCoverTransformRef.current, projectId, post.id);
+          return source ? { url: source.url, filename: source.filename ?? filenameFromUrl(source.url, "asset") } : null;
+        })
+        .filter((s): s is { url: string; filename: string } => s !== null);
+      if (shareable.length === orderedAssets.length && (await shareAssetFiles(shareable, isTouchDevice))) return;
 
-      // Falls back to the server-composited export (crop-applied cover,
-      // canonical per-slide sizing) as a plain zip download -- unchanged
-      // from before, and the only path taken when native file sharing
-      // isn't supported/available for these files.
-      const response = await fetch(`/projects/${projectId}/posts/${post.id}/export`);
-      if (!response.ok) return;
-      const zipBlob = await response.blob();
-      saveAs(zipBlob, `post-${post.id}-export.zip`);
+      // Desktop, and the fallback whenever native file sharing isn't
+      // available: the same edited media as one zip from the export route.
+      const result = await downloadFromExportRoute(postExportUrl(projectId, post.id), `post-${post.id}-export.zip`);
+      if (!result.ok) showError(result.message);
     } finally {
-      setDownloading(false);
+      setDownloading(null);
+    }
+  }
+
+  // "Download Originals": the untouched uploads, byte-for-byte -- the
+  // explicit, separately named way to get what "Download Media" used to
+  // return. Never touches or replaces anything.
+  async function handleDownloadOriginals() {
+    if (downloading) return;
+    setDownloading("original");
+    try {
+      const shareable = orderedAssets
+        .map((a) => originalDownloadSource(a))
+        .filter((s): s is NonNullable<typeof s> => s !== null)
+        .map((s) => ({ url: s.url, filename: filenameFromUrl(s.url, "asset") }));
+      if (shareable.length === orderedAssets.length && (await shareOriginalAssets(shareable, isTouchDevice))) return;
+
+      const result = await downloadFromExportRoute(
+        postExportUrl(projectId, post.id, { variant: "original" }),
+        `post-${post.id}-originals.zip`,
+      );
+      if (!result.ok) showError(result.message);
+    } finally {
+      setDownloading(null);
     }
   }
 
@@ -591,16 +622,29 @@ export function PostEditor({
       {viewer && <PostMediaViewer media={viewer.media} startIndex={viewer.startIndex} onClose={closeViewer} />}
 
       {orderedAssets.length > 0 ? (
-        <Button
-          type="button"
-          variant="primary"
-          radius="none"
-          onClick={handleDownloadAll}
-          disabled={downloading}
-          className="w-fit self-start px-6 py-3 text-xs tracking-wide uppercase"
-        >
-          {downloading ? "Preparing…" : isTouchDevice ? "Save Media" : "Download Media"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2" data-post-download-actions="">
+          <Button
+            type="button"
+            variant="primary"
+            radius="none"
+            onClick={handleDownloadAll}
+            disabled={downloading !== null}
+            title="Download this post's media as shown here, with saved edits and cover framing"
+            className="w-fit px-6 py-3 text-xs tracking-wide uppercase"
+          >
+            {downloading === "edited" ? "Preparing…" : isTouchDevice ? "Save Media" : "Download Media"}
+          </Button>
+          {/* Separate and explicitly named: the untouched uploads. */}
+          <button
+            type="button"
+            onClick={handleDownloadOriginals}
+            disabled={downloading !== null}
+            title="Download the original uploaded files, without any edits or cover framing"
+            className="text-xs tracking-wide text-muted uppercase underline-offset-4 transition-colors duration-150 hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {downloading === "original" ? "Preparing…" : isTouchDevice ? "Save Originals" : "Download Originals"}
+          </button>
+        </div>
       ) : (
         <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
       )}
@@ -976,7 +1020,8 @@ function SortableAsset({
     [setNodeRef],
   );
   const [menuOpen, setMenuOpen] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [downloading, setDownloading] = useState<"edited" | "original" | null>(null);
+  const { showError } = useToast();
   const [cropMode, setCropMode] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const menuRef = useOutsideClick<HTMLDivElement>(menuOpen, () => setMenuOpen(false));
@@ -1026,20 +1071,30 @@ function SortableAsset({
     transition,
   };
 
-  function handleDownload() {
+  // "Download": this frame's EDITED result -- the saved edit when it has
+  // one, plus the Grid framing if this is the cover (rendered by the export
+  // route; everything else is a file the editor already holds a URL for).
+  // "Download Original": the untouched upload. Same rules as the whole-post
+  // actions, see lib/post-export-plan.ts. Only the MECHANISM differs on a
+  // touch device, which prefers the native share sheet.
+  function handleDownload(kind: "edited" | "original") {
     setMenuOpen(false);
-    if (!asset.originalUrl) return;
-    setDownloading(true);
-    // Same bytes as before (asset.originalUrl, the true original -- this
-    // single-asset action has always been the raw file, distinct from
-    // "Download Media"'s server-composited crop-applied export above);
-    // only the MECHANISM changes on a touch device, preferring the native
-    // share sheet over a plain file download.
-    shareOrDownloadAsset(
-      asset.originalUrl,
-      filenameFromUrl(asset.originalUrl, "asset"),
-      isTouchDevice,
-    ).finally(() => setDownloading(false));
+    if (downloading) return;
+    const source =
+      kind === "original"
+        ? originalDownloadSource(asset)
+        : editedDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
+    if (!source) {
+      showError("This file isn't available to download right now. Refresh the page and try again.");
+      return;
+    }
+    setDownloading(kind);
+    shareOrDownloadAsset(source.url, source.filename ?? filenameFromUrl(source.url, "asset"), isTouchDevice)
+      .then((delivered) => {
+        if (!delivered) showError("Couldn't download that file. Please try again.");
+      })
+      .catch(() => showError("Couldn't download that file. Please try again."))
+      .finally(() => setDownloading(null));
   }
 
   async function handleSaveCrop(next: GridCoverTransform) {
@@ -1102,7 +1157,7 @@ function SortableAsset({
           {menuOpen && (
             <div
               onClick={(e) => e.stopPropagation()}
-              className="absolute left-0 top-6 w-32 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
+              className="absolute left-0 top-6 w-36 max-w-[calc(100vw-1.5rem)] rounded-none border border-border bg-background p-1 shadow-lg"
             >
               <button
                 type="button"
@@ -1138,11 +1193,21 @@ function SortableAsset({
               </button>
               <button
                 type="button"
-                onClick={handleDownload}
-                disabled={downloading}
+                onClick={() => handleDownload("edited")}
+                disabled={downloading !== null}
+                title="As shown here, with saved edits"
                 className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
               >
-                {downloading ? "Downloading..." : isTouchDevice ? "Save" : "Download"}
+                {downloading === "edited" ? "Downloading..." : isTouchDevice ? "Save" : "Download"}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDownload("original")}
+                disabled={downloading !== null}
+                title="The original uploaded file, without edits"
+                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
+              >
+                {downloading === "original" ? "Downloading..." : isTouchDevice ? "Save Original" : "Download Original"}
               </button>
               <button
                 type="button"
