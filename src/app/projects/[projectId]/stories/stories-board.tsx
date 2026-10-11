@@ -12,7 +12,7 @@ import {
   uploadContentAsset,
   type ActionResult,
 } from "@/lib/actions/stories";
-import { createShareLink } from "@/lib/actions/share-links";
+import { useShareForReview } from "../use-share-for-review";
 import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { StoryCard } from "./story-card";
 import { ShareMenuButton } from "../share-menu";
@@ -71,6 +71,7 @@ export function StoriesBoard({
   stories,
   folders,
   canManage,
+  canCreateReviewLinks,
   shareLinks,
   shareTableMissing,
 }: {
@@ -78,6 +79,9 @@ export function StoriesBoard({
   stories: StoryListItem[];
   folders: ContentFolderItem[];
   canManage: boolean;
+  // Owner/Admin/Member -- its own capability, separate from canManage (see
+  // role-permissions.ts's canCreateReviewLinks).
+  canCreateReviewLinks: boolean;
   shareLinks: ShareLinkItem[];
   shareTableMissing: boolean;
 }) {
@@ -104,8 +108,10 @@ export function StoriesBoard({
   // a separate picker dialog.
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedStoryIds, setSelectedStoryIds] = useState<Set<string>>(new Set());
-  const [sharing, startSharing] = useTransition();
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  // This board's own toast (bulk move/delete, folder errors). Share for
+  // Review's toast comes from the shared hook below; whichever spoke last
+  // is what shows.
+  const [boardToastMessage, setToastMessage] = useState<string | null>(null);
 
   // useCallback (stable, empty deps) so StoryCard's React.memo below
   // actually takes effect for every card instead of re-rendering all of
@@ -119,10 +125,27 @@ export function StoriesBoard({
     });
   }, []);
 
-  function handleCancelSelection() {
+  const handleCancelSelection = useCallback(() => {
     setSelectionMode(false);
     setSelectedStoryIds(new Set());
-  }
+  }, []);
+
+  // Create + copy + fallbacks all live in the shared hook (Grid uses the
+  // same one). onCreated runs as soon as the link exists server-side, before
+  // the clipboard is touched -- so a failed copy can never leave the
+  // selection armed for a second, duplicate link. The refresh is what makes
+  // the new link show up under "Manage Review Links" straight away.
+  const handleReviewLinkCreated = useCallback(() => {
+    handleCancelSelection();
+    router.refresh();
+  }, [handleCancelSelection, router]);
+  const {
+    sharing,
+    share: shareForReview,
+    toastMessage: shareToastMessage,
+    createdLinkDialog,
+  } = useShareForReview({ projectId, field: "story_ids", onCreated: handleReviewLinkCreated });
+  const toastMessage = shareToastMessage ?? boardToastMessage;
 
   // Bulk Move/Delete: explicit "Select" entry (Share/export menu's own
   // "Select Items" item, same corner circle spot as Share's own
@@ -210,23 +233,7 @@ export function StoriesBoard({
   }
 
   function handleShareForReview() {
-    const ids = Array.from(selectedStoryIds);
-    if (ids.length === 0) return;
-    startSharing(async () => {
-      const formData = new FormData();
-      for (const id of ids) formData.append("story_ids", id);
-      const result = await createShareLink(projectId, undefined, formData);
-      if (result?.success && result.token) {
-        const url = `${window.location.origin}/preview/${result.token}`;
-        await navigator.clipboard.writeText(url);
-        setToastMessage("Review link copied to clipboard");
-        setTimeout(() => setToastMessage(null), 2500);
-        handleCancelSelection();
-      } else {
-        setToastMessage(result?.message ?? "Couldn't create the review link.");
-        setTimeout(() => setToastMessage(null), 3000);
-      }
-    });
+    shareForReview(Array.from(selectedStoryIds));
   }
 
   function handleCreateFolder() {
@@ -418,7 +425,7 @@ export function StoriesBoard({
             <ShareMenuButton
               projectId={projectId}
               links={shareLinks}
-              canManage={canManage}
+              canCreateLinks={canCreateReviewLinks}
               tableMissing={shareTableMissing}
               onEnterSelectionMode={() => {
                 handleCancelBulkSelection();
@@ -618,6 +625,7 @@ export function StoriesBoard({
           </Button>
         </div>
       )}
+      {createdLinkDialog}
       <Toast message={toastMessage} />
 
       <Dialog

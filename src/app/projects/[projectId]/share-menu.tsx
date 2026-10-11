@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { deleteShareLink } from "@/lib/actions/share-links";
 import type { ShareLinkItem } from "@/lib/data/share-links";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
+import { SHARE_LINK_MESSAGES, copyTextToClipboard, reviewLinkUrl } from "@/lib/review-link";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "No date";
@@ -38,7 +40,7 @@ function ShareIcon() {
 export function ShareMenuButton({
   projectId,
   links,
-  canManage,
+  canCreateLinks,
   tableMissing,
   exportLinks = [],
   onEnterSelectionMode,
@@ -47,7 +49,12 @@ export function ShareMenuButton({
 }: {
   projectId: string;
   links: ShareLinkItem[];
-  canManage: boolean;
+  // Owner/Admin/Member (canCreateReviewLinks) -- NOT the board's own
+  // content-editing canManage. Gates creating a link and opening the list
+  // of existing ones. Whether a given link can be DELETED is per link
+  // (link.canDelete): any link for an owner/admin, only their own for a
+  // Member.
+  canCreateLinks: boolean;
   tableMissing: boolean;
   exportLinks?: { href: string; label: string; title?: string }[];
   onEnterSelectionMode: () => void;
@@ -112,16 +119,33 @@ export function ShareMenuButton({
             <p className="text-[10px] tracking-wide text-muted uppercase">Share review</p>
             <p className="text-[10px] text-muted">Send content for approval and feedback</p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              onEnterSelectionMode();
-            }}
-            className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
-          >
-            Share for Review
-          </button>
+          {canCreateLinks ? (
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onEnterSelectionMode();
+              }}
+              className="block w-full rounded px-2 py-1.5 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+            >
+              Share for Review
+            </button>
+          ) : (
+            // Unavailable, and says why -- a Viewer/Client used to be let
+            // into the whole select-then-confirm flow only to have the
+            // final step rejected by the database.
+            <div className="px-2 py-1.5" data-share-unavailable="">
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                className="block w-full cursor-not-allowed text-left text-xs text-muted opacity-60"
+              >
+                Share for Review
+              </button>
+              <p className="mt-0.5 text-[10px] text-muted">{SHARE_LINK_MESSAGES.createNotAllowed}</p>
+            </div>
+          )}
           {onEnterBulkSelectionMode && (
             <button
               type="button"
@@ -134,7 +158,7 @@ export function ShareMenuButton({
               Select Items
             </button>
           )}
-          {canManage && (
+          {canCreateLinks && (
             <button
               type="button"
               onClick={() => {
@@ -159,7 +183,7 @@ export function ShareMenuButton({
         <ShareLinksList
           projectId={projectId}
           links={links}
-          canManage={canManage}
+          canCreateLinks={canCreateLinks}
           tableMissing={tableMissing}
           onCreateNew={() => {
             setManageOpen(false);
@@ -174,28 +198,49 @@ export function ShareMenuButton({
 function ShareLinksList({
   projectId,
   links,
-  canManage,
+  canCreateLinks,
   tableMissing,
   onCreateNew,
 }: {
   projectId: string;
   links: ShareLinkItem[];
-  canManage: boolean;
+  canCreateLinks: boolean;
   tableMissing: boolean;
   onCreateNew: () => void;
 }) {
+  const router = useRouter();
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [, startTransition] = useTransition();
+  // Set when the browser refuses the automatic copy -- the link is shown in
+  // a selectable field under its row instead.
+  const [manualCopyId, setManualCopyId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleCopy(link: ShareLinkItem) {
-    await navigator.clipboard.writeText(`${window.location.origin}/preview/${link.token}`);
+    const copied = await copyTextToClipboard(reviewLinkUrl(window.location.origin, link.token));
+    if (!copied) {
+      setManualCopyId(link.id);
+      return;
+    }
+    setManualCopyId(null);
     setCopiedId(link.id);
     setTimeout(() => setCopiedId((id) => (id === link.id ? null : id)), 1800);
   }
 
-  function handleDelete(link: ShareLinkItem) {
+  async function handleDelete(link: ShareLinkItem) {
+    if (deletingId) return;
     if (!confirm(`Delete "${link.title || "this share link"}"? The link will stop working immediately.`)) return;
-    startTransition(() => deleteShareLink(projectId, link.id));
+    setError(null);
+    setDeletingId(link.id);
+    try {
+      const result = await deleteShareLink(projectId, link.id);
+      if (!result.success) setError(result.message);
+      router.refresh();
+    } catch {
+      setError(SHARE_LINK_MESSAGES.deleteFailed);
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   return (
@@ -214,7 +259,8 @@ function ShareLinksList({
       ) : (
         <div className="flex flex-col divide-y divide-border border-t border-b border-border">
           {links.map((link) => (
-            <div key={link.id} className="flex items-center justify-between gap-4 py-3">
+            <div key={link.id} className="flex flex-col gap-2 py-3">
+            <div className="flex items-center justify-between gap-4">
               <div className="flex min-w-0 flex-col gap-0.5">
                 <span className="truncate text-sm font-medium text-foreground">{link.title || "Untitled link"}</span>
                 <span className="text-xs text-muted">
@@ -233,26 +279,79 @@ function ShareLinksList({
                 >
                   Open
                 </a>
-                {canManage && (
+                {link.canDelete && (
                   <button
                     type="button"
                     onClick={() => handleDelete(link)}
-                    className="px-2 py-2 text-xs tracking-wide text-error uppercase transition-colors duration-150 hover:text-error/70"
+                    disabled={deletingId !== null}
+                    className="px-2 py-2 text-xs tracking-wide text-error uppercase transition-colors duration-150 hover:text-error/70 disabled:opacity-50"
                   >
-                    Delete
+                    {deletingId === link.id ? "Deleting…" : "Delete"}
                   </button>
                 )}
               </div>
+            </div>
+            {manualCopyId === link.id && (
+              <CopyableLinkField
+                url={reviewLinkUrl(window.location.origin, link.token)}
+                hint="Couldn't copy automatically — select the link and copy it."
+              />
+            )}
             </div>
           ))}
         </div>
       )}
 
-      {canManage && (
+      {error && (
+        <p role="alert" className="text-sm text-error">
+          {error}
+        </p>
+      )}
+
+      {canCreateLinks && (
         <Button type="button" variant="primary" radius="none" onClick={onCreateNew}>
           + New Review Link
         </Button>
       )}
+    </div>
+  );
+}
+
+// A read-only, pre-selected field holding a review link -- the fallback for
+// whenever the browser won't write to the clipboard on its own (Safari after
+// an awaited request, a denied permission, no Clipboard API at all). The
+// Copy button here is a fresh click of its own, so it usually succeeds even
+// where the automatic copy didn't; if it still can't, the text is already
+// selected for a manual copy.
+export function CopyableLinkField({ url, hint }: { url: string; hint?: string }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [state, setState] = useState<"idle" | "copied" | "manual">("idle");
+
+  async function handleCopy() {
+    inputRef.current?.select();
+    setState((await copyTextToClipboard(url)) ? "copied" : "manual");
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5" data-review-link-field="">
+      <div className="flex min-w-0 items-stretch gap-2">
+        <input
+          ref={inputRef}
+          type="text"
+          readOnly
+          value={url}
+          aria-label="Review link"
+          onFocus={(e) => e.currentTarget.select()}
+          onClick={(e) => e.currentTarget.select()}
+          className="block min-w-0 flex-1 rounded-none border border-border bg-transparent px-3 py-2 text-sm text-foreground select-all focus:border-foreground focus:outline-none"
+        />
+        <Button type="button" variant="secondary" radius="none" onClick={handleCopy}>
+          {state === "copied" ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <p className="text-xs text-muted">
+        {state === "manual" ? "Copying is blocked in this browser — the link is selected, press ⌘C / Ctrl+C." : hint}
+      </p>
     </div>
   );
 }

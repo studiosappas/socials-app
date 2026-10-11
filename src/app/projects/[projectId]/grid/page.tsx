@@ -1,8 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
-import { getShareLinksData } from "@/lib/data/share-links";
+import { getShareLinksData, resolveShareLinkPermissions } from "@/lib/data/share-links";
 import { getCachedSignedUrl, getCachedSignedUrls } from "@/lib/signed-url-cache";
-import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
+import { canCreateReviewLinks, canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { GridBoard, type GridBoardRow, type MediaFolder, type MediaLibraryItem } from "./grid-board";
 import { AccessRestricted } from "../access-restricted";
 
@@ -249,7 +249,8 @@ export default async function GridPage({
       mediaLibrary={mediaLibrary}
       mediaFolders={mediaFolders}
       canManage={canManage}
-      shareLinks={shareData.links}
+      canCreateReviewLinks={canCreateReviewLinks(membership.role)}
+      shareLinks={resolveShareLinkPermissions(shareData.links, membership.role, user?.id)}
       shareTableMissing={shareData.tableMissing}
     />
   );

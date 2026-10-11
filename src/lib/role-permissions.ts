@@ -182,3 +182,29 @@ export function canEditContent(role: ProjectRole | null | undefined): boolean {
 export function canSubmitClientReview(role: ProjectRole | null | undefined): boolean {
   return role === "client";
 }
+
+// REVIEW LINKS ("Share for Review") -- two separate capabilities, on purpose.
+//
+// Creating a link: Owner, Admin and Member ('editor'). Matches the INSERT
+// policies in supabase/fix_member_share_review_links.sql exactly. Viewer,
+// Client and legacy 'designer' cannot.
+export function canCreateReviewLinks(role: ProjectRole | null | undefined): boolean {
+  return role === "owner" || role === "admin" || role === "editor";
+}
+
+// Managing EVERY review link in a project (deleting links other people
+// made): Owner and Admin only -- unchanged, the existing "Admins manage
+// share links" policy. Deliberately not canEditContent: being able to edit
+// content is not the same as being able to revoke someone else's client
+// link.
+export function canManageReviewLinks(role: ProjectRole | null | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+// Whether this role may delete ONE specific link: a manager can delete any;
+// a Member only one they created themselves (same rule as the "Creators can
+// delete own share links" policy).
+export function canDeleteReviewLink(role: ProjectRole | null | undefined, isCreator: boolean): boolean {
+  if (canManageReviewLinks(role)) return true;
+  return isCreator && canCreateReviewLinks(role);
+}

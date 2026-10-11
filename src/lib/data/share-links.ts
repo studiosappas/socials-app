@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { canDeleteReviewLink } from "@/lib/role-permissions";
+import type { ProjectRole } from "@/types/database";
 
 export type ShareLinkItem = {
   id: string;
@@ -6,10 +8,19 @@ export type ShareLinkItem = {
   title: string;
   createdAt: string;
   itemCount: number;
+  // Whether THIS viewer may delete this particular link: an owner/admin any
+  // link, a Member only one they created. Resolved server-side (see
+  // resolveShareLinkPermissions) so the creator's user id never needs to
+  // reach the browser.
+  canDelete: boolean;
 };
 
+// What getShareLinksData returns before the viewer's own role/id are known
+// -- both pages fetch it in the same wave as auth.getUser().
+export type ShareLinkRow = Omit<ShareLinkItem, "canDelete"> & { createdBy: string | null };
+
 export type ShareLinksData = {
-  links: ShareLinkItem[];
+  links: ShareLinkRow[];
   tableMissing: boolean;
 };
 
@@ -28,7 +39,7 @@ export async function getShareLinksData(
   // whole page.
   const { data: linkRows, error: linksError } = await supabase
     .from("share_links")
-    .select("id, token, title, created_at")
+    .select("id, token, title, created_at, created_by")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
 
@@ -42,13 +53,27 @@ export async function getShareLinksData(
     countByLink.set(item.share_link_id, (countByLink.get(item.share_link_id) ?? 0) + 1);
   }
 
-  const links: ShareLinkItem[] = (linkRows ?? []).map((l) => ({
+  const links: ShareLinkRow[] = (linkRows ?? []).map((l) => ({
     id: l.id,
     token: l.token,
     title: l.title,
     createdAt: l.created_at,
     itemCount: countByLink.get(l.id) ?? 0,
+    createdBy: (l.created_by as string | null) ?? null,
   }));
 
   return { links, tableMissing: Boolean(linksError) };
+}
+
+// Turns the raw rows into what the browser gets: per-link `canDelete` for
+// this viewer, with `createdBy` dropped.
+export function resolveShareLinkPermissions(
+  links: ShareLinkRow[],
+  role: ProjectRole | null | undefined,
+  userId: string | null | undefined,
+): ShareLinkItem[] {
+  return links.map(({ createdBy, ...link }) => ({
+    ...link,
+    canDelete: canDeleteReviewLink(role, Boolean(userId) && createdBy === userId),
+  }));
 }

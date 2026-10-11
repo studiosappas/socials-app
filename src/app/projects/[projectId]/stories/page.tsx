@@ -1,7 +1,7 @@
 ﻿import { createClient } from "@/lib/supabase/server";
-import { getShareLinksData } from "@/lib/data/share-links";
+import { getShareLinksData, resolveShareLinkPermissions } from "@/lib/data/share-links";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
+import { canCreateReviewLinks, canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { StoriesBoard } from "./stories-board";
 import { AccessRestricted } from "../access-restricted";
 import type { MediaType } from "@/types/database";
@@ -183,7 +183,8 @@ export default async function StoriesPage({
       stories={storyItems}
       folders={folderItems}
       canManage={canManage}
-      shareLinks={shareData.links}
+      canCreateReviewLinks={canCreateReviewLinks(membership.role)}
+      shareLinks={resolveShareLinkPermissions(shareData.links, membership.role, user?.id)}
       shareTableMissing={shareData.tableMissing}
     />
   );

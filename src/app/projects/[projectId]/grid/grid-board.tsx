@@ -67,7 +67,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { generatePosterFromVideoUrl } from "@/lib/video-poster";
 import { ShareMenuButton } from "../share-menu";
-import { createShareLink } from "@/lib/actions/share-links";
+import { useShareForReview } from "../use-share-for-review";
 import type { ShareLinkItem } from "@/lib/data/share-links";
 import { Toast } from "@/components/ui/toast";
 import { useToast } from "@/lib/hooks/use-toast";
@@ -356,6 +356,7 @@ export function GridBoard({
   mediaLibrary,
   mediaFolders,
   canManage,
+  canCreateReviewLinks = false,
   shareLinks,
   shareTableMissing,
   demoMode = false,
@@ -381,6 +382,10 @@ export function GridBoard({
   mediaLibrary: MediaLibraryItem[];
   mediaFolders: MediaFolder[];
   canManage: boolean;
+  // Owner/Admin/Member -- its own capability, separate from canManage (see
+  // role-permissions.ts's canCreateReviewLinks). Defaults to false so a
+  // caller that never passes it (the landing demo) can't offer sharing.
+  canCreateReviewLinks?: boolean;
   shareLinks: ShareLinkItem[];
   shareTableMissing: boolean;
   // Additive, default false -- the real app is byte-for-byte unaffected.
@@ -572,8 +577,6 @@ export function GridBoard({
   // id, since that's what createShareLink actually needs.
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedPostIds, setSelectedPostIds] = useState<Set<string>>(new Set());
-  const [sharing, startSharing] = useTransition();
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // useCallback (stable reference, empty deps -- only reads via the
   // functional setState form) so GridSlot's React.memo below actually
@@ -589,30 +592,28 @@ export function GridBoard({
     });
   }, []);
 
-  function handleCancelSelection() {
+  const handleCancelSelection = useCallback(() => {
     setSelectionMode(false);
     setSelectedPostIds(new Set());
-  }
+  }, []);
+
+  // Create + copy + fallbacks all live in the shared hook (Content uses the
+  // same one). onCreated runs as soon as the link exists server-side, before
+  // the clipboard is touched -- so a failed copy can never leave the
+  // selection armed for a second, duplicate link.
+  const handleReviewLinkCreated = useCallback(() => {
+    handleCancelSelection();
+    router.refresh();
+  }, [handleCancelSelection, router]);
+  const {
+    sharing,
+    share: shareForReview,
+    toastMessage,
+    createdLinkDialog,
+  } = useShareForReview({ projectId, field: "post_ids", onCreated: handleReviewLinkCreated });
 
   function handleShareForReview() {
-    const ids = Array.from(selectedPostIds);
-    if (ids.length === 0) return;
-    startSharing(async () => {
-      const formData = new FormData();
-      for (const id of ids) formData.append("post_ids", id);
-      const result = await createShareLink(projectId, undefined, formData);
-      if (result?.success && result.token) {
-        const url = `${window.location.origin}/preview/${result.token}`;
-        await navigator.clipboard.writeText(url);
-        setToastMessage("Review link copied to clipboard");
-        setTimeout(() => setToastMessage(null), 2500);
-        handleCancelSelection();
-        router.refresh();
-      } else {
-        setToastMessage(result?.message ?? "Couldn't create the review link.");
-        setTimeout(() => setToastMessage(null), 3000);
-      }
-    });
+    shareForReview(Array.from(selectedPostIds));
   }
 
   // Single authoritative owner of rows/slots -- see grid-reducer.ts for the
@@ -1242,7 +1243,7 @@ export function GridBoard({
                   <ShareMenuButton
                     projectId={projectId}
                     links={shareLinks}
-                    canManage={canManage}
+                    canCreateLinks={canCreateReviewLinks}
                     tableMissing={shareTableMissing}
                     onEnterSelectionMode={() => setSelectionMode(true)}
                     showLabel
@@ -1461,6 +1462,7 @@ export function GridBoard({
           </Button>
         </div>
       )}
+      {createdLinkDialog}
       <Toast message={toastMessage} />
     </DndContext>
   );

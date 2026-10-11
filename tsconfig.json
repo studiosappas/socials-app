@@ -38,6 +38,7 @@
     "src/lib/ai/result-safety.test.ts",
     "src/lib/upload-insert-order.test.ts",
     "src/lib/media-drop.test.ts",
+    "src/lib/review-link.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }
