@@ -2242,7 +2242,24 @@ export function AnnotationEditor({
           apply/cancel) stay as compact horizontal bars in the center
           column below -- they're per-tool option pickers, not tool
           switches, so they don't belong in this rail. */}
-      <div className="flex w-16 shrink-0 flex-col items-stretch gap-0.5 overflow-y-auto border-r border-border px-1.5 py-3">
+      {/* The rail's single column needs ~602px, and the area it lives in is
+          the viewport minus this modal's header and Save bar (~132px). On
+          any window shorter than ~734px the tools at the bottom were simply
+          cut off -- measured in Chromium and WebKit: Delete first, then
+          Redo/Undo/Flip, and below ~556px Adjust itself -- with only this
+          rail's own scroll to reach them, which on macOS's default overlay
+          scrollbars shows no hint that it scrolls at all. That is a laptop
+          at 125-150% browser zoom, a scaled "larger text" display, or just
+          a window that isn't maximised. RAIL_SHORT_CLASSES lays the same
+          buttons out in 2 (then 3) columns as the height shrinks, so every
+          tool stays on screen; the canvas gives up one or two 54px columns
+          of width on exactly the windows that are wide-but-short. A tall
+          window -- every phone in portrait, any normal desktop -- matches
+          neither query and keeps the original single column untouched. */}
+      <div
+        data-editor-tool-rail=""
+        className={`flex w-16 shrink-0 flex-col items-stretch gap-0.5 overflow-y-auto border-r border-border px-1.5 py-3 ${RAIL_SHORT_CLASSES}`}
+      >
         <SidebarToolButton active={tool === "select"} onClick={() => activateTool("select")} label="Select">
           <SelectIcon />
         </SidebarToolButton>
@@ -2261,7 +2278,7 @@ export function AnnotationEditor({
         <SidebarToolButton active={false} onClick={handleAddLogoClick} label="Logo" title="Add Logo">
           <LogoIcon />
         </SidebarToolButton>
-        <span className="my-1 h-px w-full bg-border" />
+        <span className="col-span-full my-1 h-px w-full bg-border" />
         <SidebarToolButton
           active={adjustPanelOpen}
           onClick={() => setAdjustPanelOpen((v) => !v)}
@@ -2285,7 +2302,7 @@ export function AnnotationEditor({
             <FrameIcon />
           </SidebarToolButton>
         )}
-        <span className="my-1 h-px w-full bg-border" />
+        <span className="col-span-full my-1 h-px w-full bg-border" />
         <SidebarToolButton active={false} onClick={handleUndo} label="Undo">
           <UndoIcon />
         </SidebarToolButton>
@@ -3330,6 +3347,21 @@ function CropCornerHandle({
 // A single vertical rail item: icon on top, a short label underneath --
 // deliberately minimal (no borders/pills like the old horizontal toolbar
 // buttons) so a column of ~10 of these doesn't read as noisy.
+// See the tool rail's own comment in AnnotationEditor. Thresholds are the
+// rail's measured needs plus the ~132px of modal chrome around it: one
+// column needs a ~734px-tall window, two columns ~531px (with the video-only
+// Frame button), three ~380px. Column width is the single-column rail's own
+// button width (w-16 minus px-1.5 on each side = 52px) so buttons don't
+// change size, only position. Written out per class because Tailwind only
+// sees complete class names.
+const RAIL_SHORT_CLASSES =
+  "[@media(max-height:739px)]:grid [@media(max-height:739px)]:content-start " +
+  // The two ranges are written as non-overlapping on purpose: with a plain
+  // max-height pair both would match a very short window, and which one won
+  // would depend on the order the two rules happen to be emitted in.
+  "[@media(min-height:540px)_and_(max-height:739px)]:w-[120px] [@media(min-height:540px)_and_(max-height:739px)]:grid-cols-[52px_52px] " +
+  "[@media(max-height:539px)]:w-[174px] [@media(max-height:539px)]:grid-cols-[52px_52px_52px]";
+
 function SidebarToolButton({
   active,
   onClick,
