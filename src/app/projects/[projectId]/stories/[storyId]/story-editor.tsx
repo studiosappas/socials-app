@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useActionState, useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -37,6 +37,8 @@ import { canSubmitClientReview } from "@/lib/role-permissions";
 import { Button } from "@/components/ui/button";
 import { ItemComments } from "@/components/ui/item-comments";
 import { useToast } from "@/lib/hooks/use-toast";
+import { libraryTileRowHeight } from "@/lib/library-tile-size";
+import { RecoverableImg } from "@/components/recoverable-img";
 import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import type { MediaLibraryItem } from "../../grid/grid-board";
 import type { StoryFrameItem, StoryLinkItem } from "@/lib/data/stories";
@@ -269,70 +271,43 @@ export function StoryEditor({
       {canManage && availableMedia.length > 0 && (
         <section className="flex flex-col gap-2">
           <span className={labelClass}>Add from library</span>
-          {/* Capped to roughly 9 rows on the full page, bounded by viewport
-              height too so it doesn't grow unboundedly with a project's full
-              media library. Inside the Grid/Stories popup (hideBackLink) the
-              modal itself is already space-constrained, so cap to a single
-              visible row there instead -- scrolls internally either way.
-              Mobile row height is an EXPLICIT --tile-row-h value, same fix
-              (and same reason) as Post editor's own AddFromLibrarySection
-              (post-editor.tsx): an implicit auto-rows height driven by each
-              tile's own aspect-ratio collapses to near-zero before a real
-              device's async image load resolves, which read as tiles
-              splitting into repeated horizontal strips. --tile-row-h has no
-              dependency on any child's content/load state, so that can't
-              recur. Values are this section's own 9:16 (not Post's 3:4)
-              tiles at the same shared Modal width (both editors' intercepted-
-              route modals use the identical modal.tsx, max-w-3xl/p-4 sm:p-6,
-              grid-cols-4/gap-2) -- same tile widths (~60/73/77/83px at
-              320/375/390/414px), scaled to 9:16 instead of 3:4. sm: reverts
-              to the original desktop values -- auto-rows-auto + sm:aspect-
-              [9/16] on the tile, max-h-36 on the container -- untouched. */}
-          <div
-            className={`grid grid-cols-4 gap-2 overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:107px] min-[375px]:[--tile-row-h:130px] min-[390px]:[--tile-row-h:137px] min-[414px]:[--tile-row-h:148px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 sm:auto-rows-auto ${
-              hideBackLink ? "max-h-[calc(var(--tile-row-h)*4/3+0.5rem)] sm:max-h-36" : "max-h-[min(1000px,65vh)]"
-            }`}
-          >
-            {availableMedia.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  // Optimistic insert -- mediaAssetId/url/mediaType are
-                  // already known client-side (it's picked from the media
-                  // library, not a fresh upload), so the new frame can show
-                  // immediately with a temp id, then get patched to the
-                  // real id once the insert resolves. Reverts (removes the
-                  // placeholder) and surfaces a toast if the insert fails.
-                  const tempId = `temp-${item.id}-${Date.now()}`;
-                  setOrderedFrames((current) => [
-                    ...current,
-                    { frameId: tempId, mediaAssetId: item.id, url: item.url, mediaType: item.mediaType, linkUrl: null },
-                  ]);
-                  startTransition(async () => {
-                    const result = await addStoryFrame(projectId, story.id, item.id);
-                    if (result.success) {
-                      setOrderedFrames((current) =>
-                        current.map((f) => (f.frameId === tempId ? { ...f, frameId: result.frameId } : f)),
-                      );
-                    } else {
-                      setOrderedFrames((current) => current.filter((f) => f.frameId !== tempId));
-                      showError(result.message ?? "Couldn't add that frame.");
-                    }
-                  });
-                }}
-                className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70 sm:aspect-[9/16]"
-              >
-                {item.url && item.mediaType === "image" && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.url} alt="" loading="lazy" className="h-full w-full object-cover" />
-                )}
-                {item.url && item.mediaType === "video" && (
-                  <video src={item.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
-                )}
-              </button>
-            ))}
-          </div>
+          <AddFromLibraryGrid
+            items={availableMedia}
+            hideBackLink={hideBackLink}
+            onPick={(item) => {
+              // Optimistic insert -- mediaAssetId/url/mediaType are
+              // already known client-side (it's picked from the media
+              // library, not a fresh upload), so the new frame can show
+              // immediately with a temp id, then get patched to the
+              // real id once the insert resolves. Reverts (removes the
+              // placeholder) and surfaces a toast if the insert fails.
+              // originalUrl, not `url`: the picker's own `url` may be a
+              // small display thumbnail, while a frame always shows (and
+              // downloads) the real original.
+              const tempId = `temp-${item.id}-${Date.now()}`;
+              setOrderedFrames((current) => [
+                ...current,
+                {
+                  frameId: tempId,
+                  mediaAssetId: item.id,
+                  url: item.originalUrl ?? item.url,
+                  mediaType: item.mediaType,
+                  linkUrl: null,
+                },
+              ]);
+              startTransition(async () => {
+                const result = await addStoryFrame(projectId, story.id, item.id);
+                if (result.success) {
+                  setOrderedFrames((current) =>
+                    current.map((f) => (f.frameId === tempId ? { ...f, frameId: result.frameId } : f)),
+                  );
+                } else {
+                  setOrderedFrames((current) => current.filter((f) => f.frameId !== tempId));
+                  showError(result.message ?? "Couldn't add that frame.");
+                }
+              });
+            }}
+          />
         </section>
       )}
 
@@ -352,6 +327,109 @@ export function StoryEditor({
         fetchComments={fetchStoryComments}
         addComment={(id, text) => addStoryComment(projectId, id, text)}
       />
+    </div>
+  );
+}
+
+const LIBRARY_DESKTOP_COLUMNS = 6; // sm:grid-cols-6
+const LIBRARY_GAP_PX = 8; // gap-2, same at every breakpoint
+const LIBRARY_TILE_ASPECT = 9 / 16;
+
+// "Add from library" tile grid. Row height is an EXPLICIT value at EVERY
+// breakpoint, with no per-tile aspect-ratio anywhere -- the same fix Post
+// Editor's own AddFromLibrarySection (post-editor.tsx) already carries, now
+// applied here too. This grid used to revert to sm:auto-rows-auto +
+// sm:aspect-[9/16] on the tile at desktop widths, which is exactly what
+// rendered the library as thin overlapping strips in Safari/WebKit: inside
+// this max-height scroll container WebKit shrinks auto rows to fit the
+// max-height (measured: 11px rows for 8 rows in the popup's 144px cap)
+// while each tile keeps its own aspect-ratio height and overflows into the
+// rows below. See lib/library-tile-size.ts.
+//
+// Below 640px, --tile-row-h is the same hand-tuned per-breakpoint values as
+// before (untouched). At sm:+ it falls back to 201px (the exact 9:16 value
+// at this popup's own max-w-3xl cap) until the ResizeObserver below measures
+// the real container -- which is what makes the much wider full-page layout
+// and the popup's narrower-than-cap range correct too. Capped by viewport
+// height on the full page; inside the Grid/Stories popup (hideBackLink) the
+// modal is already space-constrained, so the same short cap as before
+// applies there -- scrolls internally either way.
+function AddFromLibraryGrid({
+  items,
+  hideBackLink,
+  onPick,
+}: {
+  items: MediaLibraryItem[];
+  hideBackLink: boolean;
+  onPick: (item: MediaLibraryItem) => void;
+}) {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [desktopTileRowH, setDesktopTileRowH] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    function measure() {
+      if (window.innerWidth < 640) {
+        setDesktopTileRowH(null);
+        return;
+      }
+      const next = libraryTileRowHeight(el!.clientWidth, LIBRARY_DESKTOP_COLUMNS, LIBRARY_GAP_PX, LIBRARY_TILE_ASPECT);
+      if (next !== null) setDesktopTileRowH(next);
+    }
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={gridRef}
+      data-story-library-grid=""
+      className={`grid grid-cols-4 gap-2 overflow-x-hidden overflow-y-auto [-webkit-overflow-scrolling:touch] [--tile-row-h:107px] min-[375px]:[--tile-row-h:130px] min-[390px]:[--tile-row-h:137px] min-[414px]:[--tile-row-h:148px] sm:[--tile-row-h:201px] auto-rows-[var(--tile-row-h)] sm:grid-cols-6 ${
+        hideBackLink ? "max-h-[calc(var(--tile-row-h)*4/3+0.5rem)] sm:max-h-36" : "max-h-[min(1000px,65vh)]"
+      }`}
+      style={desktopTileRowH !== null ? { ["--tile-row-h" as string]: `${desktopTileRowH}px` } : undefined}
+    >
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          data-story-library-tile=""
+          onClick={() => onPick(item)}
+          className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
+        >
+          {/* Lazy + async decode, and the small thumbnail rather than the
+              full original when one exists (lib/data/stories.ts) -- only
+              the tiles actually scrolled into view are fetched. */}
+          {item.url && item.mediaType === "image" && (
+            <RecoverableImg
+              src={item.url}
+              assetId={item.id}
+              mediaKind="library-image"
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-cover"
+            />
+          )}
+          {item.mediaType === "video" && item.posterUrl && (
+            // The video's own poster image -- same reasoning as Post
+            // Editor's picker: a raw <video> paints nothing on iOS and
+            // costs a range request against the full original per tile.
+            <RecoverableImg
+              src={item.posterUrl}
+              assetId={item.id}
+              mediaKind="library-video-poster"
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-cover"
+            />
+          )}
+          {item.url && item.mediaType === "video" && !item.posterUrl && (
+            <video src={item.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+          )}
+        </button>
+      ))}
     </div>
   );
 }

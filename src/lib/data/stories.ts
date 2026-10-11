@@ -79,7 +79,7 @@ export async function getStoryPageData(
     // "add from library" pickers use (see grid/page.tsx, data/posts.ts).
     supabase
       .from("media_assets")
-      .select("id, storage_path, media_type")
+      .select("id, storage_path, media_type, poster_storage_path, thumbnail_storage_path")
       .eq("project_id", projectId)
       .neq("media_type", "pdf")
       .order("created_at", { ascending: false }),
@@ -120,7 +120,14 @@ export async function getStoryPageData(
   };
 
   const allPaths = new Set<string>();
-  for (const asset of mediaAssets ?? []) allPaths.add(asset.storage_path);
+  for (const asset of mediaAssets ?? []) {
+    allPaths.add(asset.storage_path);
+    // Display-only variants for the "Add from library" picker tiles (see
+    // mediaLibrary below) -- the same two columns the frames select above
+    // already reads, so no new schema dependency.
+    if (asset.media_type === "image" && asset.thumbnail_storage_path) allPaths.add(asset.thumbnail_storage_path);
+    if (asset.media_type === "video" && asset.poster_storage_path) allPaths.add(asset.poster_storage_path);
+  }
   for (const frame of frames ?? []) {
     const media = frame.media_assets as FrameMedia | null;
     if (!media) continue;
@@ -150,11 +157,30 @@ export async function getStoryPageData(
     };
   });
 
-  const mediaLibrary: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => ({
-    id: asset.id,
-    url: urlByPath.get(asset.storage_path) ?? null,
-    mediaType: asset.media_type,
-  }));
+  // Same display/original split as Post Editor's own picker list
+  // (lib/data/posts.ts): an IMAGE tile shows the small thumbnail when one
+  // exists instead of pulling the full original for every tile, and a VIDEO
+  // tile shows its poster. `originalUrl` is always storage_path -- it's what
+  // a newly added frame shows (story-editor.tsx's optimistic insert). A
+  // video's `url` stays the video itself, the fallback when it has no
+  // poster.
+  const mediaLibrary: MediaLibraryItem[] = (mediaAssets ?? []).map((asset) => {
+    const originalUrl = urlByPath.get(asset.storage_path) ?? null;
+    const thumbnailUrl =
+      asset.media_type === "image" && asset.thumbnail_storage_path
+        ? urlByPath.get(asset.thumbnail_storage_path) ?? null
+        : null;
+    return {
+      id: asset.id,
+      url: thumbnailUrl ?? originalUrl,
+      originalUrl,
+      mediaType: asset.media_type,
+      posterUrl:
+        asset.media_type === "video" && asset.poster_storage_path
+          ? urlByPath.get(asset.poster_storage_path) ?? null
+          : null,
+    };
+  });
 
   const links: StoryLinkItem[] = (storyLinks ?? []).map((l) => ({ id: l.id, url: l.url, label: l.label }));
 
