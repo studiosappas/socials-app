@@ -560,6 +560,28 @@ create table public.brief_tasks (
   created_at timestamptz not null default now()
 );
 
+-- ---------- Brief image attachments (original preserved separately from annotations) ----------
+-- Defined HERE, ahead of brief_task_items, because brief_task_items.attachment_id
+-- references it. (It used to sit further down, after the tasks tables, which
+-- made this file fail on an empty database: the reference pointed at a table
+-- that didn't exist yet.) Moved as-is -- definition and policies unchanged.
+create table public.brief_attachments (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  original_storage_path text not null,
+  preview_storage_path text,
+  annotation_json jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table public.brief_attachments enable row level security;
+
+create policy "Members can view brief attachments" on public.brief_attachments for select to authenticated
+  using (public.is_project_member(project_id));
+create policy "Admins manage brief attachments" on public.brief_attachments for all to authenticated
+  using (public.project_role(project_id) in ('owner', 'admin'))
+  with check (public.project_role(project_id) in ('owner', 'admin'));
+
 create table public.brief_task_items (
   id uuid primary key default gen_random_uuid(),
   task_id uuid not null references public.brief_tasks (id) on delete cascade,
@@ -745,24 +767,6 @@ create policy "Task comment visibility follows task visibility"
            or (t.project_id is null and t.user_id = auth.uid()))
     )
   );
-
--- ---------- Brief image attachments (original preserved separately from annotations) ----------
-create table public.brief_attachments (
-  id uuid primary key default gen_random_uuid(),
-  project_id uuid not null references public.projects (id) on delete cascade,
-  original_storage_path text not null,
-  preview_storage_path text,
-  annotation_json jsonb,
-  created_at timestamptz not null default now()
-);
-
-alter table public.brief_attachments enable row level security;
-
-create policy "Members can view brief attachments" on public.brief_attachments for select to authenticated
-  using (public.is_project_member(project_id));
-create policy "Admins manage brief attachments" on public.brief_attachments for all to authenticated
-  using (public.project_role(project_id) in ('owner', 'admin'))
-  with check (public.project_role(project_id) in ('owner', 'admin'));
 
 -- Brand Moodboard: a project's permanent visual knowledge base (logos,
 -- fonts, color palettes, guidelines, past campaign work, references) shown
