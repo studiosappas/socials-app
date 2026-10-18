@@ -1377,13 +1377,14 @@ function UploadAssetTile({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Surfaces every file rejected before the Server Action ever runs (wrong
-  // type, too large, unplayable video, upload failure), named in one message.
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const { showError } = useToast();
+  // Every upload failure -- each file rejected before the Server Action
+  // runs (named in one summary) and the save step's own failure -- is ONE
+  // dismissible upload-error toast; no inline copy.
+  const { showUploadError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
+    else if (state?.message) showUploadError(problemMessage(serverUploadProblem(state.message)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
@@ -1399,12 +1400,9 @@ function UploadAssetTile({
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           e.target.value = "";
-          setUploadError(null);
           if (files.length > 0) {
             void uploadFilesAndSummarize(projectId, action, files, "media").then((summary) => {
-              if (!summary) return;
-              setUploadError(summary);
-              showError(summary);
+              if (summary) showUploadError(summary);
             });
           }
         }}
@@ -1418,9 +1416,6 @@ function UploadAssetTile({
       >
         {pending ? "…" : "+"}
       </button>
-      {(uploadError || state?.message) && (
-        <p className="text-xs text-error">{uploadError || problemMessage(serverUploadProblem(state?.message))}</p>
-      )}
     </form>
   );
 }

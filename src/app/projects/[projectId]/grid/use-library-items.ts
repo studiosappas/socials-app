@@ -56,7 +56,7 @@ export function useLibraryItems(
   demoMode: boolean,
 ) {
   const router = useRouter();
-  const { showError } = useToast();
+  const { showError, showUploadError } = useToast();
 
   const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
   function advanceUploadBatch() {
@@ -220,7 +220,7 @@ export function useLibraryItems(
       // inline.
       const report = () => {
         const summary = failureSummary(failures, "media");
-        if (summary) showError(summary);
+        if (summary) showUploadError(summary);
       };
       if (files.length === 0) {
         report();

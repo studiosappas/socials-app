@@ -724,13 +724,14 @@ function UploadAssetsZone({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragDepth = useRef(0);
-  // Surfaces every file rejected before the Server Action ever runs (wrong
-  // type, too large, unplayable video, upload failure), named in one message.
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const { showError } = useToast();
+  // Every upload failure -- each file rejected before the Server Action
+  // runs (named in one summary) and the save step's own failure -- is ONE
+  // dismissible upload-error toast; no inline copy.
+  const { showUploadError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
+    else if (state?.message) showUploadError(problemMessage(serverUploadProblem(state.message)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
@@ -739,12 +740,9 @@ function UploadAssetsZone({
   // them while the rest upload.
   function handleFiles(fileList: FileList | File[]) {
     const files = Array.from(fileList);
-    setUploadError(null);
     if (files.length > 0) {
       void uploadFilesAndSummarize(projectId, action, files, "content").then((summary) => {
-        if (!summary) return;
-        setUploadError(summary);
-        showError(summary);
+        if (summary) showUploadError(summary);
       });
     }
   }
@@ -811,9 +809,6 @@ function UploadAssetsZone({
         </span>
       </button>
       {children}
-      {(uploadError || state?.message) && (
-        <p className="col-span-full text-xs text-error">{uploadError || problemMessage(serverUploadProblem(state?.message))}</p>
-      )}
     </div>
   );
 }

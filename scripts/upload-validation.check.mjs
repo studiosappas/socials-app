@@ -19,6 +19,9 @@
 //  E. Brief: a recognised video container the browser can't play is kept as
 //     a reference attachment (preview unavailable + Download); a non-video
 //     named like one is rejected; Grid / Post Editor / Content stay strict.
+//  F. Upload-error toasts: role=alert, an accessible X (mouse, keyboard,
+//     touch), up ~15 s, readable at phone width, above the Post Editor modal
+//     with no inline copy; ordinary toasts keep role=status, no X, old timing.
 //
 // NOTHING leaves the machine: every request to a Supabase host is answered
 // by this script (storage uploads are recorded, never forwarded), and any
@@ -443,7 +446,7 @@ async function partD(engine, browser) {
   // Exactly where the toast is drawn, the topmost element must be the toast
   // itself (not the dialog's overlay or panel).
   async function toastState(page, text) {
-    const toast = page.getByRole("status").filter({ hasText: text });
+    const toast = page.locator(TOAST_SELECTOR).filter({ hasText: text });
     await toast.first().waitFor({ timeout: 60000 });
     // let its entrance animation (animate-settle-in) finish before sampling
     await page.waitForTimeout(700);
@@ -452,7 +455,7 @@ async function partD(engine, browser) {
     // measurement only, the toast briefly takes pointer events, then gets
     // its own styles back. What's measured is paint order, not clickability.
     const state = await page.evaluate((t) => {
-      const el = [...document.querySelectorAll('[role="status"]')].find((n) => n.textContent === t);
+      const el = [...document.querySelectorAll('[role="status"], [role="alert"]')].find((n) => n.textContent === t);
       if (!el) return { found: false };
       const r = el.getBoundingClientRect();
       const chain = [el, el.parentElement].filter(Boolean);
@@ -658,6 +661,207 @@ async function partE(engine, browser) {
   }
 }
 
+// --- F. Upload-error toasts: 15 s, dismissible, alert; others unchanged -----
+// Upload errors are role="alert" with an X; every other toast keeps
+// role="status", no X and its old timing.
+const TOAST_SELECTOR = '[role="status"], [role="alert"]';
+const LONG_SUMMARY =
+  "4 files weren't uploaded: holiday-video-from-the-beach.avi (unsupported video format), notes.zip (unsupported file type), " +
+  "huge-photo-from-the-camera.png (too large, max 50 MB), another-clip.avi (unsupported video format). " +
+  "Please convert videos to MP4 (H.264). Only images and videos can be uploaded here.";
+
+const TOASTS_PAGE = `"use client";
+// TEMPORARY -- created and deleted by scripts/upload-validation.check.mjs. Never commit.
+import { useToast } from "@/lib/hooks/use-toast";
+export default function Page() {
+  const t = useToast();
+  return (
+    <div>
+      <button data-t="upload" onClick={() => t.showUploadError(${JSON.stringify(LONG_SUMMARY)})}>upload</button>
+      <button data-t="error" onClick={() => t.showError("Couldn't save that move. Please try again.")}>error</button>
+      <button data-t="success" onClick={() => t.showSuccess("Style pasted.")}>success</button>
+    </div>
+  );
+}
+`;
+
+const POST_EDITOR_PAGE = `"use client";
+// TEMPORARY -- created and deleted by scripts/upload-validation.check.mjs. Never commit.
+import { Modal } from "@/app/projects/[projectId]/modal";
+import { PostEditor, type PostAssetItem } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
+const assets: PostAssetItem[] = [
+  { postAssetId: "pa-1", mediaAssetId: "m-1", url: "https://media.test/img-1.png", originalUrl: "https://media.test/img-1.png", annotationJson: null, mediaType: "image", posterUrl: null },
+];
+export default function Page() {
+  return (
+    <Modal onClose={() => {}}>
+      <PostEditor projectId="00000000-0000-0000-0000-000000000000"
+        post={{ id: "00000000-0000-0000-0000-000000000001", post_type: "post", caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: null }}
+        assets={assets} links={[]} mediaLibraryPromise={Promise.resolve([])} canManage role="owner"
+        currentUserId="00000000-0000-0000-0000-000000000002" members={[]} dateFormat="DD/MM/YYYY" hideBackLink />
+    </Modal>
+  );
+}
+`;
+
+async function partF(engine, browser) {
+  console.log(`\n### F. Upload-error toasts -- 15 s, dismissible, alert semantics; other toasts unchanged -- ${engine}`);
+  const dismiss = (page) => page.getByRole("button", { name: "Dismiss notification" });
+  const shown = (page, text) => page.locator(TOAST_SELECTOR).filter({ hasText: text });
+  async function blockActions(page, actions) {
+    await page.route(`http://localhost:${PORT}/**`, (r) =>
+      r.request().method() === "POST" && r.request().headers()["next-action"] ? (actions.push(r.request().url()), r.abort()) : r.fallback(),
+    );
+  }
+  {
+    const { ctx, page, escaped } = await newIsolatedPage(browser);
+    await page.goto(`${BASE}/toasts`, { waitUntil: "load" });
+    await page.locator("[data-t=upload]").waitFor({ timeout: 120000 });
+    await page.waitForTimeout(500);
+
+    await check(`${engine}: upload-error toast is an alert with an accessible X, still up at 14 s, gone by ~15 s`, async () => {
+      await page.locator("[data-t=upload]").click();
+      const toast = shown(page, "4 files weren't uploaded");
+      await toast.waitFor({ timeout: 10000 });
+      assert.equal(await toast.getAttribute("role"), "alert");
+      assert.equal(await dismiss(page).count(), 1);
+      assert.equal(await dismiss(page).getAttribute("type"), "button");
+      await page.waitForTimeout(14000);
+      assert.equal(await toast.count(), 1, "still visible at ~14 s");
+      await page.waitForTimeout(1600);
+      assert.equal(await toast.count(), 0, "gone after ~15 s");
+    });
+    await check(`${engine}: ordinary error and success toasts are unchanged -- status role, no X, old timing`, async () => {
+      await page.locator("[data-t=error]").click();
+      const err = shown(page, "Couldn't save that move.");
+      await err.waitFor({ timeout: 5000 });
+      assert.equal(await err.getAttribute("role"), "status");
+      assert.equal(await dismiss(page).count(), 0);
+      await page.waitForTimeout(2600);
+      assert.equal(await err.count(), 1, "error still up at ~2.6 s");
+      await page.waitForTimeout(800);
+      assert.equal(await err.count(), 0, "error gone by ~3.4 s (3 s, as before)");
+      await page.locator("[data-t=success]").click();
+      const ok = shown(page, "Style pasted.");
+      await ok.waitFor({ timeout: 5000 });
+      assert.equal(await ok.getAttribute("role"), "status");
+      assert.equal(await dismiss(page).count(), 0);
+      await page.waitForTimeout(2900);
+      assert.equal(await ok.count(), 0, "success gone by ~2.9 s (2.5 s, as before)");
+    });
+    await check(`${engine}: the X dismisses the upload-error toast immediately (mouse)`, async () => {
+      await page.locator("[data-t=upload]").click();
+      await shown(page, "4 files weren't uploaded").waitFor({ timeout: 5000 });
+      await dismiss(page).click();
+      assert.equal(await shown(page, "4 files weren't uploaded").count(), 0);
+    });
+    await check(`${engine}: keyboard -- Tab reaches the X and Enter dismisses it`, async () => {
+      await page.locator("[data-t=upload]").click();
+      await shown(page, "4 files weren't uploaded").waitFor({ timeout: 5000 });
+      await page.locator("body").click({ position: { x: 5, y: 5 } });
+      let reached = false;
+      for (let i = 0; i < 20 && !reached; i++) {
+        await page.keyboard.press("Tab");
+        reached = await page.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Dismiss notification");
+      }
+      assert.ok(reached, "X never received keyboard focus");
+      await page.keyboard.press("Enter");
+      assert.equal(await shown(page, "4 files weren't uploaded").count(), 0);
+    });
+    await check(`${engine}: latest toast wins, and an upload batch's summary is never split`, async () => {
+      await page.locator("[data-t=upload]").click();
+      const up = shown(page, "4 files weren't uploaded");
+      await up.waitFor({ timeout: 5000 });
+      assert.equal(await up.innerText(), LONG_SUMMARY, "the whole batch summary in one toast");
+      await page.locator("[data-t=success]").click();
+      await shown(page, "Style pasted.").waitFor({ timeout: 5000 });
+      assert.equal(await up.count(), 0, "replaced by the newer toast");
+      // Counted in the page's own DOM: Playwright locators also see into
+      // shadow roots, where Next's route announcer carries role="alert".
+      assert.equal(await page.evaluate(() => document.querySelectorAll(".animate-settle-in[role]").length), 1, "exactly one toast");
+    });
+    await check(`${engine}: toast pages left the machine untouched`, async () => assert.deepEqual(escaped, []));
+    await ctx.close();
+  }
+  {
+    // phone-sized, touch
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: engine !== "webkit" ? true : undefined });
+    const page = await ctx.newPage();
+    await page.route("**/*", (r) => {
+      const u = new URL(r.request().url());
+      return u.protocol === "blob:" || u.protocol === "data:" || u.hostname === "localhost" ? r.fallback() : r.abort();
+    });
+    await page.goto(`${BASE}/toasts`, { waitUntil: "load" });
+    await page.locator("[data-t=upload]").waitFor({ timeout: 120000 });
+    await page.waitForTimeout(500);
+    await check(`${engine}: phone width -- the long summary wraps inside the screen, the X never covers the text, a tap dismisses`, async () => {
+      await page.locator("[data-t=upload]").tap();
+      const toast = shown(page, "4 files weren't uploaded");
+      await toast.waitFor({ timeout: 5000 });
+      await page.waitForTimeout(600);
+      const m = await page.evaluate(() => {
+        const el = document.querySelector('[role="alert"]');
+        const text = el.querySelector("span").getBoundingClientRect();
+        const x = el.querySelector("button").getBoundingClientRect();
+        const box = el.getBoundingClientRect();
+        const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
+        return {
+          inside: box.left >= 0 && box.right <= window.innerWidth && box.bottom <= window.innerHeight,
+          wraps: text.height > lineHeight * 1.5,
+          overlap: !(x.left >= text.right || x.right <= text.left || x.top >= text.bottom || x.bottom <= text.top),
+          xSize: Math.round(Math.min(x.width, x.height)),
+        };
+      });
+      assert.deepEqual({ inside: m.inside, wraps: m.wraps, overlap: m.overlap }, { inside: true, wraps: true, overlap: false }, JSON.stringify(m));
+      assert.ok(m.xSize >= 32, `X tap target ${m.xSize}px`);
+      await dismiss(page).tap();
+      assert.equal(await toast.count(), 0);
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, escaped, storageUploads } = await newIsolatedPage(browser);
+    const actions = [];
+    await blockActions(page, actions);
+    await page.route("https://media.test/**", (r) => r.fulfill({ body: Buffer.from("<svg xmlns='http://www.w3.org/2000/svg' width='30' height='40'/>"), contentType: "image/svg+xml" }));
+    await check(`${engine}: Post Editor (in its modal) -- an upload failure is ONE alert toast, painted above the modal, no inline copy`, async () => {
+      await page.goto(`${BASE}/post-editor`, { waitUntil: "load" });
+      const add = page.locator('button[title="Add media"]');
+      await add.waitFor({ timeout: 120000 });
+      await page.waitForTimeout(800);
+      const input = add.locator("xpath=..").locator('input[type="file"]');
+      // The editor's own mount-time request (its comments thread) is already
+      // blocked above; only what the UPLOAD triggers is measured from here.
+      actions.length = 0;
+      await input.setInputFiles([path.join(OVERSIZE_DIR, "notes.zip")]);
+      const text = `"notes.zip" wasn't uploaded. Unsupported file type — Only images and videos can be uploaded here.`;
+      const toast = shown(page, text);
+      await toast.waitFor({ timeout: 30000 });
+      await page.waitForTimeout(700);
+      assert.equal(await toast.getAttribute("role"), "alert");
+      const s = await page.evaluate((t) => {
+        const el = document.querySelector('[role="alert"]');
+        const r = el.getBoundingClientRect();
+        const chain = [el, el.parentElement];
+        const saved = chain.map((n) => n.style.pointerEvents);
+        chain.forEach((n) => (n.style.pointerEvents = "auto"));
+        const top = document.elementFromPoint(r.left + 20, r.top + r.height / 2);
+        chain.forEach((n, i) => (n.style.pointerEvents = saved[i]));
+        return {
+          onTop: Boolean(top && el.contains(top)),
+          inlineCopies: [...document.querySelectorAll(".text-error")].filter((n) => n.textContent?.includes("notes.zip")).length,
+          copies: [...document.querySelectorAll("body *")].filter((n) => n.children.length === 0 && n.textContent === t).length,
+        };
+      }, text);
+      assert.deepEqual(s, { onTop: true, inlineCopies: 0, copies: 1 });
+      assert.equal(storageUploads.length, 0);
+      assert.deepEqual(actions, []);
+      assert.deepEqual(escaped, []);
+    });
+    await ctx.close();
+  }
+}
+
 const OVERSIZE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "upload-validation-check-"));
 
 if (fs.existsSync(HARNESS_DIR)) {
@@ -674,6 +878,8 @@ try {
     ["dialog", "page.tsx", DIALOG_PAGE],
     ["brief", "page.tsx", BRIEF_PAGE],
     ["brief-lightbox", "page.tsx", BRIEF_LIGHTBOX_PAGE],
+    ["toasts", "page.tsx", TOASTS_PAGE],
+    ["post-editor", "page.tsx", POST_EDITOR_PAGE],
   ]) {
     fs.mkdirSync(path.join(HARNESS_DIR, dir), { recursive: true });
     fs.writeFileSync(path.join(HARNESS_DIR, dir, file), source);
@@ -690,6 +896,7 @@ try {
     await partC(engine, browser);
     await partD(engine, browser);
     await partE(engine, browser);
+    await partF(engine, browser);
   }
 } finally {
   for (const b of browsers) await b.close().catch(() => {});

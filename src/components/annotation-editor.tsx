@@ -290,7 +290,7 @@ export function AnnotationEditor({
   const [tool, setTool] = useState<Tool>("select");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>();
-  const { showError } = useToast();
+  const { showUploadError } = useToast();
   const [ready, setReady] = useState(false);
   const [brushColor, setBrushColor] = useState(INK);
   const [brushWidth, setBrushWidth] = useState(BRUSH_WIDTHS[1].value);
@@ -1756,7 +1756,7 @@ export function AnnotationEditor({
       }).catch(() => {
         // Read fine but the browser can't decode it (e.g. HEIC or TIFF in
         // most browsers).
-        showError(problemMessage(UNSUPPORTED_IMAGE));
+        showUploadError(problemMessage(UNSUPPORTED_IMAGE));
       });
     });
   }
@@ -1775,10 +1775,10 @@ export function AnnotationEditor({
     // Every failure below used to do nothing at all.
     const problem = checkFile(file, "logo");
     if (problem) {
-      showError(problemMessage(problem));
+      showUploadError(problemMessage(problem));
       return;
     }
-    const unreadable = () => showError(problemMessage(UNREADABLE_FILE));
+    const unreadable = () => showUploadError(problemMessage(UNREADABLE_FILE));
 
     // SVG needs its own path: it has to be read as text (not base64) so its
     // markup can be inspected/patched -- see ensureSvgHasExplicitDimensions

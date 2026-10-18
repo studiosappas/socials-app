@@ -23,7 +23,7 @@ export function CreateProjectButton({
   currentUser: { name: string; email: string; avatarUrl: string | null };
 }) {
   const router = useRouter();
-  const { showError } = useToast();
+  const { showError, showUploadError } = useToast();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -101,7 +101,7 @@ export function CreateProjectButton({
           avatarFormData.set("avatar", imageFile);
           const avatarResult = await setProjectAvatar(result.projectId, undefined, avatarFormData);
           if (avatarResult?.message) {
-            showError(`Project created, but the image couldn't be saved: ${avatarResult.message}`);
+            showUploadError(`Project created, but the image couldn't be saved: ${avatarResult.message}`);
           }
         }
 
