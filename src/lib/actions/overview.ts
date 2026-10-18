@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { problemMessage, SIGNED_OUT, uploadServerProblem } from "@/lib/upload-validation";
 import { analyzeDocument, generateText, isAiConfigured } from "@/lib/ai/client";
 import {
   AI_REFRESH_UNAVAILABLE_MESSAGE,
@@ -241,7 +242,7 @@ export async function uploadBrandDocument(
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return { message: "Not signed in." };
+  if (!user) return { message: problemMessage(SIGNED_OUT) };
 
   // The file itself already went direct browser-to-Storage before this
   // action ever runs (see the client's upload handler) -- this only ever
@@ -262,7 +263,11 @@ export async function uploadBrandDocument(
     })
     .select("id")
     .single();
-  if (error) return { message: error.message };
+  if (error) {
+    // A raw database error is logged, never shown.
+    console.error("[overview] brand document save failed", error.message);
+    return { message: problemMessage(uploadServerProblem()) };
+  }
 
   // Not revalidating this action's own route -- its one caller
   // (BrandKnowledgeDialog) always follows a successful upload with

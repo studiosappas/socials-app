@@ -10,8 +10,7 @@ import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { RecoverableImg } from "@/components/recoverable-img";
-import { useToast } from "@/lib/hooks/use-toast";
-import { isFileDrag, partitionDroppedFiles, rejectedFilesMessage } from "@/lib/media-drop";
+import { isFileDrag } from "@/lib/media-drop";
 
 export function MediaThumbPreview({
   item,
@@ -179,16 +178,14 @@ export function MediaLibrary({
   // trigger the drop state or an upload. Depth-counted (same pattern as
   // stories-board.tsx) because dragenter/dragleave fire for every child
   // element crossed.
-  const { showError } = useToast();
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const dragDepthRef = useRef(0);
   const dropEnabled = !demoMode;
 
+  // Unsupported files in a drop are rejected (and named) by uploadFiles'
+  // own validation, exactly like a picker selection.
   function handleDroppedFiles(fileList: FileList) {
-    const { accepted, rejected } = partitionDroppedFiles(Array.from(fileList));
-    const rejectedMessage = rejectedFilesMessage(rejected);
-    if (rejectedMessage) showError(rejectedMessage);
-    startUpload(accepted);
+    startUpload(Array.from(fileList));
   }
 
   // While the Library is mounted, a file dropped anywhere OUTSIDE it is

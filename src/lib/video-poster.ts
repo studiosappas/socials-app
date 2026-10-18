@@ -2,17 +2,52 @@
 
 import { startTransition } from "react";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
 import { generateImageThumbnailBlob } from "@/lib/image-thumbnail";
 import { generatePdfCoverBlob } from "@/lib/pdf-cover";
+import {
+  checkFile,
+  failureSummary,
+  problemMessage,
+  storageErrorProblem,
+  UNSUPPORTED_VIDEO,
+  type UploadContext,
+  type UploadFailure,
+  type UploadProblem,
+} from "@/lib/upload-validation";
+
+// What the browser made of a video:
+//   "decoded"      -- a frame was captured (the poster).
+//   "unsupported"  -- the browser DEFINITELY can't play it: it reported a
+//                     decode / unsupported-source error, or it loaded the
+//                     file but found no picture in it. Uploading it would
+//                     only store a video nobody can see, so uploads stop here.
+//   "undetermined" -- no verdict: a timeout, a seek that never settled, a
+//                     canvas that couldn't be read. NEVER a reason to reject
+//                     -- some valid phone videos behave like this.
+export type VideoDecodeResult = { status: "decoded"; poster: Blob } | { status: "unsupported" } | { status: "undetermined" };
+
+// The upload-time check: decodes the LOCAL file (an object URL, so a source
+// error here can only mean the format, never the network) before anything
+// reaches storage, and keeps the captured frame as the poster.
+export function probeVideoFile(file: File, options?: { timeoutMs?: number }): Promise<VideoDecodeResult> {
+  const objectUrl = URL.createObjectURL(file);
+  return decodeVideoSrc(objectUrl, () => URL.revokeObjectURL(objectUrl), options);
+}
+
+// The same check for an already-stored video (Regenerate Poster, Edit
+// Cover). From a URL, "unsupported" can also mean the file couldn't be
+// loaded, so messages built on it must not claim the format for certain.
+export function probeVideoUrl(url: string, seekTime?: number): Promise<VideoDecodeResult> {
+  return decodeVideoSrc(url, () => {}, { seekTime });
+}
 
 // Grabs a still frame from a video file for use as a Grid-safe poster image,
 // entirely client-side (an offscreen <video> + <canvas>, never uploaded or
 // rendered) -- Grid never mounts a <video> element for its cover, so a video
 // post/carousel-item needs a static image to show there instead.
-export function generateVideoPosterBlob(file: File): Promise<Blob | null> {
-  const objectUrl = URL.createObjectURL(file);
-  return generatePosterFromVideoSrc(objectUrl, () => URL.revokeObjectURL(objectUrl));
+export async function generateVideoPosterBlob(file: File): Promise<Blob | null> {
+  const result = await probeVideoFile(file);
+  return result.status === "decoded" ? result.poster : null;
 }
 
 // Same capture logic, but from an already-hosted video URL (a signed
@@ -20,8 +55,9 @@ export function generateVideoPosterBlob(file: File): Promise<Blob | null> {
 // poster for a video that was uploaded before poster capture existed, or
 // whose original capture attempt failed for some reason. No object URL to
 // revoke since nothing was created locally.
-export function generatePosterFromVideoUrl(url: string): Promise<Blob | null> {
-  return generatePosterFromVideoSrc(url, () => {});
+export async function generatePosterFromVideoUrl(url: string): Promise<Blob | null> {
+  const result = await probeVideoUrl(url);
+  return result.status === "decoded" ? result.poster : null;
 }
 
 // Same capture pipeline again, but at a caller-chosen timestamp instead of
@@ -29,23 +65,38 @@ export function generatePosterFromVideoUrl(url: string): Promise<Blob | null> {
 // an <img>/fabric.FabricImage.fromURL source) instead of a Blob -- what the
 // annotation editor's video-timeline frame picker uses to turn "whatever
 // moment the user scrubbed to" into a real captured frame.
-export function captureVideoFrameAsDataUrl(url: string, seekTime: number): Promise<string | null> {
-  return generatePosterFromVideoSrc(url, () => {}, seekTime).then(
-    (blob) =>
-      new Promise<string | null>((resolve) => {
-        if (!blob) {
-          resolve(null);
+// Says WHY there's no frame, so the editor can explain it instead of waiting
+// forever: "unsupported" (the browser can't play this video) vs
+// "undetermined" (it didn't load in time).
+export type CapturedVideoFrame = { status: "decoded"; dataUrl: string } | { status: "unsupported" } | { status: "undetermined" };
+
+export function captureVideoFrameAsDataUrl(url: string, seekTime: number): Promise<CapturedVideoFrame> {
+  return probeVideoUrl(url, seekTime).then(
+    (result) =>
+      new Promise<CapturedVideoFrame>((resolve) => {
+        if (result.status !== "decoded") {
+          resolve(result);
           return;
         }
         const reader = new FileReader();
-        reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(blob);
+        reader.onloadend = () =>
+          resolve(typeof reader.result === "string" ? { status: "decoded", dataUrl: reader.result } : { status: "undetermined" });
+        reader.onerror = () => resolve({ status: "undetermined" });
+        reader.readAsDataURL(result.poster);
       }),
   );
 }
 
-function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTime?: number): Promise<Blob | null> {
+// MediaError codes that are a verdict on the file itself, not on loading it.
+const MEDIA_ERR_DECODE = 3;
+const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+
+function decodeVideoSrc(
+  src: string,
+  cleanupSrc: () => void,
+  options: { seekTime?: number; timeoutMs?: number } = {},
+): Promise<VideoDecodeResult> {
+  const { seekTime, timeoutMs = 8000 } = options;
   return new Promise((resolve) => {
     const video = document.createElement("video");
     video.muted = true;
@@ -61,12 +112,15 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTim
       video.load();
       cleanupSrc();
     }
-    function finish(blob: Blob | null) {
+    function settle(result: VideoDecodeResult) {
       if (settled) return;
       settled = true;
       clearTimeout(hardTimeout);
       cleanup();
-      resolve(blob);
+      resolve(result);
+    }
+    function finish(blob: Blob | null) {
+      settle(blob ? { status: "decoded", poster: blob } : { status: "undetermined" });
     }
     // Guarded separately from `settled` -- "seeked" and the grace timer
     // below can both fire in quick succession (e.g. a fast seek right
@@ -75,6 +129,12 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTim
     function capture() {
       if (captureStarted || settled) return;
       captureStarted = true;
+      // Metadata loaded but no picture at all: the browser read the
+      // container and can't decode its video (or there is none).
+      if (video.videoWidth === 0 && video.videoHeight === 0) {
+        settle({ status: "unsupported" });
+        return;
+      }
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth || 640;
       canvas.height = video.videoHeight || 640;
@@ -96,9 +156,14 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTim
     // Absolute fail-closed ceiling for files whose metadata never loads at
     // all (the "error" listener below never fires for these either) --
     // hangs the upload/regenerate no longer than this rather than forever.
-    const hardTimeout = setTimeout(() => finish(null), 8000);
+    // A timeout is "undetermined", never "unsupported".
+    const hardTimeout = setTimeout(() => finish(null), timeoutMs);
 
-    video.addEventListener("error", () => finish(null));
+    video.addEventListener("error", () => {
+      const code = video.error?.code;
+      if (code === MEDIA_ERR_DECODE || code === MEDIA_ERR_SRC_NOT_SUPPORTED) settle({ status: "unsupported" });
+      else finish(null);
+    });
 
     video.addEventListener("loadedmetadata", () => {
       // A hair past 0 -- frame 0 of many encodes is a solid black/blank
@@ -139,24 +204,37 @@ function generatePosterFromVideoSrc(src: string, cleanupSrc: () => void, seekTim
 // instead of the raw file -- see the four target actions' own updated
 // signatures. The poster stays in FormData as before (a small,
 // client-generated JPEG, never a large raw upload).
+//
+// Every file is checked against the caller's upload context first, and a
+// video is decoded BEFORE upload: one the browser definitely can't play
+// never reaches storage (see probeVideoFile). Each rejected file is reported
+// through onError with its name and reason, and the rest still upload.
 export async function uploadFilesWithPosters(
   projectId: string,
   action: (formData: FormData) => void,
   files: File[],
-  onError?: (fileName: string, message: string) => void,
+  onError?: (failure: UploadFailure) => void,
+  context: UploadContext = "media",
 ): Promise<void> {
   for (const file of files) {
-    const sizeCheck = validateUploadSize(file);
-    if (!sizeCheck.ok) {
-      onError?.(file.name, sizeCheck.message);
+    const reject = (problem: UploadProblem) => onError?.({ fileName: file.name, problem });
+    const problem = checkFile(file, context);
+    if (problem) {
+      reject(problem);
       continue;
     }
 
     const mediaType = file.type.startsWith("video/") ? "video" : file.type === "application/pdf" ? "pdf" : "image";
+    const decoded = mediaType === "video" ? await probeVideoFile(file) : null;
+    if (decoded?.status === "unsupported") {
+      reject(UNSUPPORTED_VIDEO);
+      continue;
+    }
+
     const storagePath = newStoragePath(projectId, file.name);
     const uploaded = await uploadFileDirect("project-media", storagePath, file);
     if ("error" in uploaded) {
-      onError?.(file.name, uploaded.error);
+      reject(uploaded.problem);
       continue;
     }
 
@@ -165,7 +243,7 @@ export async function uploadFilesWithPosters(
     formData.set("mediaType", mediaType);
     formData.set("fileName", file.name);
     if (mediaType === "video") {
-      const poster = await generateVideoPosterBlob(file);
+      const poster = decoded?.status === "decoded" ? decoded.poster : null;
       if (poster) {
         formData.set("poster", new File([poster], "poster.jpg", { type: "image/jpeg" }));
       }
@@ -207,6 +285,20 @@ export async function uploadFilesWithPosters(
   }
 }
 
+// uploadFilesWithPosters for a whole selection, resolving to ONE message that
+// names every rejected file (null when all of them went through) -- what
+// Post Editor and Content show once the batch is done.
+export async function uploadFilesAndSummarize(
+  projectId: string,
+  action: (formData: FormData) => void,
+  files: File[],
+  context: UploadContext = "media",
+): Promise<string | null> {
+  const failures: UploadFailure[] = [];
+  await uploadFilesWithPosters(projectId, action, files, (failure) => failures.push(failure), context);
+  return failureSummary(failures, context);
+}
+
 // Grid-only counterpart to uploadFilesWithPosters above -- NOT a drop-in
 // replacement, and Post Editor/Content keep using the original unchanged.
 //
@@ -234,7 +326,7 @@ export async function uploadFilesWithPosters(
 // the concurrency measurements behind the default.
 export type ConcurrentUploadOutcome<TResult> =
   | { status: "success"; tempId: string; fileName: string; result: TResult }
-  | { status: "error"; tempId: string; fileName: string; message: string };
+  | { status: "error"; tempId: string; fileName: string; message: string; problem: UploadProblem };
 
 export async function uploadFilesConcurrently<TResult>(
   projectId: string,
@@ -242,6 +334,7 @@ export async function uploadFilesConcurrently<TResult>(
   dispatch: (formData: FormData) => Promise<TResult>,
   onResult: (outcome: ConcurrentUploadOutcome<TResult>) => void,
   concurrency = 3,
+  context: UploadContext = "media",
 ): Promise<void> {
   let nextIndex = 0;
 
@@ -264,20 +357,25 @@ export async function uploadFilesConcurrently<TResult>(
   // (lib/upload-insert-order.ts) depends on this: an outcome is what
   // releases a file's insert turn.
   async function uploadOne(file: File, tempId: string): Promise<ConcurrentUploadOutcome<TResult>> {
-    const fail = (message: string): ConcurrentUploadOutcome<TResult> => ({
+    const fail = (problem: UploadProblem): ConcurrentUploadOutcome<TResult> => ({
       status: "error",
       tempId,
       fileName: file.name,
-      message,
+      message: problemMessage(problem),
+      problem,
     });
     try {
-      const sizeCheck = validateUploadSize(file);
-      if (!sizeCheck.ok) return fail(sizeCheck.message);
+      const problem = checkFile(file, context);
+      if (problem) return fail(problem);
 
       const mediaType = file.type.startsWith("video/") ? "video" : file.type === "application/pdf" ? "pdf" : "image";
+      // Decoded BEFORE upload -- see uploadFilesWithPosters.
+      const decoded = mediaType === "video" ? await probeVideoFile(file) : null;
+      if (decoded?.status === "unsupported") return fail(UNSUPPORTED_VIDEO);
+
       const storagePath = newStoragePath(projectId, file.name);
       const uploaded = await uploadFileDirect("project-media", storagePath, file);
-      if ("error" in uploaded) return fail(uploaded.error);
+      if ("error" in uploaded) return fail(uploaded.problem);
 
       const formData = new FormData();
       formData.set("storagePath", uploaded.path);
@@ -285,7 +383,7 @@ export async function uploadFilesConcurrently<TResult>(
       formData.set("fileName", file.name);
       formData.set("clientTempId", tempId);
       if (mediaType === "video") {
-        const poster = await generateVideoPosterBlob(file);
+        const poster = decoded?.status === "decoded" ? decoded.poster : null;
         if (poster) formData.set("poster", new File([poster], "poster.jpg", { type: "image/jpeg" }));
       } else if (mediaType === "pdf") {
         const cover = await generatePdfCoverBlob(file);
@@ -306,7 +404,9 @@ export async function uploadFilesConcurrently<TResult>(
       const result = await dispatch(formData);
       return { status: "success", tempId, fileName: file.name, result };
     } catch (error) {
-      return fail(error instanceof Error ? error.message : "Upload failed.");
+      // e.g. the save action's request failing -- a network or server
+      // problem, never reported as a bad file.
+      return fail(storageErrorProblem({ message: error instanceof Error ? error.message : "" }));
     }
   }
 

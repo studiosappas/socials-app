@@ -27,7 +27,8 @@ import {
   uploadStoryFrame,
 } from "@/lib/actions/stories";
 import { SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { uploadFilesAndSummarize } from "@/lib/video-poster";
+import { problemMessage, serverUploadProblem } from "@/lib/upload-validation";
 import { downloadAssetsAsZip, filenameFromUrl, shareOriginalAssets } from "@/lib/download-zip";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
@@ -446,9 +447,10 @@ function UploadFrameTile({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs (uploadFilesWithPosters rejects it client-side).
+  // Surfaces every file rejected before the Server Action ever runs (wrong
+  // type, too large, unplayable video, upload failure), named in one message.
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const { showError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
@@ -469,7 +471,11 @@ function UploadFrameTile({
           e.target.value = "";
           setUploadError(null);
           if (files.length > 0) {
-            uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+            void uploadFilesAndSummarize(projectId, action, files, "media").then((summary) => {
+              if (!summary) return;
+              setUploadError(summary);
+              showError(summary);
+            });
           }
         }}
       />
@@ -483,7 +489,7 @@ function UploadFrameTile({
         {pending ? "…" : "+"}
       </button>
       {(uploadError || state?.message) && (
-        <p className="text-xs text-error">{uploadError || state?.message}</p>
+        <p className="text-xs text-error">{uploadError || problemMessage(serverUploadProblem(state?.message))}</p>
       )}
     </form>
   );

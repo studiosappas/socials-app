@@ -4,6 +4,15 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
+import {
+  checkFile,
+  problemMessage,
+  STORED_VIDEO_NOT_LOADED,
+  STORED_VIDEO_UNPLAYABLE,
+  UNREADABLE_FILE,
+  UNSUPPORTED_IMAGE,
+} from "@/lib/upload-validation";
+import { useToast } from "@/lib/hooks/use-toast";
 import { useCustomFonts } from "@/lib/use-custom-fonts";
 import { useRecentColors, commitRecentColor } from "@/lib/hooks/use-recent-colors";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
@@ -281,6 +290,7 @@ export function AnnotationEditor({
   const [tool, setTool] = useState<Tool>("select");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>();
+  const { showError } = useToast();
   const [ready, setReady] = useState(false);
   const [brushColor, setBrushColor] = useState(INK);
   const [brushWidth, setBrushWidth] = useState(BRUSH_WIDTHS[1].value);
@@ -464,6 +474,9 @@ export function AnnotationEditor({
   // state that was also the actual trigger for an intermittent Fabric/
   // React DOM crash on a second pick, not just a cosmetic mismatch.
   const [isRestoringSaved, setIsRestoringSaved] = useState(false);
+  // Set when reopening a saved video cover can't capture a frame (see the
+  // reopen-capture effect below) -- shown instead of an endless "Loading…".
+  const [videoLoadError, setVideoLoadError] = useState<string | undefined>();
   const loadUrl = isVideo ? pickedFrameUrl : imageUrl;
   const shouldRestoreAnnotation = isVideo ? isRestoringSaved : Boolean(initialAnnotationJson);
 
@@ -514,6 +527,7 @@ export function AnnotationEditor({
     setPickedFrameUrl(null);
     setForcePicker(isVideo && !initialAnnotationJson);
     setIsRestoringSaved(false);
+    setVideoLoadError(undefined);
     setCanvasNonce((n) => n + 1);
   } else if (!open && session.active) {
     // Bookkeeping only (no picker/canvas resets) -- marks the session as
@@ -536,11 +550,15 @@ export function AnnotationEditor({
     if (!open || !isVideo || !imageUrl || !initialAnnotationJson) return;
     if (pickedFrameUrl || forcePicker) return;
     let cancelled = false;
-    captureVideoFrameAsDataUrl(imageUrl, 0.1).then((dataUrl) => {
-      if (!cancelled && dataUrl) {
+    captureVideoFrameAsDataUrl(imageUrl, 0.1).then((frame) => {
+      if (cancelled) return;
+      if (frame.status === "decoded") {
         setIsRestoringSaved(true);
-        setPickedFrameUrl(dataUrl);
+        setPickedFrameUrl(frame.dataUrl);
+        return;
       }
+      // Used to leave "Loading…" up forever. Now it says why.
+      setVideoLoadError(problemMessage(frame.status === "unsupported" ? STORED_VIDEO_UNPLAYABLE : STORED_VIDEO_NOT_LOADED));
     });
     return () => {
       cancelled = true;
@@ -1735,6 +1753,10 @@ export function AnnotationEditor({
         canvas.setActiveObject(img);
         canvas.requestRenderAll();
         setTool("select");
+      }).catch(() => {
+        // Read fine but the browser can't decode it (e.g. HEIC or TIFF in
+        // most browsers).
+        showError(problemMessage(UNSUPPORTED_IMAGE));
       });
     });
   }
@@ -1750,6 +1772,13 @@ export function AnnotationEditor({
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+    // Every failure below used to do nothing at all.
+    const problem = checkFile(file, "logo");
+    if (problem) {
+      showError(problemMessage(problem));
+      return;
+    }
+    const unreadable = () => showError(problemMessage(UNREADABLE_FILE));
 
     // SVG needs its own path: it has to be read as text (not base64) so its
     // markup can be inspected/patched -- see ensureSvgHasExplicitDimensions
@@ -1758,10 +1787,11 @@ export function AnnotationEditor({
       const reader = new FileReader();
       reader.onload = () => {
         const svgText = reader.result;
-        if (typeof svgText !== "string") return;
+        if (typeof svgText !== "string") return unreadable();
         const patched = ensureSvgHasExplicitDimensions(svgText);
         insertLogoFromDataUrl(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(patched)}`);
       };
+      reader.onerror = unreadable;
       reader.readAsText(file);
       return;
     }
@@ -1769,9 +1799,10 @@ export function AnnotationEditor({
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result;
-      if (typeof dataUrl !== "string") return;
+      if (typeof dataUrl !== "string") return unreadable();
       insertLogoFromDataUrl(dataUrl);
     };
+    reader.onerror = unreadable;
     reader.readAsDataURL(file);
   }
 
@@ -2215,7 +2246,13 @@ export function AnnotationEditor({
         // Fabric-vs-React DOM conflict as the upper-canvas/guide-lines
         // issues documented elsewhere in this file).
         <div className="flex flex-1 items-center justify-center px-6 py-2">
-          <p className="text-sm text-muted">Loading…</p>
+          {videoLoadError ? (
+            <p role="alert" className="max-w-md text-center text-sm text-error">
+              {videoLoadError}
+            </p>
+          ) : (
+            <p className="text-sm text-muted">Loading…</p>
+          )}
         </div>
       ) : (
         <>
@@ -2796,6 +2833,13 @@ function VideoFramePicker({
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
+  // A media "error" event that fires before React has attached onError (a
+  // very fast failure) is otherwise missed for good -- check once on mount.
+  useEffect(() => {
+    const code = videoRef.current?.error?.code;
+    if (code) setError(problemMessage(code === 3 || code === 4 ? STORED_VIDEO_UNPLAYABLE : STORED_VIDEO_NOT_LOADED));
+  }, [videoUrl]);
+
   function handleSeek(value: number) {
     setCurrentTime(value);
     const video = videoRef.current;
@@ -2838,8 +2882,21 @@ function VideoFramePicker({
         playsInline
         crossOrigin="anonymous"
         className="max-h-[55dvh] max-w-full border border-dashed border-border bg-black/[.015]"
+        // A video the browser can't play used to leave the slider and
+        // "Use This Frame" disabled with no explanation.
+        onError={(e) => {
+          const code = e.currentTarget.error?.code;
+          // 3 = decode error, 4 = source not supported; anything else is a
+          // loading problem, not the format.
+          setError(problemMessage(code === 3 || code === 4 ? STORED_VIDEO_UNPLAYABLE : STORED_VIDEO_NOT_LOADED));
+        }}
         onLoadedMetadata={(e) => {
           const video = e.currentTarget;
+          if (video.videoWidth === 0 && video.videoHeight === 0) {
+            // Loaded, but no picture the browser can decode.
+            setError(problemMessage(STORED_VIDEO_UNPLAYABLE));
+            return;
+          }
           setDuration(video.duration || 0);
           // Same starting point as the automatic poster capture -- a hair
           // past 0, since frame 0 of many encodes is a solid black/blank

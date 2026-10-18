@@ -6,7 +6,7 @@ import { upsertLandingContent, resetLandingContent, uploadLandingImage } from "@
 import { landingMediaUrl } from "@/lib/landing-media-url";
 import { LANDING_CONTENT_KEYS, type LandingContent, type LandingContentKey } from "@/lib/landing/content-context";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
+import { checkFile, problemMessage, serverUploadProblem } from "@/lib/upload-validation";
 import type { Json } from "@/types/database";
 
 // One label per content key, in the same order they appear in the
@@ -81,9 +81,9 @@ function ImageUploader() {
     setUploading(true);
     setMessage(undefined);
 
-    const sizeCheck = validateUploadSize(file);
-    if (!sizeCheck.ok) {
-      setMessage(sizeCheck.message);
+    const problem = checkFile(file, "image");
+    if (problem) {
+      setMessage(problemMessage(problem));
       setUploading(false);
       return;
     }
@@ -102,7 +102,8 @@ function ImageUploader() {
     if (result.path) {
       setPath(result.path);
     } else {
-      setMessage(result.message ?? "Upload failed.");
+      if (result.message) console.error("[admin-landing] image save failed", result.message);
+      setMessage(problemMessage(serverUploadProblem(result.message)));
     }
     setUploading(false);
   }

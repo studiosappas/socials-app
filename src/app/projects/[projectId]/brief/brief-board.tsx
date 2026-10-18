@@ -56,8 +56,8 @@ import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/
 import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
-import { generateVideoPosterBlob } from "@/lib/video-poster";
+import { checkFile, problemMessage, serverUploadProblem, UNSUPPORTED_VIDEO } from "@/lib/upload-validation";
+import { probeVideoFile } from "@/lib/video-poster";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskStatus, BriefTaskType } from "@/types/database";
 
 export type BriefTaskItem = {
@@ -1304,6 +1304,16 @@ function ItemSection({
     setImageError(undefined);
     setImagePending(true);
     startTransition(async () => {
+      // Same rule as every other upload: a video the browser definitely
+      // can't play never reaches storage. The decoded frame is kept as the
+      // poster below, so the video is only decoded once.
+      const decoded = isVideo ? await probeVideoFile(file) : null;
+      if (decoded?.status === "unsupported") {
+        setImagePending(false);
+        setImageError(problemMessage(UNSUPPORTED_VIDEO));
+        return;
+      }
+
       // The file itself goes direct browser-to-Storage (brief-media bucket,
       // same as this app's other uploads) before the action ever runs --
       // bypasses Vercel's Function request-body limit entirely.
@@ -1317,14 +1327,15 @@ function ItemSection({
 
       // Poster generation only applies to video, and only ever runs
       // client-side (a real <video>/<canvas>, same as Grid/Post/Story --
-      // see video-poster.ts). A failure here is NOT fatal to the upload:
+      // see video-poster.ts). A missing frame is NOT fatal to the upload
+      // (an undetermined decode, e.g. a timeout, is never a rejection):
       // posterStoragePath is simply omitted, and the item still saves with
       // its video playable, just without a real poster frame -- the chip
       // falls back to a generic video icon in that case (see VideoItemChip).
       let posterStoragePath: string | null = null;
       if (isVideo) {
         try {
-          const posterBlob = await generateVideoPosterBlob(file);
+          const posterBlob = decoded?.status === "decoded" ? decoded.poster : null;
           if (posterBlob) {
             const posterFile = new File([posterBlob], "poster.jpg", { type: "image/jpeg" });
             const posterPath = newStoragePath(projectId, "poster.jpg");
@@ -1345,7 +1356,10 @@ function ItemSection({
         : await addBriefTaskImage(projectId, taskId, section, notes, position, formData);
       setImagePending(false);
       if (!result.success) {
-        setImageError(result.message ?? `Couldn't upload that ${isVideo ? "video" : "image"}.`);
+        // The save step's own text can be a raw database error -- logged,
+        // never shown.
+        console.error("[brief] media save failed", { fileName, message: result.message });
+        setImageError(problemMessage(serverUploadProblem(result.message)));
         return;
       }
       setPendingFile(null);
@@ -1400,13 +1414,17 @@ function ItemSection({
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
+      // Only pasted FILES are handled here -- pasted text never reaches this
+      // branch and keeps the browser's normal behavior. A pasted file that
+      // isn't an image used to be ignored silently; it now gets the shared
+      // "only images" message.
+      if (item.kind === "file") {
         const file = item.getAsFile();
         if (!file) continue;
         e.preventDefault();
-        const sizeCheck = validateUploadSize(file);
-        if (!sizeCheck.ok) {
-          setImageError(sizeCheck.message);
+        const problem = checkFile(file, "image");
+        if (problem) {
+          setImageError(problemMessage(problem));
           return;
         }
         setImageError(undefined);
@@ -1612,9 +1630,9 @@ function ItemSection({
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
                   if (file) {
-                    const sizeCheck = validateUploadSize(file);
-                    if (!sizeCheck.ok) {
-                      setImageError(sizeCheck.message);
+                    const problem = checkFile(file, "media");
+                    if (problem) {
+                      setImageError(problemMessage(problem));
                       e.target.value = "";
                       return;
                     }

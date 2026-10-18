@@ -65,7 +65,8 @@ import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/hooks/use-undo-stack";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { generatePosterFromVideoUrl } from "@/lib/video-poster";
+import { probeVideoUrl } from "@/lib/video-poster";
+import { problemMessage, STORED_VIDEO_UNPLAYABLE } from "@/lib/upload-validation";
 import { ShareMenuButton } from "../share-menu";
 import { createShareLink } from "@/lib/actions/share-links";
 import type { ShareLinkItem } from "@/lib/data/share-links";
@@ -1875,6 +1876,9 @@ const GridSlot = memo(function GridSlot({
   // per mount; the ref guards against StrictMode's double-invoke and against
   // re-firing on every re-render while the async capture is in flight.
   const autoHealAttemptedRef = useRef(false);
+  // Set when the repair finds this video definitely can't be played in this
+  // browser -- the tile then says so instead of a bare "Video" placeholder.
+  const [posterUnplayable, setPosterUnplayable] = useState(false);
   useEffect(() => {
     if (!canManage || demoMode) return;
     if (slot.thumbnailUrl || slot.coverMediaType !== "video") return;
@@ -1890,8 +1894,10 @@ const GridSlot = memo(function GridSlot({
     // needs to roll back anything: no error/toast on failure, matching the
     // original silent-best-effort behavior exactly.
     mutateSlot(slot.id, slot, async () => {
-      const posterBlob = await generatePosterFromVideoUrl(slot.coverOriginalUrl!);
-      if (!posterBlob) return undefined;
+      const decoded = await probeVideoUrl(slot.coverOriginalUrl!);
+      if (decoded.status === "unsupported") setPosterUnplayable(true);
+      if (decoded.status !== "decoded") return undefined;
+      const posterBlob = decoded.poster;
       const formData = new FormData();
       formData.set("poster", new File([posterBlob], "poster.jpg", { type: "image/jpeg" }));
       const result = await saveRegeneratedPoster(projectId, slot.coverMediaAssetId!, formData);
@@ -2619,6 +2625,7 @@ const GridSlot = memo(function GridSlot({
     >
       <GridSlotBody
         slot={slot}
+        posterUnplayable={posterUnplayable}
         transform={slot.coverTransform}
         canManage={canManage}
         selectionMode={selectionMode}
@@ -2658,6 +2665,7 @@ const GridSlot = memo(function GridSlot({
 // in above).
 const GridSlotBody = memo(function GridSlotBody({
   slot,
+  posterUnplayable,
   transform,
   canManage,
   selectionMode,
@@ -2679,6 +2687,7 @@ const GridSlotBody = memo(function GridSlotBody({
   onCancelCrop,
 }: {
   slot: GridBoardSlot;
+  posterUnplayable: boolean;
   transform: GridCoverTransform | null;
   canManage: boolean;
   selectionMode: boolean;
@@ -2746,10 +2755,21 @@ const GridSlotBody = memo(function GridSlotBody({
           // A video cover with no poster yet (e.g. uploaded before this
           // feature existed, or poster capture failed) -- still distinct
           // from a truly empty slot.
-          <span className="flex flex-col items-center gap-1 text-muted">
-            <span className="text-lg leading-none">{PLAY_GLYPH}</span>
-            <span className="text-xs tracking-wide uppercase">Video</span>
-          </span>
+          posterUnplayable ? (
+            <span
+              title={problemMessage(STORED_VIDEO_UNPLAYABLE)}
+              className="flex flex-col items-center gap-1 px-2 text-center text-muted"
+            >
+              <span className="text-lg leading-none">{PLAY_GLYPH}</span>
+              <span className="text-[10px] tracking-wide uppercase">Video can&apos;t be played</span>
+              <span className="text-[10px]">Convert to MP4 (H.264)</span>
+            </span>
+          ) : (
+            <span className="flex flex-col items-center gap-1 text-muted">
+              <span className="text-lg leading-none">{PLAY_GLYPH}</span>
+              <span className="text-xs tracking-wide uppercase">Video</span>
+            </span>
+          )
         ) : canManage ? (
           <span className="flex flex-col items-center gap-1 text-muted">
             <span className="text-lg leading-none">+</span>

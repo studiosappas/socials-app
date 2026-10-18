@@ -7,7 +7,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
+import { checkFile, problemMessage } from "@/lib/upload-validation";
 import type { AssetCollectionAiStatus, AssetProvider, AssetType } from "@/types/database";
 
 export type AssetCollectionItem = {
@@ -423,9 +423,9 @@ function AssetSourceDialog({
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (!file) return;
-              const sizeCheck = validateUploadSize(file);
-              if (!sizeCheck.ok) {
-                setUploadError(sizeCheck.message);
+              const problem = checkFile(file, "image");
+              if (problem) {
+                setUploadError(problemMessage(problem));
                 e.target.value = "";
                 return;
               }

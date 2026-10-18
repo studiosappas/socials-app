@@ -13,7 +13,9 @@ import {
   type ActionResult,
 } from "@/lib/actions/stories";
 import { createShareLink } from "@/lib/actions/share-links";
-import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { uploadFilesAndSummarize } from "@/lib/video-poster";
+import { problemMessage, serverUploadProblem } from "@/lib/upload-validation";
+import { useToast } from "@/lib/hooks/use-toast";
 import { StoryCard } from "./story-card";
 import { ShareMenuButton } from "../share-menu";
 import { Button } from "@/components/ui/button";
@@ -722,22 +724,28 @@ function UploadAssetsZone({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragDepth = useRef(0);
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs (uploadFilesWithPosters rejects it client-side).
+  // Surfaces every file rejected before the Server Action ever runs (wrong
+  // type, too large, unplayable video, upload failure), named in one message.
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const { showError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
+  // Picker and drag-and-drop alike. Unsupported files used to be filtered
+  // out of a drop silently; the shared "content" rules now reject and name
+  // them while the rest upload.
   function handleFiles(fileList: FileList | File[]) {
-    const files = Array.from(fileList).filter(
-      (f) => f.type.startsWith("image/") || f.type.startsWith("video/") || f.type === "application/pdf",
-    );
+    const files = Array.from(fileList);
     setUploadError(null);
     if (files.length > 0) {
-      uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+      void uploadFilesAndSummarize(projectId, action, files, "content").then((summary) => {
+        if (!summary) return;
+        setUploadError(summary);
+        showError(summary);
+      });
     }
   }
 
@@ -804,7 +812,7 @@ function UploadAssetsZone({
       </button>
       {children}
       {(uploadError || state?.message) && (
-        <p className="col-span-full text-xs text-error">{uploadError || state?.message}</p>
+        <p className="col-span-full text-xs text-error">{uploadError || problemMessage(serverUploadProblem(state?.message))}</p>
       )}
     </div>
   );
