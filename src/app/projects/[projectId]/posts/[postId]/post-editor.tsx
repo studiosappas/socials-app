@@ -33,16 +33,9 @@ import { uploadFilesWithPosters } from "@/lib/video-poster";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { validateUploadSize } from "@/lib/upload-limits";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import {
-  downloadFromExportRoute,
-  filenameFromUrl,
-  shareAssetFiles,
-  shareOrDownloadAsset,
-  shareOriginalAssets,
-} from "@/lib/download-zip";
+import { downloadFromExportRoute, filenameFromUrl, shareAssetFiles, shareOrDownloadAsset } from "@/lib/download-zip";
 import {
   editedDownloadSource,
-  originalDownloadSource,
   postExportUrl,
   videoCoverDownloadSource,
   type DownloadSource,
@@ -293,8 +286,8 @@ export function PostEditor({
       mediaAssetId: item.id,
       url: item.url,
       // item.originalUrl (always storage_path), not item.url -- item.url may
-      // point at a preview for display, and Download must always resolve to
-      // the real original (see the type's own comment in grid-board.tsx).
+      // point at a preview for display, while Edit Image must always start
+      // from the real original (see the type's own comment in grid-board.tsx).
       originalUrl: item.originalUrl ?? item.url,
       annotationJson: null,
       mediaType: item.mediaType as "image" | "video",
@@ -460,7 +453,7 @@ export function PostEditor({
   const usedMediaIds = new Set(orderedAssets.map((a) => a.mediaAssetId));
 
   // Which whole-post download is in flight, if any -- one at a time.
-  const [downloading, setDownloading] = useState<"edited" | "original" | null>(null);
+  const [downloading, setDownloading] = useState<"edited" | null>(null);
 
   // "Download Media" / "Save Media": the post's EDITED media -- what the app
   // shows. Every image exports its saved edit (crop, adjustments, text,
@@ -500,29 +493,6 @@ export function PostEditor({
       // Desktop, and the fallback whenever native file sharing isn't
       // available: the same edited media as one zip from the export route.
       const result = await downloadFromExportRoute(postExportUrl(projectId, post.id), `post-${post.id}-export.zip`);
-      if (!result.ok) showError(result.message);
-    } finally {
-      setDownloading(null);
-    }
-  }
-
-  // "Download Originals": the untouched uploads, byte-for-byte -- the
-  // explicit, separately named way to get what "Download Media" used to
-  // return. Never touches or replaces anything.
-  async function handleDownloadOriginals() {
-    if (downloading) return;
-    setDownloading("original");
-    try {
-      const shareable = orderedAssets
-        .map((a) => originalDownloadSource(a))
-        .filter((s): s is NonNullable<typeof s> => s !== null)
-        .map((s) => ({ url: s.url, filename: filenameFromUrl(s.url, "asset") }));
-      if (shareable.length === orderedAssets.length && (await shareOriginalAssets(shareable, isTouchDevice))) return;
-
-      const result = await downloadFromExportRoute(
-        postExportUrl(projectId, post.id, { variant: "original" }),
-        `post-${post.id}-originals.zip`,
-      );
       if (!result.ok) showError(result.message);
     } finally {
       setDownloading(null);
@@ -650,16 +620,6 @@ export function PostEditor({
           >
             {downloading === "edited" ? "Preparing…" : isTouchDevice ? "Save Media" : "Download Media"}
           </Button>
-          {/* Separate and explicitly named: the untouched uploads. */}
-          <button
-            type="button"
-            onClick={handleDownloadOriginals}
-            disabled={downloading !== null}
-            title="Download the original uploaded files, without any edits or cover framing"
-            className="text-xs tracking-wide text-muted uppercase underline-offset-4 transition-colors duration-150 hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {downloading === "original" ? "Preparing…" : isTouchDevice ? "Save Originals" : "Download Originals"}
-          </button>
         </div>
       ) : (
         <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
@@ -1036,7 +996,7 @@ function SortableAsset({
     [setNodeRef],
   );
   const [menuOpen, setMenuOpen] = useState(false);
-  const [downloading, setDownloading] = useState<"edited" | "original" | "cover" | null>(null);
+  const [downloading, setDownloading] = useState<"edited" | "cover" | null>(null);
   const { showError } = useToast();
   const [cropMode, setCropMode] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
@@ -1090,21 +1050,18 @@ function SortableAsset({
   // "Download": this frame's EDITED result -- the saved edit when it has
   // one, plus the Grid framing if this is the cover (rendered by the export
   // route; everything else is a file the editor already holds a URL for).
-  // "Download Original": the untouched upload. Same rules as the whole-post
-  // actions, see lib/post-export-plan.ts. Only the MECHANISM differs on a
-  // touch device, which prefers the native share sheet.
+  // Same rules as the whole-post Download Media, see
+  // lib/post-export-plan.ts. Only the MECHANISM differs on a touch device,
+  // which prefers the native share sheet. There is deliberately no
+  // user-facing "original" download: originals stay in storage for editing.
   // "Download Cover Image": a video's explicitly changed cover, as an image
   // (the menu entry only appears when videoCoverSource exists).
   const videoCoverSource = videoCoverDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
-  function handleDownload(kind: "edited" | "original" | "cover") {
+  function handleDownload(kind: "edited" | "cover") {
     setMenuOpen(false);
     if (downloading) return;
     const source =
-      kind === "original"
-        ? originalDownloadSource(asset)
-        : kind === "cover"
-          ? videoCoverSource
-          : editedDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
+      kind === "cover" ? videoCoverSource : editedDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
     if (!source) {
       showError("This file isn't available to download right now. Refresh the page and try again.");
       return;
@@ -1220,15 +1177,6 @@ function SortableAsset({
                 className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
               >
                 {downloading === "edited" ? "Downloading..." : isTouchDevice ? "Save" : "Download"}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDownload("original")}
-                disabled={downloading !== null}
-                title="The original uploaded file, without edits"
-                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
-              >
-                {downloading === "original" ? "Downloading..." : isTouchDevice ? "Save Original" : "Download Original"}
               </button>
               {videoCoverSource && (
                 <button

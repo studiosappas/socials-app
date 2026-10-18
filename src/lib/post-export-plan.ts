@@ -235,8 +235,3 @@ export function videoCoverDownloadSource(
   }
   return { url: asset.posterUrl, viaServer: false };
 }
-
-export function originalDownloadSource(asset: DownloadableAsset): DownloadSource | null {
-  const url = asset.originalUrl ?? null;
-  return url ? { url, viaServer: false } : null;
-}

@@ -1,5 +1,7 @@
 // Opt-in MEASURED regression check for "Download Media" exporting the saved,
-// edited result (and "Download Originals" exporting the untouched uploads).
+// edited result -- and that the Post Editor offers no user-facing
+// "originals" download. The export route's internal variant=original is
+// still checked in part A.
 // Not part of the default test run: it starts a Next dev server and needs
 // Playwright's Chromium AND WebKit (npx playwright install chromium webkit).
 //
@@ -365,7 +367,7 @@ async function partA() {
   });
 
   const originals = await unzip((await get("scenario=carousel&variant=original")).buf);
-  await check("Download Originals: every file is the untouched upload, byte-identical -- no edit, no framing", async () => {
+  await check("internal variant=original: every file is the untouched upload, byte-identical -- no edit, no framing", async () => {
     assert.deepEqual(originals.names, ["cover.png", "slide-2.png", "slide-3.png", "slide-4.mp4"]);
     assert.equal(sha(originals.files["cover.png"]), sha(F["p/orig-a.png"]));
     assert.equal(sha(originals.files["slide-2.png"]), sha(F["p/orig-b.png"]));
@@ -462,7 +464,7 @@ async function partA() {
     assert.equal(none.res.status, 404, "an automatic, unframed poster is not offered");
   });
 
-  await check("Download Originals with video covers: only the untouched files -- no cover images", async () => {
+  await check("internal variant=original with video covers: only the untouched files -- no cover images", async () => {
     const o = await unzip((await get("scenario=video-covers&variant=original")).buf);
     assert.deepEqual(o.names, ["cover.png", "slide-2.mp4", "slide-3.mp4"]);
     assert.equal(sha(o.files["slide-2.mp4"]), sha(F["p/orig-v.mp4"]));
@@ -597,9 +599,9 @@ async function partC(engine, browser, video) {
 
   {
     const { ctx, page, requests, actions, frameMenu } = await open();
-    await check(`${engine} desktop: both actions are present and separately named`, async () => {
+    await check(`${engine} desktop: Download Media is the only whole-post download -- no Download Originals anywhere`, async () => {
       assert.equal(await actions.getByRole("button", { name: "Download Media", exact: true }).count(), 1);
-      assert.equal(await actions.getByRole("button", { name: "Download Originals", exact: true }).count(), 1);
+      assert.equal(await page.getByText(/Download Originals|Save Originals/i).count(), 0);
     });
     await check(`${engine} desktop: Download Media -> the EDITED export (no variant), saved as ...-export.zip`, async () => {
       requests.length = 0;
@@ -607,23 +609,25 @@ async function partC(engine, browser, video) {
       assert.deepEqual(requests, ["export"]);
       assert.equal(name, `post-${POST}-export.zip`);
     });
-    await check(`${engine} desktop: Download Originals -> variant=original, saved as ...-originals.zip`, async () => {
-      requests.length = 0;
-      const name = await downloadOf(page, () => actions.getByRole("button", { name: "Download Originals", exact: true }).click());
-      assert.deepEqual(requests, ["export?variant=original"]);
-      assert.equal(name, `post-${POST}-originals.zip`);
-    });
     await check(`${engine} desktop: per-frame Download on an EDITED slide fetches the saved edit, not the original`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(2, "Download"));
       assert.deepEqual(requests, ["edit-3-preview.jpg"]);
       assert.equal(name, "edit-3-preview.jpg");
     });
-    await check(`${engine} desktop: per-frame Download Original fetches the original upload`, async () => {
+    await check(`${engine} desktop: per-frame Download on an UNTOUCHED slide is its full original (no display crop)`, async () => {
       requests.length = 0;
-      const name = await downloadOf(page, () => frameMenu(2, "Download Original"));
-      assert.deepEqual(requests, ["orig-3.png"]);
-      assert.equal(name, "orig-3.png");
+      const name = await downloadOf(page, () => frameMenu(1, "Download"));
+      assert.deepEqual(requests, ["orig-2.png"]);
+      assert.equal(name, "orig-2.png");
+    });
+    await check(`${engine} desktop: no per-frame Download Original on any frame`, async () => {
+      for (const index of [0, 1, 2, 3, 4]) {
+        await menuButton(page).nth(index).click();
+        await page.getByRole("button", { name: "Download", exact: true }).waitFor({ timeout: 5000 });
+        assert.equal(await page.getByText(/Download Original|Save Original/i).count(), 0, `frame ${index}`);
+        await menuButton(page).nth(index).click();
+      }
     });
     await check(`${engine} desktop: per-frame Download on the FRAMED cover is rendered by the export route (single asset)`, async () => {
       requests.length = 0;
@@ -652,7 +656,7 @@ async function partC(engine, browser, video) {
     await check(`${engine} desktop: no Download Cover Image on images or on a video with only its automatic poster`, async () => {
       for (const index of [1, 2, 3]) {
         await menuButton(page).nth(index).click();
-        await page.getByRole("button", { name: "Download Original", exact: true }).waitFor({ timeout: 5000 });
+        await page.getByRole("button", { name: "Download", exact: true }).waitFor({ timeout: 5000 });
         assert.equal(await page.getByRole("button", { name: "Download Cover Image", exact: true }).count(), 0, `frame ${index}`);
         await menuButton(page).nth(index).click();
       }
@@ -697,7 +701,6 @@ async function partC(engine, browser, video) {
     const { ctx, page, requests, actions } = await open({ mobile: true });
     await check(`${engine} touch: Save Media shares the EDITED files individually -- framed cover via the route, edits from storage, no zip`, async () => {
       assert.equal(await actions.getByRole("button", { name: "Save Media", exact: true }).count(), 1);
-      assert.equal(await actions.getByRole("button", { name: "Save Originals", exact: true }).count(), 1);
       requests.length = 0;
       await actions.getByRole("button", { name: "Save Media", exact: true }).tap();
       await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
@@ -707,13 +710,14 @@ async function partC(engine, browser, video) {
       assert.deepEqual([...requests].sort(), ["edit-3-preview.jpg", "export?asset=pa-1", "orig-2.png", "poster-5-edit.jpg", "video-4.webm", "video-5.webm"]);
       assert.ok(shared.every((f) => f.size > 0 && /^(image|video)\//.test(f.type)), JSON.stringify(shared));
     });
-    await check(`${engine} touch: Save Originals shares the original uploads`, async () => {
-      requests.length = 0;
-      await actions.getByRole("button", { name: "Save Originals", exact: true }).tap();
-      await page.waitForFunction(() => window.__shares.length === 2, null, { timeout: 8000 });
-      const shared = await page.evaluate(() => window.__shares[1]);
-      assert.deepEqual(shared.map((f) => f.name), ["orig-1.png", "orig-2.png", "orig-3.png", "video-4.webm", "video-5.webm"]);
-      assert.ok(!requests.some((r) => r.startsWith("export") || r.includes("preview") || r.includes("poster")), String(requests));
+    await check(`${engine} touch: no Save Originals, and no per-frame Save Original on any frame`, async () => {
+      assert.equal(await page.getByText(/Save Originals|Download Originals/i).count(), 0);
+      for (const index of [0, 1, 2, 3, 4]) {
+        await menuButton(page).nth(index).tap();
+        await page.getByRole("button", { name: "Save", exact: true }).waitFor({ timeout: 5000 });
+        assert.equal(await page.getByText(/Save Original|Download Original/i).count(), 0, `frame ${index}`);
+        await menuButton(page).nth(index).tap();
+      }
     });
     await ctx.close();
   }

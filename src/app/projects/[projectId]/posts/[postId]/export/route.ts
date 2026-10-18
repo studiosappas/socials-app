@@ -9,7 +9,7 @@ import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib
 //   GET .../export                    zip of the post's EDITED media: what
 //                                     the app shows (default).
 //   GET .../export?variant=original   zip of the untouched original uploads
-//                                     ("Download Originals").
+//                                     (internal only -- no button offers it).
 //   GET .../export?asset=<postAssetId>[&variant=original]
 //                                     that one asset as a single file, not a
 //                                     zip (per-frame download; the mobile
@@ -112,7 +112,7 @@ export async function GET(
       .in("id", mediaIds);
     if (previewError) {
       console.error("[post-export] could not load saved edits", { postId, message: previewError.message });
-      return errorResponse(500, "Couldn't load this post's saved edits. Please try again, or use Download Originals.");
+      return errorResponse(500, "Couldn't load this post's saved edits. Please try again.");
     }
     for (const r of previewRows ?? []) {
       previewByMediaId.set(r.id, (r as { preview_storage_path: string | null }).preview_storage_path ?? null);
@@ -134,7 +134,7 @@ export async function GET(
     ]);
     if (posterError || editedError) {
       console.error("[post-export] could not load video covers", { postId, message: (posterError ?? editedError)!.message });
-      return errorResponse(500, "Couldn't load this post's video covers. Please try again, or use Download Originals.");
+      return errorResponse(500, "Couldn't load this post's video covers. Please try again.");
     }
     for (const r of posterRows ?? []) {
       posterByMediaId.set(r.id, (r as { poster_storage_path: string | null }).poster_storage_path ?? null);

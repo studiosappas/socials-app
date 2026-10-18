@@ -7,7 +7,6 @@
 import assert from "node:assert/strict";
 import {
   editedDownloadSource,
-  originalDownloadSource,
   parseExportPart,
   parseExportVariant,
   planPostExport,
@@ -201,13 +200,12 @@ test("client: a video is always the real video file, framed cover or not", () =>
   assert.deepEqual(editedDownloadSource(video, true, FRAMING, "p", "q"), { url: "https://s/v.mov", viaServer: false });
 });
 
-test("client: 'Download Original' is always the original url; missing urls resolve to null, not a broken download", () => {
-  assert.deepEqual(originalDownloadSource(shown), { url: "https://s/orig.png", viaServer: false });
-  assert.equal(originalDownloadSource({ ...shown, originalUrl: null }), null);
+test("client: missing urls resolve to null, not a broken download; an untouched image downloads its full original", () => {
   assert.equal(editedDownloadSource({ ...shown, url: null, originalUrl: null }, false, null, "p", "q"), null);
-  // an untouched asset's `url` IS its original
+  // an untouched asset's `url` IS its original -- no automatic display crop
   const untouched = { ...shown, url: "https://s/orig.png" };
-  assert.equal(editedDownloadSource(untouched, false, null, "p", "q")!.url, originalDownloadSource(untouched)!.url);
+  assert.deepEqual(editedDownloadSource(untouched, false, null, "p", "q"), { url: "https://s/orig.png", viaServer: false });
+  assert.deepEqual(editedDownloadSource(untouched, true, null, "p", "q"), { url: "https://s/orig.png", viaServer: false });
 });
 
 const videoShown = (coverEdited: boolean | undefined, annotationJson: object | null = null) => ({
