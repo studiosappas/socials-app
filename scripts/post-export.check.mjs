@@ -51,7 +51,7 @@ const EXPORT_PATH = `/projects/${PROJECT}/posts/${POST}/export`;
 const ROUTE = `// TEMPORARY -- created and deleted by scripts/post-export.check.mjs. Never commit.
 import sharp from "sharp";
 import JSZip from "jszip";
-import { parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
+import { parseExportPart, parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
 import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib/post-export";
 
 const quad = (w: number, h: number, colors: string[]) =>
@@ -84,6 +84,11 @@ function fixtures() {
     const video = Buffer.alloc(70000);
     for (let i = 0; i < video.length; i++) video[i] = (i * 31 + 7) % 251;
     m.set("p/orig-v.mp4", video);
+    // A second, different video file, and two video covers: an EDITED cover (3:4, 1080x1440,
+    // quadrants orange / purple / teal / pink) and an AUTOMATIC poster (9:16, 720x1280, plain grey).
+    m.set("p/orig-w.mp4", Buffer.from(video.map((b) => 255 - b)));
+    m.set("p/poster-v-edit.jpg", await quad(1080, 1440, ["#ff8000", "#8000ff", "#008080", "#ff69b4"]).jpeg({ quality: 92 }).toBuffer());
+    m.set("p/poster-w-auto.jpg", await sharp({ create: { width: 720, height: 1280, channels: 3, background: "#777777" } }).jpeg({ quality: 92 }).toBuffer());
     return m;
   })();
   return cache;
@@ -94,6 +99,9 @@ const B: PostExportAsset = { postAssetId: "pa-b", mediaType: "image", storagePat
 const C: PostExportAsset = { postAssetId: "pa-c", mediaType: "image", storagePath: "p/orig-c.png", previewPath: "p/edit-c-preview.jpg" };
 const V: PostExportAsset = { postAssetId: "pa-v", mediaType: "video", storagePath: "p/orig-v.mp4", previewPath: null };
 const GONE: PostExportAsset = { postAssetId: "pa-gone", mediaType: "image", storagePath: "p/does-not-exist.png", previewPath: null };
+// a video whose cover was saved through Edit Cover, and one with only its automatic poster
+const VE: PostExportAsset = { postAssetId: "pa-ve", mediaType: "video", storagePath: "p/orig-v.mp4", previewPath: null, posterPath: "p/poster-v-edit.jpg", coverEdited: true };
+const VA: PostExportAsset = { postAssetId: "pa-va", mediaType: "video", storagePath: "p/orig-w.mp4", previewPath: null, posterPath: "p/poster-w-auto.jpg", coverEdited: false };
 const SCENARIOS: Record<string, { assets: PostExportAsset[]; transform: { scale: number; x: number; y: number; rotation?: number } | null }> = {
   // edited + framed cover, untouched slide, edited slide, video
   carousel: { assets: [A, B, C, V], transform: { scale: 2, x: 0, y: 0 } },
@@ -104,6 +112,13 @@ const SCENARIOS: Record<string, { assets: PostExportAsset[]; transform: { scale:
   // unedited cover, framed: must start from the ORIGINAL pixels
   "framed-unedited-a": { assets: [A_UNEDITED], transform: { scale: 2, x: 0, y: 0 } },
   "missing-slide": { assets: [B, GONE, C], transform: null },
+  // untouched cover image, a video with an edited cover, a video with only its automatic poster
+  "video-covers": { assets: [B, VE, VA], transform: null },
+  // a video as the post's cover, with a Grid framing: on its edited cover / on its automatic poster
+  "framed-video-edited": { assets: [VE, B], transform: { scale: 2, x: 0, y: 0 } },
+  "framed-video-auto": { assets: [VA], transform: { scale: 2, x: 0, y: 0 } },
+  // the same edited video cover, framed with a 90-degree rotation
+  "framed-video-rotated": { assets: [VE], transform: { scale: 1, x: 0, y: 0, rotation: 90 } },
 };
 
 export async function GET(request: Request) {
@@ -118,8 +133,12 @@ export async function GET(request: Request) {
   if (!scenario) return new Response("no such scenario", { status: 400 });
   const variant = parseExportVariant(url.searchParams.get("variant"));
   const only = url.searchParams.get("asset");
+  const part = parseExportPart(url.searchParams.get("part"));
   let plan = planPostExport(scenario.assets, scenario.transform, variant);
-  if (only) plan = plan.filter((i) => i.postAssetId === only);
+  if (only) {
+    plan = plan.filter((i) => i.postAssetId === only && i.part === part);
+    if (plan.length === 0) return Response.json({ message: "no such item" }, { status: 404 });
+  }
   let rendered;
   try {
     rendered = await renderPostExport(plan, scenario.transform, async (p) => files.get(p) ?? null);
@@ -189,18 +208,25 @@ const ASSETS: PostAssetItem[] = [
   { postAssetId: "pa-2", mediaAssetId: "m-2", url: M + "orig-2.png", originalUrl: M + "orig-2.png", annotationJson: null, mediaType: "image", posterUrl: null },
   // edited slide
   { postAssetId: "pa-3", mediaAssetId: "m-3", url: M + "edit-3-preview.jpg", originalUrl: M + "orig-3.png", annotationJson: null, mediaType: "image", posterUrl: null },
+  // video with only its automatic poster
   { postAssetId: "pa-4", mediaAssetId: "m-4", url: M + "video-4.webm", originalUrl: M + "video-4.webm", annotationJson: null, mediaType: "video", posterUrl: M + "poster-4.jpg" },
+  // video whose cover was saved through Edit Cover
+  { postAssetId: "pa-5", mediaAssetId: "m-5", url: M + "video-5.webm", originalUrl: M + "video-5.webm", annotationJson: { objects: [] }, mediaType: "video", posterUrl: M + "poster-5-edit.jpg" },
 ];
+// ?order=video-first: the automatic-poster video becomes the post's cover
+const VIDEO_FIRST: PostAssetItem[] = [ASSETS[3], ASSETS[0], ASSETS[1], ASSETS[2], ASSETS[4]];
 const NO_LINKS: never[] = [];
 const NO_MEMBERS: never[] = [];
 const LIBRARY = Promise.resolve([]);
 const FRAMED = { id: "${POST}", post_type: "carousel" as const, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft" as const, review_status: "pending" as const, coverTransform: { scale: 2, x: 0, y: 0, rotation: 0 } };
 const UNFRAMED = { ...FRAMED, coverTransform: null };
 export default function Harness() {
-  const framed = useSearchParams().get("framing") !== "off";
+  const params = useSearchParams();
+  const framed = params.get("framing") !== "off";
+  const assets = params.get("order") === "video-first" ? VIDEO_FIRST : ASSETS;
   return (
     <Modal onClose={() => {}}>
-      <PostEditor projectId="${PROJECT}" post={framed ? FRAMED : UNFRAMED} assets={ASSETS} links={NO_LINKS} mediaLibraryPromise={LIBRARY}
+      <PostEditor projectId="${PROJECT}" post={framed ? FRAMED : UNFRAMED} assets={assets} links={NO_LINKS} mediaLibraryPromise={LIBRARY}
         canManage role="owner" currentUserId="00000000-0000-0000-0000-000000000002" members={NO_MEMBERS} dateFormat="DD/MM/YYYY" hideBackLink />
     </Modal>
   );
@@ -258,7 +284,10 @@ async function waitForServer(url, ms) {
 async function partA() {
   console.log("\n### A. export pipeline -- real planPostExport + renderPostExport + sharp, measured");
   const F = {};
-  for (const name of ["p/orig-a.png", "p/edit-a-preview.jpg", "p/orig-b.png", "p/orig-c.png", "p/edit-c-preview.jpg", "p/orig-v.mp4"]) {
+  for (const name of [
+    "p/orig-a.png", "p/edit-a-preview.jpg", "p/orig-b.png", "p/orig-c.png", "p/edit-c-preview.jpg", "p/orig-v.mp4",
+    "p/orig-w.mp4", "p/poster-v-edit.jpg", "p/poster-w-auto.jpg",
+  ]) {
     F[name] = (await get(`fixture=${encodeURIComponent(name)}`)).buf;
   }
   console.log(
@@ -365,6 +394,81 @@ async function partA() {
     assert.notEqual(buf.subarray(0, 2).toString("latin1"), "PK", "not a zip");
   });
 
+  // --- video covers -------------------------------------------------------
+  const ORANGE = [255, 128, 0], PURPLE = [128, 0, 255], TEAL = [0, 128, 128], PINK = [255, 105, 180], GREY = [119, 119, 119];
+  const videoCovers = await unzip((await get("scenario=video-covers")).buf);
+  await check("video with an EDITED cover: untouched video + its cover image next to it; automatic poster adds nothing", async () => {
+    assert.deepEqual(videoCovers.names, ["cover.png", "slide-2.mp4", "slide-2-cover.jpg", "slide-3.mp4"]);
+  });
+  await check("both videos are the real files, byte-identical -- never modified by the cover image", async () => {
+    assert.equal(sha(videoCovers.files["slide-2.mp4"]), sha(F["p/orig-v.mp4"]));
+    assert.equal(sha(videoCovers.files["slide-3.mp4"]), sha(F["p/orig-w.mp4"]));
+  });
+  await check("an unframed edited video cover is the saved cover, byte-for-byte, full 1080x1440", async () => {
+    assert.equal(sha(videoCovers.files["slide-2-cover.jpg"]), sha(F["p/poster-v-edit.jpg"]));
+    assert.equal(await size(videoCovers.files["slide-2-cover.jpg"]), "1080x1440 jpeg");
+  });
+
+  const framedVideo = await unzip((await get("scenario=framed-video-edited")).buf);
+  await check("FRAMED edited video cover: video untouched + cover-image.jpg, measured 540x720 (zoom 2 of the 3:4 1080x1440 cover)", async () => {
+    assert.deepEqual(framedVideo.names, ["cover.mp4", "cover-image.jpg", "slide-2.png"]);
+    assert.equal(sha(framedVideo.files["cover.mp4"]), sha(F["p/orig-v.mp4"]));
+    // Independent expectation: a 3:4 frame over a 3:4 image is the whole image at zoom 1; zoom 2 halves it, centred.
+    const m = await sharp(framedVideo.files["cover-image.jpg"]).metadata();
+    assert.ok(Math.abs(m.width - 540) <= 1 && Math.abs(m.height - 720) <= 1, `got ${m.width}x${m.height}`);
+  });
+  await check("FRAMED edited video cover: pixels are the edited cover's quadrants, meeting at the centre", async () => {
+    const c = framedVideo.files["cover-image.jpg"];
+    assert.ok(near(await pixel(c, 100, 100), ORANGE), `top-left ${await pixel(c, 100, 100)}`);
+    assert.ok(near(await pixel(c, 440, 100), PURPLE), `top-right ${await pixel(c, 440, 100)}`);
+    assert.ok(near(await pixel(c, 100, 620), TEAL), `bottom-left ${await pixel(c, 100, 620)}`);
+    assert.ok(near(await pixel(c, 440, 620), PINK), `bottom-right ${await pixel(c, 440, 620)}`);
+  });
+
+  const framedAuto = await unzip((await get("scenario=framed-video-auto")).buf);
+  await check("FRAMED video cover WITHOUT an Edit Cover: the automatic poster with the framing, measured 360x480", async () => {
+    assert.deepEqual(framedAuto.names, ["cover.mp4", "cover-image.jpg"]);
+    assert.equal(sha(framedAuto.files["cover.mp4"]), sha(F["p/orig-w.mp4"]));
+    // 3:4 frame over a 9:16 (720x1280) image is width-limited -> 720x960 at zoom 1 -> 360x480 at zoom 2.
+    const c = framedAuto.files["cover-image.jpg"];
+    const m = await sharp(c).metadata();
+    assert.ok(Math.abs(m.width - 360) <= 1 && Math.abs(m.height - 480) <= 1, `got ${m.width}x${m.height}`);
+    assert.ok(near(await pixel(c, 180, 240), GREY), `centre ${await pixel(c, 180, 240)}`);
+  });
+
+  const rotated = await unzip((await get("scenario=framed-video-rotated")).buf);
+  await check("framing WITH a 90-degree rotation: measured 810x1080, quadrants turned clockwise", async () => {
+    // Independent expectation: turned 90 degrees clockwise (CSS rotate(90deg)), the 1080x1440 cover is 1440x1080;
+    // filling a 3:4 frame needs zoom 4/3, so the window is 810x1080 of it, centred.
+    // Clockwise: old bottom-left (teal) -> top-left, old top-left (orange) -> top-right,
+    // old bottom-right (pink) -> bottom-left, old top-right (purple) -> bottom-right.
+    const c = rotated.files["cover-image.jpg"];
+    const m = await sharp(c).metadata();
+    assert.ok(Math.abs(m.width - 810) <= 1 && Math.abs(m.height - 1080) <= 1, `got ${m.width}x${m.height}`);
+    assert.ok(near(await pixel(c, 100, 100), TEAL), `top-left ${await pixel(c, 100, 100)}`);
+    assert.ok(near(await pixel(c, 710, 100), ORANGE), `top-right ${await pixel(c, 710, 100)}`);
+    assert.ok(near(await pixel(c, 100, 980), PINK), `bottom-left ${await pixel(c, 100, 980)}`);
+    assert.ok(near(await pixel(c, 710, 980), PURPLE), `bottom-right ${await pixel(c, 710, 980)}`);
+  });
+
+  await check("single requests: part=cover-image returns just the cover image; no part returns the video", async () => {
+    const cover = await get("scenario=framed-video-edited&asset=pa-ve&part=cover-image");
+    assert.equal(cover.res.headers.get("content-type"), "image/jpeg");
+    assert.equal(sha(cover.buf), sha(framedVideo.files["cover-image.jpg"]));
+    const video = await get("scenario=framed-video-edited&asset=pa-ve");
+    assert.equal(video.res.headers.get("content-type"), "video/mp4");
+    assert.equal(sha(video.buf), sha(F["p/orig-v.mp4"]));
+    const none = await get("scenario=video-covers&asset=pa-va&part=cover-image");
+    assert.equal(none.res.status, 404, "an automatic, unframed poster is not offered");
+  });
+
+  await check("Download Originals with video covers: only the untouched files -- no cover images", async () => {
+    const o = await unzip((await get("scenario=video-covers&variant=original")).buf);
+    assert.deepEqual(o.names, ["cover.png", "slide-2.mp4", "slide-3.mp4"]);
+    assert.equal(sha(o.files["slide-2.mp4"]), sha(F["p/orig-v.mp4"]));
+    assert.equal(sha(o.files["slide-3.mp4"]), sha(F["p/orig-w.mp4"]));
+  });
+
   await check("exporting is read-only: every fixture is byte-identical after all of the above", async () => {
     for (const [name, before] of Object.entries(F)) {
       assert.equal(sha((await get(`fixture=${encodeURIComponent(name)}`)).buf), sha(before), name);
@@ -431,6 +535,8 @@ async function partC(engine, browser, video) {
     "orig-3.png": await img("#0000ff"),
     "poster-4.jpg": await img("#888888"),
     "video-4.webm": video,
+    "poster-5-edit.jpg": await img("#ff8000"),
+    "video-5.webm": video,
   };
   async function open({ mobile = false, query = "", exportFails = false } = {}) {
     const ctx = await browser.newContext({
@@ -483,6 +589,7 @@ async function partC(engine, browser, video) {
     };
     return { ctx, page, requests, actions, frameMenu };
   }
+  const menuButton = (page) => page.locator("button[title='Frame options']");
   const downloadOf = async (page, act) => {
     const [d] = await Promise.all([page.waitForEvent("download", { timeout: 8000 }), act()]);
     return d.suggestedFilename();
@@ -530,6 +637,36 @@ async function partC(engine, browser, video) {
       assert.deepEqual(requests, ["video-4.webm"]);
       assert.equal(name, "video-4.webm");
     });
+    await check(`${engine} desktop: per-frame Download Cover Image on a video with an EDITED cover fetches that cover image`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(4, "Download Cover Image"));
+      assert.deepEqual(requests, ["poster-5-edit.jpg"]);
+      assert.equal(name, "poster-5-edit.jpg");
+    });
+    await check(`${engine} desktop: per-frame Download on that video is still the real video file`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(4, "Download"));
+      assert.deepEqual(requests, ["video-5.webm"]);
+      assert.equal(name, "video-5.webm");
+    });
+    await check(`${engine} desktop: no Download Cover Image on images or on a video with only its automatic poster`, async () => {
+      for (const index of [1, 2, 3]) {
+        await menuButton(page).nth(index).click();
+        await page.getByRole("button", { name: "Download Original", exact: true }).waitFor({ timeout: 5000 });
+        assert.equal(await page.getByRole("button", { name: "Download Cover Image", exact: true }).count(), 0, `frame ${index}`);
+        await menuButton(page).nth(index).click();
+      }
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, frameMenu } = await open({ query: "?order=video-first" });
+    await check(`${engine} desktop: a video as the FRAMED post cover offers its cover image, rendered by the export route`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
+      assert.deepEqual(requests, ["export?asset=pa-4&part=cover-image"]);
+      assert.equal(name, "cover-image.jpg");
+    });
     await ctx.close();
   }
   {
@@ -565,8 +702,9 @@ async function partC(engine, browser, video) {
       await actions.getByRole("button", { name: "Save Media", exact: true }).tap();
       await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
       const shared = await page.evaluate(() => window.__shares[0]);
-      assert.deepEqual(shared.map((f) => f.name), ["cover.jpg", "orig-2.png", "edit-3-preview.jpg", "video-4.webm"]);
-      assert.deepEqual([...requests].sort(), ["edit-3-preview.jpg", "export?asset=pa-1", "orig-2.png", "video-4.webm"]);
+      // the edited video cover rides along right after its video; the automatic poster does not
+      assert.deepEqual(shared.map((f) => f.name), ["cover.jpg", "orig-2.png", "edit-3-preview.jpg", "video-4.webm", "video-5.webm", "poster-5-edit.jpg"]);
+      assert.deepEqual([...requests].sort(), ["edit-3-preview.jpg", "export?asset=pa-1", "orig-2.png", "poster-5-edit.jpg", "video-4.webm", "video-5.webm"]);
       assert.ok(shared.every((f) => f.size > 0 && /^(image|video)\//.test(f.type)), JSON.stringify(shared));
     });
     await check(`${engine} touch: Save Originals shares the original uploads`, async () => {
@@ -574,8 +712,20 @@ async function partC(engine, browser, video) {
       await actions.getByRole("button", { name: "Save Originals", exact: true }).tap();
       await page.waitForFunction(() => window.__shares.length === 2, null, { timeout: 8000 });
       const shared = await page.evaluate(() => window.__shares[1]);
-      assert.deepEqual(shared.map((f) => f.name), ["orig-1.png", "orig-2.png", "orig-3.png", "video-4.webm"]);
-      assert.ok(!requests.some((r) => r.startsWith("export") || r.includes("preview")), String(requests));
+      assert.deepEqual(shared.map((f) => f.name), ["orig-1.png", "orig-2.png", "orig-3.png", "video-4.webm", "video-5.webm"]);
+      assert.ok(!requests.some((r) => r.startsWith("export") || r.includes("preview") || r.includes("poster")), String(requests));
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, actions } = await open({ mobile: true, query: "?order=video-first" });
+    await check(`${engine} touch: a FRAMED video cover is shared as the video plus its route-rendered cover image`, async () => {
+      requests.length = 0;
+      await actions.getByRole("button", { name: "Save Media", exact: true }).tap();
+      await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
+      const shared = await page.evaluate(() => window.__shares[0]);
+      assert.deepEqual(shared.map((f) => f.name).slice(0, 2), ["video-4.webm", "cover-image.jpg"]);
+      assert.ok(requests.includes("export?asset=pa-4&part=cover-image"), String(requests));
     });
     await ctx.close();
   }

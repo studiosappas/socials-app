@@ -40,7 +40,13 @@ import {
   shareOrDownloadAsset,
   shareOriginalAssets,
 } from "@/lib/download-zip";
-import { editedDownloadSource, originalDownloadSource, postExportUrl } from "@/lib/post-export-plan";
+import {
+  editedDownloadSource,
+  originalDownloadSource,
+  postExportUrl,
+  videoCoverDownloadSource,
+  type DownloadSource,
+} from "@/lib/post-export-plan";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
@@ -90,6 +96,10 @@ export type PostAssetItem = {
   // raw <video> element instead, which looks identical whether a cover was
   // ever picked or not.
   posterUrl: string | null;
+  // Local-only: set when this session saves an Edit Cover on a video, since
+  // the save callback doesn't return the new annotation_json. Download
+  // Media uses it to include that cover (see videoCoverDownloadSource).
+  coverEdited?: boolean;
 };
 export type PostLinkItem = { id: string; url: string; label: string };
 
@@ -339,6 +349,7 @@ export function PostEditor({
               annotationJson: null,
               mediaType: item.mediaType as "image" | "video",
               posterUrl: null,
+              coverEdited: undefined,
             }
           : a,
       ),
@@ -384,7 +395,7 @@ export function PostEditor({
         asset.mediaAssetId === target?.mediaAssetId
           ? {
               ...asset,
-              ...(target.mediaType === "video" ? { posterUrl: previewUrl } : { url: previewUrl }),
+              ...(target.mediaType === "video" ? { posterUrl: previewUrl, coverEdited: true } : { url: previewUrl }),
               // Set only when saveMediaAssetAnnotation actually cloned (this
               // asset was ALSO another post's active cover) -- this post's
               // local state must follow the clone it now actually owns, so
@@ -473,13 +484,18 @@ export function PostEditor({
       // Gated on isTouchDevice -- some desktop browsers do support
       // canShare({files}), so shareAssetFiles' own preferMobileUx parameter
       // is what keeps the OS share dialog off desktop clicks.
-      const shareable = orderedAssets
-        .map((a, index) => {
-          const source = editedDownloadSource(a, index === 0, liveCoverTransformRef.current, projectId, post.id);
-          return source ? { url: source.url, filename: source.filename ?? filenameFromUrl(source.url, "asset") } : null;
-        })
-        .filter((s): s is { url: string; filename: string } => s !== null);
-      if (shareable.length === orderedAssets.length && (await shareAssetFiles(shareable, isTouchDevice))) return;
+      // A video whose cover was explicitly changed contributes its cover
+      // image as a second file, same rule as the export route's zip.
+      const sources: (DownloadSource | null)[] = orderedAssets.flatMap((a, index) => {
+        const transform = liveCoverTransformRef.current;
+        const media = editedDownloadSource(a, index === 0, transform, projectId, post.id);
+        const cover = videoCoverDownloadSource(a, index === 0, transform, projectId, post.id);
+        return cover ? [media, cover] : [media];
+      });
+      const shareable = sources
+        .filter((s): s is DownloadSource => s !== null)
+        .map((s) => ({ url: s.url, filename: s.filename ?? filenameFromUrl(s.url, "asset") }));
+      if (shareable.length === sources.length && (await shareAssetFiles(shareable, isTouchDevice))) return;
 
       // Desktop, and the fallback whenever native file sharing isn't
       // available: the same edited media as one zip from the export route.
@@ -1020,7 +1036,7 @@ function SortableAsset({
     [setNodeRef],
   );
   const [menuOpen, setMenuOpen] = useState(false);
-  const [downloading, setDownloading] = useState<"edited" | "original" | null>(null);
+  const [downloading, setDownloading] = useState<"edited" | "original" | "cover" | null>(null);
   const { showError } = useToast();
   const [cropMode, setCropMode] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
@@ -1077,13 +1093,18 @@ function SortableAsset({
   // "Download Original": the untouched upload. Same rules as the whole-post
   // actions, see lib/post-export-plan.ts. Only the MECHANISM differs on a
   // touch device, which prefers the native share sheet.
-  function handleDownload(kind: "edited" | "original") {
+  // "Download Cover Image": a video's explicitly changed cover, as an image
+  // (the menu entry only appears when videoCoverSource exists).
+  const videoCoverSource = videoCoverDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
+  function handleDownload(kind: "edited" | "original" | "cover") {
     setMenuOpen(false);
     if (downloading) return;
     const source =
       kind === "original"
         ? originalDownloadSource(asset)
-        : editedDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
+        : kind === "cover"
+          ? videoCoverSource
+          : editedDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
     if (!source) {
       showError("This file isn't available to download right now. Refresh the page and try again.");
       return;
@@ -1209,6 +1230,17 @@ function SortableAsset({
               >
                 {downloading === "original" ? "Downloading..." : isTouchDevice ? "Save Original" : "Download Original"}
               </button>
+              {videoCoverSource && (
+                <button
+                  type="button"
+                  onClick={() => handleDownload("cover")}
+                  disabled={downloading !== null}
+                  title="This video's cover, as shown here, as an image"
+                  className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:opacity-60"
+                >
+                  {downloading === "cover" ? "Downloading..." : isTouchDevice ? "Save Cover Image" : "Download Cover Image"}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {

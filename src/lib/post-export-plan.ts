@@ -21,7 +21,11 @@
 //   image  -> layer 2 if it exists, else layer 1; the cover additionally
 //             gets layer 3 applied when a framing is saved.
 //   video  -> the real video file, untouched. A video's saved cover edit /
-//             framing belongs to its poster image, not to the file.
+//             framing belongs to its poster image, not to the file, so when
+//             the user explicitly changed that cover (Edit Cover, or a Grid
+//             framing on the post's cover) the poster is exported as a
+//             SEPARATE image next to the video -- with the framing applied
+//             when there is one. An automatic, never-touched poster is not.
 // "original" = layer 1 for everything, byte-for-byte.
 //
 // Nothing here ever writes to an asset: exports are new files, the source
@@ -36,12 +40,22 @@ export type PostExportAsset = {
   storagePath: string;
   // media_assets.preview_storage_path -- the saved edit, when one exists.
   previewPath: string | null;
+  // Videos only: media_assets.poster_storage_path (the cover image the app
+  // shows for the video), and whether that cover was saved through Edit
+  // Cover (annotation_json present) rather than captured automatically.
+  posterPath?: string | null;
+  coverEdited?: boolean;
 };
+
+// "media": the asset itself. "cover-image": a video's cover, exported as its
+// own image file alongside the untouched video.
+export type PostExportPart = "media" | "cover-image";
 
 export type PostExportItem = {
   // Position in the post (0 = cover).
   index: number;
   postAssetId: string;
+  part: PostExportPart;
   // Human label for error messages: "the cover" / "slide 3".
   label: string;
   // Storage path whose bytes this item starts from.
@@ -57,6 +71,22 @@ export function parseExportVariant(value: string | null | undefined): PostExport
   return value === "original" ? "original" : "edited";
 }
 
+export function parseExportPart(value: string | null | undefined): PostExportPart {
+  return value === "cover-image" ? "cover-image" : "media";
+}
+
+// Whether a video's cover image belongs in the edited download: only when
+// the user explicitly changed it -- saved through Edit Cover, or (for the
+// post's cover only) given a Grid framing. Shared by server and client so
+// the zip, the share sheet and the per-frame menu always agree.
+export function includesVideoCover(
+  video: { hasPoster: boolean; coverEdited: boolean },
+  isCover: boolean,
+  coverTransform: object | null | undefined,
+): boolean {
+  return video.hasPoster && (video.coverEdited || (isCover && Boolean(coverTransform)));
+}
+
 function extensionOf(path: string, fallback: string): string {
   const basename = path.split("/").pop() ?? "";
   const dot = basename.lastIndexOf(".");
@@ -70,28 +100,49 @@ export function planPostExport(
   coverTransform: object | null | undefined,
   variant: PostExportVariant,
 ): PostExportItem[] {
-  return assets.map((asset, index) => {
+  return assets.flatMap((asset, index): PostExportItem[] => {
     const isCover = index === 0;
     const base = isCover ? "cover" : `slide-${index + 1}`;
     const label = isCover ? "the cover" : `slide ${index + 1}`;
-    const common = { index, postAssetId: asset.postAssetId, label };
+    const common = { index, postAssetId: asset.postAssetId, part: "media" as const, label };
 
     if (variant === "original" || asset.mediaType === "video") {
-      return {
+      const file: PostExportItem = {
         ...common,
         sourcePath: asset.storagePath,
         operation: "verbatim",
         filename: `${base}.${extensionOf(asset.storagePath, asset.mediaType === "video" ? "mp4" : "jpg")}`,
       };
+      const posterPath = asset.posterPath ?? null;
+      if (
+        variant === "original" ||
+        !posterPath ||
+        !includesVideoCover({ hasPoster: true, coverEdited: Boolean(asset.coverEdited) }, isCover, coverTransform)
+      ) {
+        return [file];
+      }
+      const framed = isCover && Boolean(coverTransform);
+      return [
+        file,
+        {
+          index,
+          postAssetId: asset.postAssetId,
+          part: "cover-image",
+          label: isCover ? "the cover image" : `the cover image of slide ${index + 1}`,
+          sourcePath: posterPath,
+          operation: framed ? "cover-crop" : "verbatim",
+          filename: `${isCover ? "cover-image" : `${base}-cover`}.${framed ? "jpg" : extensionOf(posterPath, "jpg")}`,
+        },
+      ];
     }
 
     const sourcePath = asset.previewPath || asset.storagePath;
     // Only the cover can carry a Grid framing -- never applied to any other
     // carousel slide.
     if (isCover && coverTransform) {
-      return { ...common, sourcePath, operation: "cover-crop", filename: `${base}.jpg` };
+      return [{ ...common, sourcePath, operation: "cover-crop", filename: `${base}.jpg` }];
     }
-    return { ...common, sourcePath, operation: "verbatim", filename: `${base}.${extensionOf(sourcePath, "jpg")}` };
+    return [{ ...common, sourcePath, operation: "verbatim", filename: `${base}.${extensionOf(sourcePath, "jpg")}` }];
   });
 }
 
@@ -105,6 +156,12 @@ export type DownloadableAsset = {
   url: string | null;
   // Always the original's signed URL.
   originalUrl?: string | null;
+  // Videos only: the cover image's signed URL, and the saved Edit Cover
+  // state -- `coverEdited` when the caller knows it (set right after a save
+  // in the current session), else whether annotation_json is present.
+  posterUrl?: string | null;
+  annotationJson?: object | null;
+  coverEdited?: boolean;
 };
 
 export type DownloadSource = {
@@ -120,11 +177,12 @@ export type DownloadSource = {
 export function postExportUrl(
   projectId: string,
   postId: string,
-  opts: { variant?: PostExportVariant; postAssetId?: string } = {},
+  opts: { variant?: PostExportVariant; postAssetId?: string; part?: PostExportPart } = {},
 ): string {
   const params = new URLSearchParams();
   if (opts.variant === "original") params.set("variant", "original");
   if (opts.postAssetId) params.set("asset", opts.postAssetId);
+  if (opts.postAssetId && opts.part === "cover-image") params.set("part", "cover-image");
   const query = params.toString();
   return `/projects/${projectId}/posts/${postId}/export${query ? `?${query}` : ""}`;
 }
@@ -152,6 +210,30 @@ export function editedDownloadSource(
   }
   const url = asset.url ?? asset.originalUrl;
   return url ? { url, viaServer: false } : null;
+}
+
+// A video's cover image, when the edited download includes one (see
+// includesVideoCover): straight from storage, or rendered by the export route
+// when it is the post's cover with a saved Grid framing. Null for images and
+// for videos whose cover was never explicitly changed.
+export function videoCoverDownloadSource(
+  asset: DownloadableAsset,
+  isCover: boolean,
+  coverTransform: object | null | undefined,
+  projectId: string,
+  postId: string,
+): DownloadSource | null {
+  if (asset.mediaType !== "video" || !asset.posterUrl) return null;
+  const coverEdited = asset.coverEdited ?? Boolean(asset.annotationJson);
+  if (!includesVideoCover({ hasPoster: true, coverEdited }, isCover, coverTransform)) return null;
+  if (isCover && coverTransform) {
+    return {
+      url: postExportUrl(projectId, postId, { postAssetId: asset.postAssetId, part: "cover-image" }),
+      viaServer: true,
+      filename: "cover-image.jpg",
+    };
+  }
+  return { url: asset.posterUrl, viaServer: false };
 }
 
 export function originalDownloadSource(asset: DownloadableAsset): DownloadSource | null {

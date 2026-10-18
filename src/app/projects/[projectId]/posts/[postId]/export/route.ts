@@ -1,7 +1,7 @@
 import JSZip from "jszip";
 import { createClient } from "@/lib/supabase/server";
 import type { CoverTransform } from "@/lib/image-crop";
-import { parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
+import { parseExportPart, parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
 import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib/post-export";
 
 // Server-side per-post export -- "Download Media" in the Post Editor.
@@ -14,6 +14,9 @@ import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib
 //                                     that one asset as a single file, not a
 //                                     zip (per-frame download; the mobile
 //                                     share path uses it for the cover).
+//   GET .../export?asset=<postAssetId>&part=cover-image
+//                                     that video's cover image as a single
+//                                     file (a framed video cover).
 //
 // What "edited" means is decided in lib/post-export-plan.ts (one shared,
 // unit-tested rule set) and rendered by lib/post-export.ts. In short: an
@@ -21,10 +24,11 @@ import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib
 // adjustments, text, drawing, already flattened) when it has one, else its
 // original; the cover additionally gets its saved Grid framing
 // (posts.cover_transform) applied on top of THAT image; videos export as
-// the real, playable file. An image with no saved edit and no framing is
-// shipped byte-for-byte, no resize or recompression -- this route used to
-// push every image through a fixed 1080-wide resize, which is what made
-// "Download Media" low-resolution once before.
+// the real, playable file, plus their cover image as a separate file when
+// the user explicitly changed that cover. An image with no saved edit and
+// no framing is shipped byte-for-byte, no resize or recompression -- this
+// route used to push every image through a fixed 1080-wide resize, which
+// is what made "Download Media" low-resolution once before.
 //
 // It used to read storage_path ONLY, so a saved crop/adjustment never made
 // it into the download even though every screen showed it.
@@ -40,6 +44,7 @@ export async function GET(
   const url = new URL(request.url);
   const variant = parseExportVariant(url.searchParams.get("variant"));
   const onlyAssetId = url.searchParams.get("asset");
+  const onlyPart = parseExportPart(url.searchParams.get("part"));
   const supabase = await createClient();
 
   const {
@@ -114,16 +119,41 @@ export async function GET(
     }
   }
 
+  // Videos only, edited variant only: each video's cover image and whether
+  // it was saved through Edit Cover. Skipped entirely for image-only posts.
+  // The "edited" check selects ids only (annotation_json can be large). Fails
+  // loudly for the same reason as the saved-edit lookup above: a zip that
+  // silently lacks an edited cover is the substitution this route prevents.
+  const posterByMediaId = new Map<string, string | null>();
+  const coverEditedMediaIds = new Set<string>();
+  const videoIds = rows.filter((r) => r.media!.media_type === "video").map((r) => r.media!.id);
+  if (variant === "edited" && videoIds.length > 0) {
+    const [{ data: posterRows, error: posterError }, { data: editedRows, error: editedError }] = await Promise.all([
+      supabase.from("media_assets").select("id, poster_storage_path").in("id", videoIds),
+      supabase.from("media_assets").select("id").in("id", videoIds).not("annotation_json", "is", null),
+    ]);
+    if (posterError || editedError) {
+      console.error("[post-export] could not load video covers", { postId, message: (posterError ?? editedError)!.message });
+      return errorResponse(500, "Couldn't load this post's video covers. Please try again, or use Download Originals.");
+    }
+    for (const r of posterRows ?? []) {
+      posterByMediaId.set(r.id, (r as { poster_storage_path: string | null }).poster_storage_path ?? null);
+    }
+    for (const r of editedRows ?? []) coverEditedMediaIds.add(r.id);
+  }
+
   const assets: PostExportAsset[] = rows.map((r) => ({
     postAssetId: r.postAssetId,
     mediaType: r.media!.media_type === "video" ? "video" : "image",
     storagePath: r.media!.storage_path,
     previewPath: previewByMediaId.get(r.media!.id) ?? null,
+    posterPath: posterByMediaId.get(r.media!.id) ?? null,
+    coverEdited: coverEditedMediaIds.has(r.media!.id),
   }));
 
   let plan = planPostExport(assets, coverTransform, variant);
   if (onlyAssetId) {
-    plan = plan.filter((item) => item.postAssetId === onlyAssetId);
+    plan = plan.filter((item) => item.postAssetId === onlyAssetId && item.part === onlyPart);
     if (plan.length === 0) return errorResponse(404, "That item is no longer part of this post. Please refresh and try again.");
   }
 
