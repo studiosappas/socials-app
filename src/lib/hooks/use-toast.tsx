@@ -24,7 +24,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const show = useCallback((message: string, variant: ToastVariant) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     setToast({ message, variant });
-    timeoutRef.current = setTimeout(() => setToast(null), variant === "error" ? 3000 : 2500);
+    // Long messages (an upload listing several rejected files) stay up long
+    // enough to read; short ones keep the original timing.
+    const readingTime = Math.min(9000, message.length * 55);
+    timeoutRef.current = setTimeout(() => setToast(null), Math.max(variant === "error" ? 3000 : 2500, readingTime));
   }, []);
 
   const showError = useCallback((message: string) => show(message, "error"), [show]);
