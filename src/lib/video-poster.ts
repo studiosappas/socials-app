@@ -7,6 +7,7 @@ import { generatePdfCoverBlob } from "@/lib/pdf-cover";
 import {
   checkFile,
   failureSummary,
+  isRecognisedVideoContainer,
   problemMessage,
   storageErrorProblem,
   UNSUPPORTED_VIDEO,
@@ -39,6 +40,27 @@ export function probeVideoFile(file: File, options?: { timeoutMs?: number }): Pr
 // loaded, so messages built on it must not claim the format for certain.
 export function probeVideoUrl(url: string, seekTime?: number): Promise<VideoDecodeResult> {
   return decodeVideoSrc(url, () => {}, { seekTime });
+}
+
+// Brief ONLY. Brief stores reference/source videos, so a video this browser
+// can't play is still accepted when its first bytes are a recognised video
+// container ("preview-unavailable": stored without a poster, with a notice).
+// A file that only CLAIMS to be a video (a non-video renamed .avi) is
+// "rejected". Grid, Post Editor and Content keep rejecting every
+// unplayable video (uploadFilesWithPosters / uploadFilesConcurrently).
+// The container check is a client-side safeguard, not a security boundary
+// -- see isRecognisedVideoContainer.
+export type BriefVideoCheck =
+  | { status: "decoded"; poster: Blob }
+  | { status: "undetermined" }
+  | { status: "preview-unavailable" }
+  | { status: "rejected" };
+
+export async function checkBriefVideo(file: File): Promise<BriefVideoCheck> {
+  const decoded = await probeVideoFile(file);
+  if (decoded.status !== "unsupported") return decoded;
+  const head = new Uint8Array(await file.slice(0, 512).arrayBuffer());
+  return isRecognisedVideoContainer(head) ? { status: "preview-unavailable" } : { status: "rejected" };
 }
 
 // Grabs a still frame from a video file for use as a Grid-safe poster image,

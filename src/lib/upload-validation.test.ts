@@ -6,6 +6,7 @@ import {
   checkFile,
   failureSummary,
   formatLimit,
+  isRecognisedVideoContainer,
   LOGO_UPLOAD_LIMIT_BYTES,
   problemMessage,
   SERVER_ACTION_UPLOAD_LIMIT_BYTES,
@@ -18,6 +19,8 @@ import {
   UNSUPPORTED_VIDEO,
   uploadLimitBytes,
   validateFiles,
+  VIDEO_PREVIEW_UNAVAILABLE,
+  VIDEO_PREVIEW_UNAVAILABLE_UPLOADED,
   type UploadContext,
 } from "./upload-validation.ts";
 
@@ -191,6 +194,56 @@ test("auth: only RELIABLE sign-in failures get the sign-in message; everything e
   }
   assert.equal(storageErrorProblem({ message: "new row violates row-level security policy", statusCode: "403" }).code, "server");
   assert.match(failureSummary([{ fileName: "a.png", problem: SIGNED_OUT }, { fileName: "b.png", problem: SIGNED_OUT }])!, /Please sign in to upload files\.$/);
+});
+
+// --- Brief: recognised video containers ---------------------------------------
+const bytes = (...parts: (string | number[])[]) => {
+  const out: number[] = [];
+  for (const p of parts) out.push(...(typeof p === "string" ? [...p].map((c) => c.charCodeAt(0)) : p));
+  return new Uint8Array([...out, ...new Array(64).fill(0)]);
+};
+
+test("isRecognisedVideoContainer: real container headers are recognised", () => {
+  const cases: [string, Uint8Array][] = [
+    ["AVI (the reported MJPEG file)", bytes("RIFF", [0x24, 0x10, 0x00, 0x00], "AVI LIST")],
+    ["MP4", bytes([0, 0, 0, 0x20], "ftypisom")],
+    ["MOV (ftyp qt)", bytes([0, 0, 0, 0x14], "ftypqt  ")],
+    ["old QuickTime (moov first)", bytes([0, 0, 0, 0x6c], "moov")],
+    ["3GP", bytes([0, 0, 0, 0x18], "ftyp3gp4")],
+    ["WebM / MKV (EBML)", bytes([0x1a, 0x45, 0xdf, 0xa3])],
+    ["MPEG program stream", bytes([0x00, 0x00, 0x01, 0xba])],
+    ["FLV", bytes("FLV", [0x01])],
+    ["WMV / ASF", bytes([0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11])],
+    ["Ogg", bytes("OggS")],
+  ];
+  for (const [label, head] of cases) assert.equal(isRecognisedVideoContainer(head), true, label);
+  const ts = new Uint8Array(400);
+  ts[0] = 0x47;
+  ts[188] = 0x47;
+  assert.equal(isRecognisedVideoContainer(ts), true, "MPEG transport stream");
+});
+
+test("isRecognisedVideoContainer: non-video files named like videos are NOT recognised", () => {
+  const cases: [string, Uint8Array][] = [
+    ["ZIP", bytes("PK", [3, 4])],
+    ["Windows executable", bytes("MZ", [0x90, 0x00])],
+    ["PDF", bytes("%PDF-1.7")],
+    ["plain text", bytes("hello, this is not a video")],
+    ["WAV audio (RIFF but not AVI)", bytes("RIFF", [0x24, 0x10, 0x00, 0x00], "WAVEfmt ")],
+    ["PNG", bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ["a lone 0x47 byte (not a transport stream)", bytes([0x47])],
+  ];
+  for (const [label, head] of cases) assert.equal(isRecognisedVideoContainer(head), false, label);
+  assert.equal(isRecognisedVideoContainer(new Uint8Array(0)), false, "empty");
+  assert.equal(isRecognisedVideoContainer(new Uint8Array([0x1a, 0x45])), false, "too short");
+});
+
+test("Brief notices: exact agreed wording", () => {
+  assert.equal(
+    VIDEO_PREVIEW_UNAVAILABLE_UPLOADED,
+    "Video preview unavailable — This file was uploaded, but it can't be previewed in your browser. Download it to view it in a compatible application.",
+  );
+  assert.match(VIDEO_PREVIEW_UNAVAILABLE, /^Video preview unavailable — .*Download it to view it in a compatible application\.$/);
 });
 
 console.log(`\n${passed} tests passed`);

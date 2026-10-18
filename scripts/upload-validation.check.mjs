@@ -16,6 +16,9 @@
 //  D. Grid media library: a failed upload shows ONE notification -- the
 //     toast, no red inline copy -- in the sidebar and above the
 //     Choose-from-library dialog.
+//  E. Brief: a recognised video container the browser can't play is kept as
+//     a reference attachment (preview unavailable + Download); a non-video
+//     named like one is rejected; Grid / Post Editor / Content stay strict.
 //
 // NOTHING leaves the machine: every request to a Supabase host is answered
 // by this script (storage uploads are recorded, never forwarded), and any
@@ -536,6 +539,125 @@ async function partD(engine, browser) {
   }
 }
 
+// --- E. Brief: reference videos the browser can't play ----------------------
+const BRIEF_PAGE = `"use client";
+// TEMPORARY -- created and deleted by scripts/upload-validation.check.mjs. Never commit.
+import { useEffect } from "react";
+import { checkBriefVideo, uploadFilesAndSummarize } from "@/lib/video-poster";
+export default function Page() {
+  useEffect(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__brief = async (file: File) => {
+      const r = await checkBriefVideo(file);
+      return { status: r.status, posterBytes: r.status === "decoded" ? r.poster.size : 0 };
+    };
+    w.__strict = async (file: File, context: "media" | "content") =>
+      uploadFilesAndSummarize("00000000-0000-0000-0000-000000000000", () => {}, [file], context);
+    document.body.dataset.ready = "1";
+  }, []);
+  return <p>brief harness</p>;
+}
+`;
+
+const BRIEF_LIGHTBOX_PAGE = `"use client";
+// TEMPORARY -- created and deleted by scripts/upload-validation.check.mjs. Never commit.
+import { useSearchParams } from "next/navigation";
+import { VideoLightbox } from "@/app/projects/[projectId]/brief/brief-board";
+export default function Page() {
+  const src = useSearchParams().get("src") ?? "https://media.test/holiday.avi";
+  return <VideoLightbox url={src} poster={null} downloadName="holiday" onClose={() => {}} />;
+}
+`;
+
+async function partE(engine, browser) {
+  console.log(`\n### E. Brief accepts recognised but unplayable reference videos -- ${engine}`);
+  const unavailable =
+    "Video preview unavailable — This file can't be previewed in your browser. Download it to view it in a compatible application.";
+  {
+    const { ctx, page, escaped, storageUploads } = await newIsolatedPage(browser);
+    await page.goto(`${BASE}/brief`, { waitUntil: "load" });
+    await page.waitForFunction(() => document.body.dataset.ready === "1", null, { timeout: 120000 });
+    await page.evaluate(
+      ({ avi, video }) => {
+        const fromB64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        window.__bf = {
+          avi: new File([fromB64(avi)], "holiday.avi", { type: "video/x-msvideo" }),
+          // a non-video file merely NAMED like a video (the OS types it by extension)
+          fakeAvi: new File([new TextEncoder().encode("this is a text file, not a video ".repeat(40))], "notes.avi", { type: "video/x-msvideo" }),
+          video: video ? new File([fromB64(video.b64)], "clip.webm", { type: video.type }) : null,
+        };
+      },
+      { avi: fakeAviBytes().toString("base64"), video: sharedVideo },
+    );
+    await check(`${engine}: Brief -- an AVI container the browser can't play is accepted as "preview-unavailable" (no poster)`, async () => {
+      const r = await page.evaluate(() => window.__brief(window.__bf.avi));
+      assert.deepEqual(r, { status: "preview-unavailable", posterBytes: 0 });
+    });
+    await check(`${engine}: Brief -- a non-video file named .avi is still rejected`, async () => {
+      const r = await page.evaluate(() => window.__brief(window.__bf.fakeAvi));
+      assert.equal(r.status, "rejected");
+    });
+    await check(`${engine}: the SAME AVI is still rejected in Grid/Post Editor (media) and Content -- strict rule unchanged`, async () => {
+      storageUploads.length = 0;
+      for (const context of ["media", "content"]) {
+        const summary = await page.evaluate((c) => window.__strict(window.__bf.avi, c), context);
+        assert.match(summary, /^"holiday\.avi" wasn't uploaded\. Unsupported video format — /, context);
+      }
+      assert.equal(storageUploads.length, 0, "nothing reached storage");
+    });
+    const playableHere = engine === "chromium" && sharedVideo;
+    if (playableHere) {
+      await check(`${engine}: Brief -- a playable video still decodes with a poster (unchanged)`, async () => {
+        const r = await page.evaluate(() => window.__brief(window.__bf.video));
+        assert.equal(r.status, "decoded");
+        assert.ok(r.posterBytes > 0);
+      });
+    } else {
+      skipped++;
+      console.log(`SKIP - ${engine}: Brief -- a playable video still decodes with a poster (no video this engine can both create and play)`);
+    }
+    await check(`${engine}: Brief helper checks left the machine untouched`, async () => assert.deepEqual(escaped, []));
+    await ctx.close();
+  }
+  {
+    const { ctx, page, escaped } = await newIsolatedPage(browser);
+    const avi = fakeAviBytes();
+    const downloads = [];
+    await page.route("https://media.test/**", (r) => {
+      const name = new URL(r.request().url()).pathname.slice(1);
+      if (r.request().resourceType() === "fetch") downloads.push(name);
+      if (name === "holiday.avi") return r.fulfill({ body: avi, contentType: "video/x-msvideo", headers: { "access-control-allow-origin": "*" } });
+      if (name === "clip.webm" && sharedVideo)
+        return r.fulfill({ body: Buffer.from(sharedVideo.b64, "base64"), contentType: sharedVideo.type, headers: { "access-control-allow-origin": "*" } });
+      return r.fulfill({ status: 404 });
+    });
+    await check(`${engine}: Brief preview of an unplayable video -- placeholder, the explanation and a working Download`, async () => {
+      await page.goto(`${BASE}/brief-lightbox`, { waitUntil: "load" });
+      await page.getByText(unavailable).waitFor({ timeout: 120000 });
+      assert.equal(await page.locator("video").count(), 0, "no blank player left behind");
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout: 15000 }),
+        page.getByRole("button", { name: "Download video" }).click(),
+      ]);
+      assert.equal(download.suggestedFilename(), "holiday.avi");
+      assert.deepEqual(downloads, ["holiday.avi"], "downloads the original file");
+      assert.deepEqual(escaped, []);
+    });
+    if (engine === "chromium" && sharedVideo) {
+      await check(`${engine}: Brief preview of a playable video -- normal player, no fallback (unchanged)`, async () => {
+        await page.goto(`${BASE}/brief-lightbox?src=${encodeURIComponent("https://media.test/clip.webm")}`, { waitUntil: "load" });
+        await page.locator("video").waitFor({ timeout: 120000 });
+        await page.waitForFunction(() => (document.querySelector("video")?.readyState ?? 0) >= 1, null, { timeout: 20000 });
+        assert.equal(await page.getByText(unavailable).count(), 0);
+      });
+    } else {
+      skipped++;
+      console.log(`SKIP - ${engine}: Brief preview of a playable video -- normal player (no video this engine can both create and play)`);
+    }
+    await ctx.close();
+  }
+}
+
 const OVERSIZE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "upload-validation-check-"));
 
 if (fs.existsSync(HARNESS_DIR)) {
@@ -550,6 +672,8 @@ try {
     ["editor", "page.tsx", EDITOR_PAGE],
     ["library", "page.tsx", LIBRARY_PAGE],
     ["dialog", "page.tsx", DIALOG_PAGE],
+    ["brief", "page.tsx", BRIEF_PAGE],
+    ["brief-lightbox", "page.tsx", BRIEF_LIGHTBOX_PAGE],
   ]) {
     fs.mkdirSync(path.join(HARNESS_DIR, dir), { recursive: true });
     fs.writeFileSync(path.join(HARNESS_DIR, dir, file), source);
@@ -565,6 +689,7 @@ try {
     await partAB(engine, browser);
     await partC(engine, browser);
     await partD(engine, browser);
+    await partE(engine, browser);
   }
 } finally {
   for (const b of browsers) await b.close().catch(() => {});

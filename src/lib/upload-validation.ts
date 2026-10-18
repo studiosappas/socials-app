@@ -171,6 +171,41 @@ export const STORED_VIDEO_NOT_LOADED: UploadProblem = {
   short: "video didn't load",
 };
 
+// Brief ONLY: a reference video the browser can't play is still stored (see
+// brief-board.tsx), with this non-blocking notice at upload time...
+export const VIDEO_PREVIEW_UNAVAILABLE_UPLOADED =
+  "Video preview unavailable — This file was uploaded, but it can't be previewed in your browser. Download it to view it in a compatible application.";
+// ...and this one in its preview, next to a Download button.
+export const VIDEO_PREVIEW_UNAVAILABLE =
+  "Video preview unavailable — This file can't be previewed in your browser. Download it to view it in a compatible application.";
+
+// Whether a file's first bytes look like a real video CONTAINER (AVI, MP4 /
+// MOV / M4V / 3GP, WebM / MKV, MPEG program or transport stream, FLV,
+// WMV / ASF, Ogg). Used only by Brief, to accept a video the browser can't
+// decode as a reference attachment while still turning away a non-video
+// file merely named like one (the OS derives the MIME type from the
+// extension alone).
+//
+// A CLIENT-SIDE SAFEGUARD, NOT A SECURITY BOUNDARY: it runs in the
+// uploader's browser and can be bypassed by anyone calling the storage API
+// directly. Server-side authorization, size limits and storage policies are
+// what actually protect the bucket.
+export function isRecognisedVideoContainer(head: Uint8Array): boolean {
+  const ascii = (from: number, length: number) => String.fromCharCode(...head.subarray(from, from + length));
+  const starts = (...bytes: number[]) => head.length >= bytes.length && bytes.every((b, i) => head[i] === b);
+  if (head.length < 4) return false;
+  if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "AVI ") return true;
+  // ISO base media / QuickTime: a box type at offset 4
+  if (head.length >= 8 && ["ftyp", "moov", "mdat", "wide", "free", "skip", "pnot"].includes(ascii(4, 4))) return true;
+  if (starts(0x1a, 0x45, 0xdf, 0xa3)) return true; // EBML: WebM, Matroska
+  if (starts(0x00, 0x00, 0x01, 0xba) || starts(0x00, 0x00, 0x01, 0xb3)) return true; // MPEG-PS / MPEG video
+  if (head.length > 188 && head[0] === 0x47 && head[188] === 0x47) return true; // MPEG-TS sync bytes
+  if (ascii(0, 3) === "FLV" && head[3] === 0x01) return true;
+  if (starts(0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11)) return true; // ASF / WMV
+  if (ascii(0, 4) === "OggS") return true;
+  return false;
+}
+
 export const UNSUPPORTED_IMAGE: UploadProblem = {
   code: "image-format",
   title: "Unsupported image format",
