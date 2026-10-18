@@ -2964,7 +2964,7 @@ function MediaPickerDialog({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const [, startDeleteTransition] = useTransition();
-  const { effectiveItems, uploadError, uploadBatch, uploadFiles, deleteItem } = library;
+  const { effectiveItems, uploadBatch, uploadFiles, deleteItem } = library;
 
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
@@ -3003,7 +3003,6 @@ function MediaPickerDialog({
             >
               {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : "Upload New Asset"}
             </Button>
-            {uploadError && <p className="mt-2 text-xs text-error">{uploadError}</p>}
           </form>
         )}
 

@@ -58,7 +58,6 @@ export function useLibraryItems(
   const router = useRouter();
   const { showError } = useToast();
 
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
   function advanceUploadBatch() {
     setUploadBatch((current) => {
@@ -210,18 +209,18 @@ export function useLibraryItems(
   // shown here is exactly what the server returns after a refresh.
   const uploadFiles = useCallback(
     (selected: File[]) => {
-      setUploadError(null);
       if (selected.length === 0) return;
       // Picker, drag-and-drop and the Choose-from-library dialog all land
       // here, so this is the one place the Library's file rules apply.
       // Rejected files never get a placeholder; the rest still upload.
       const { accepted: files, rejected } = validateFiles(selected, "media");
       const failures: UploadFailure[] = [...rejected];
+      // The toast is the Library's ONE upload-error notification -- the
+      // sidebar and the Choose-from-library dialog no longer repeat it
+      // inline.
       const report = () => {
         const summary = failureSummary(failures, "media");
-        if (!summary) return;
-        setUploadError(summary);
-        showError(summary);
+        if (summary) showError(summary);
       };
       if (files.length === 0) {
         report();
@@ -373,7 +372,6 @@ export function useLibraryItems(
 
   return {
     effectiveItems,
-    uploadError,
     uploadBatch,
     uploadFiles,
     deleteItem,

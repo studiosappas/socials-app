@@ -146,7 +146,7 @@ export function MediaLibrary({
   // any events (nothing below calls its setters), so it costs an idle,
   // untouched piece of state and nothing else.
   const ownLibrary = useLibraryItems(projectId, items, pushCommand, demoMode);
-  const { effectiveItems, uploadError, uploadBatch, uploadFiles, bulkDeleteItems } = sharedLibrary ?? ownLibrary;
+  const { effectiveItems, uploadBatch, uploadFiles, bulkDeleteItems } = sharedLibrary ?? ownLibrary;
 
   // null = root view (folder tiles + unfoldered assets). Non-null = browsing
   // one folder's assets, with a "back" affordance to return to root.
@@ -343,7 +343,6 @@ export function MediaLibrary({
           >
             {uploadBatch ? `Uploading ${uploadBatch.done} / ${uploadBatch.total}` : "Upload Assets"}
           </Button>
-          {uploadError && <p className="text-xs text-error">{uploadError}</p>}
         </form>
       )}
 
