@@ -39,6 +39,7 @@
     "src/lib/upload-insert-order.test.ts",
     "src/lib/media-drop.test.ts",
     "src/lib/upload-validation.test.ts",
+    "src/lib/post-export-plan.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }
