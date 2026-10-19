@@ -8,8 +8,6 @@
 // just means no other part of the app reads it back out yet, the same
 // "reserved" state a few notification-events.ts event keys are already in.
 
-import type { createClient } from "@/lib/supabase/server";
-
 export type WorkspaceSettings = {
   language: string;
   timezone: string;
@@ -156,40 +154,3 @@ export const LANDING_PAGE_OPTIONS: { value: WorkspaceSettings["default_landing_p
   { value: "overview", label: "Overview" },
   { value: "todo", label: "To Do" },
 ];
-
-type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
-
-// Shared by the post-login redirect (lib/actions/auth.ts) AND the app
-// header's logo link (see app-header.tsx's homeHref prop) -- both need "where
-// does this user's Default Home Page setting actually point," so it lives
-// here once rather than drifting into two separate implementations.
-//
-// "projects" and "todo" are real, unambiguous global routes. The other
-// three (calendar/grid/overview) are per-project pages -- there's no single
-// right answer for a user in multiple projects, so this picks their most
-// recently created one, the same "most recent first" ordering nav-data.ts's
-// own project list already uses. Falls back to /projects for a user who
-// isn't in any project yet (nothing to land on otherwise).
-export async function resolveLandingPath(supabase: SupabaseServerClient, userId: string): Promise<string> {
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("workspace_settings")
-    .eq("id", userId)
-    .single();
-  const { default_landing_page: page } = mergeWorkspaceSettings(profile?.workspace_settings);
-
-  if (page === "projects") return "/projects";
-  if (page === "todo") return "/tasks";
-
-  const { data: memberships } = await supabase
-    .from("project_members")
-    .select("project_id, projects(created_at)")
-    .eq("user_id", userId);
-  const [mostRecent] = (memberships ?? [])
-    .filter((m): m is typeof m & { projects: { created_at: string } } => Boolean(m.projects))
-    .sort((a, b) => (a.projects.created_at < b.projects.created_at ? 1 : -1));
-  if (!mostRecent) return "/projects";
-
-  const subPath = page === "grid" ? "grid" : page === "calendar" ? "calendar" : "";
-  return `/projects/${mostRecent.project_id}${subPath ? `/${subPath}` : ""}`;
-}

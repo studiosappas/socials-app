@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import { getUserProjectLists } from "@/lib/project-lists";
 import { Avatar } from "@/components/ui/avatar";
 import { CreateProjectButton } from "./create-project-button";
 
@@ -10,68 +11,22 @@ export default async function ProjectsPage() {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Independent of each other -- neither needs the other's result.
-  const [{ data: memberships }, { data: profile }] = await Promise.all([
-    supabase
-      .from("project_members")
-      .select("role, projects(id, name, profile_photo_path, created_at)")
-      .eq("user_id", user!.id),
+  // Active projects only, in the same order as the top nav's switcher --
+  // both read getUserProjectLists (see project-lists.ts), which also owns
+  // the "a missing/failed archived check must never mean an unfiltered or
+  // silently-empty list" handling that used to live inline here.
+  const [lists, { data: profile }] = await Promise.all([
+    getUserProjectLists(user!.id),
     supabase.from("profiles").select("name, email, avatar_url").eq("id", user!.id).single(),
   ]);
-
-  const projectIds = (memberships ?? [])
-    .map((m) => m.projects?.id)
-    .filter((id): id is string => Boolean(id));
-
-  // Both isolated from the join above and from each other -- `archived` and
-  // `last_visited_at` are newer columns that may not exist yet on a
-  // not-yet-migrated database, and PostgREST fails the WHOLE embedded
-  // select (every project, not just the one flag) if any requested column
-  // -- even on a different table -- is missing. That's what made a pending
-  // migration look like "all my projects are gone" once before (see this
-  // file's git history): the entire list query was failing silently and
-  // returning nothing. Isolating each one here means a pending migration
-  // only means archived projects aren't filtered out yet, or recency
-  // ordering falls back to created-date, never that the whole list
-  // disappears.
-  const [{ data: archivedRows }, { data: visitRows }] = await Promise.all([
-    projectIds.length
-      ? supabase.from("projects").select("id, archived").in("id", projectIds)
-      : Promise.resolve({ data: [] }),
-    supabase.from("project_members").select("project_id, last_visited_at").eq("user_id", user!.id),
-  ]);
-  const archivedById = new Map((archivedRows ?? []).map((r) => [r.id, r.archived]));
-  const lastVisitedById = new Map(
-    (visitRows ?? []).map((r) => [r.project_id, r.last_visited_at as string | null]),
-  );
+  const projects = lists.ok ? lists.active : [];
 
   // Same batch/cached signed-URL helper the top nav's project switcher
   // already uses for this exact column (see nav-data.ts's
   // getUserProjectsForNav) -- one cache entry per storage path, shared
   // across pages, no per-row signing.
-  const avatarPaths = (memberships ?? [])
-    .map((m) => m.projects?.profile_photo_path)
-    .filter((p): p is string => Boolean(p));
+  const avatarPaths = projects.map((p) => p.profilePhotoPath).filter((p): p is string => Boolean(p));
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", avatarPaths);
-
-  const projects = (memberships ?? [])
-    .map((m) => ({ ...m.projects, role: m.role }))
-    .filter((p): p is NonNullable<typeof p> => Boolean(p?.id))
-    .filter((p) => !archivedById.get(p.id))
-    // Stable sort: newest-created first as the base/fallback order (matches
-    // the nav switcher's own ordering for a project this user has never
-    // visited), then most-recently-visited-by-this-user first on top of
-    // that. Array.prototype.sort is guaranteed stable, so ties (both never
-    // visited) keep the created-date order from the first pass.
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
-    .sort((a, b) => {
-      const av = lastVisitedById.get(a.id);
-      const bv = lastVisitedById.get(b.id);
-      if (!av && !bv) return 0;
-      if (!av) return 1;
-      if (!bv) return -1;
-      return av < bv ? 1 : -1;
-    });
 
   const currentUser = {
     name: profile?.name ?? user?.email ?? "You",
@@ -97,7 +52,7 @@ export default async function ProjectsPage() {
             >
               <Avatar
                 name={project.name}
-                avatarUrl={project.profile_photo_path ? (urlByPath.get(project.profile_photo_path) ?? null) : null}
+                avatarUrl={project.profilePhotoPath ? (urlByPath.get(project.profilePhotoPath) ?? null) : null}
                 size="md"
               />
               <span className="min-w-0 flex-1 truncate text-sm tracking-wide uppercase">{project.name}</span>
@@ -105,7 +60,12 @@ export default async function ProjectsPage() {
             </Link>
           </li>
         ))}
-        {projects.length === 0 && (
+        {!lists.ok && (
+          <p role="alert" className="py-4 text-sm text-error">
+            We couldn&apos;t load your projects right now. Nothing was deleted — refresh the page to try again.
+          </p>
+        )}
+        {lists.ok && projects.length === 0 && (
           <p className="py-4 text-sm text-muted">No projects yet — create one above.</p>
         )}
       </ul>

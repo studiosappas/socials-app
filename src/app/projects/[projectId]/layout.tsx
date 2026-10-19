@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { Button } from "@/components/ui/button";
 import { CurrentPageLabel } from "./nav-tabs";
@@ -33,9 +34,16 @@ export default async function ProjectLayout({
 
   const { data: project } = await supabase
     .from("projects")
-    .select("id, name")
+    .select("id, name, archived")
     .eq("id", projectId)
     .single();
+
+  // An archived project is hidden, not just unlisted -- any way back into it
+  // (a stale switcher entry, a notification or To-Do link, a bookmark, the
+  // default landing page) lands on the active Projects list instead. Owners
+  // and admins restore it from Account > Archived Projects. Public share
+  // links (/preview/{token}) live outside this segment and are unaffected.
+  if (project?.archived) redirect("/projects");
 
   // Covers both "this project doesn't exist" and "it exists but you're not
   // a member" -- RLS's own is_project_member/created_by check already makes

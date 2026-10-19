@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { canEditContent } from "@/lib/role-permissions";
+import { getUserProjectLists } from "@/lib/project-lists";
 import type { ProjectRole, TaskStatus } from "@/types/database";
 
 export type TaskSource = "manual" | "auto";
@@ -40,6 +41,9 @@ export type TaskWorkspaceData = {
   tasks: TaskItem[];
   projectsById: Map<string, { id: string; name: string; avatarUrl: string | null }>;
   membersByProject: Map<string, TeamMember[]>;
+  // True when the user's active/archived project state couldn't be read --
+  // the page shows an error instead of possibly-archived projects' data.
+  projectsLoadFailed: boolean;
 };
 
 // The one real query layer for `tasks` -- everywhere else that touches this
@@ -53,7 +57,7 @@ export async function getTasksForUser(
   // taskRows has no explicit project_id/user_id filter (RLS alone returns
   // the visible set), so it's independent of memberships -- both run in the
   // same wave instead of the task read waiting on the membership read.
-  const [{ data: memberships }, { data: taskRows }] = await Promise.all([
+  const [{ data: allMemberships }, { data: allTaskRows }, projectLists] = await Promise.all([
     supabase
       .from("project_members")
       .select("project_id, user_id, role, projects(id, name, profile_photo_path), profiles(name, avatar_url)")
@@ -63,10 +67,24 @@ export async function getTasksForUser(
       .select("id, user_id, project_id, title, due_date, status, assignee_id, source_type, source_id, created_at, updated_at")
       .order("due_date", { ascending: true, nullsFirst: false })
       .order("created_at", { ascending: true }),
+    getUserProjectLists(userId),
   ]);
 
+  // Archived projects drop out of To-Do entirely -- the project filter, the
+  // new-task project picker, and their tasks (which would otherwise link
+  // into a project that now redirects away). Restoring the project brings
+  // all of it back untouched. If the archived state couldn't be read, no
+  // project-scoped data is shown at all (the page renders an error instead)
+  // rather than an unfiltered list.
+  if (!projectLists.ok) {
+    return { tasks: [], projectsById: new Map(), membersByProject: new Map(), projectsLoadFailed: true };
+  }
+  const activeProjectIds = new Set(projectLists.active.map((p) => p.id));
+  const memberships = (allMemberships ?? []).filter((m) => activeProjectIds.has(m.project_id));
+  const taskRows = (allTaskRows ?? []).filter((t) => !t.project_id || activeProjectIds.has(t.project_id));
+
   const projectIds = Array.from(
-    new Set((memberships ?? []).map((m) => m.project_id).filter((id): id is string => Boolean(id))),
+    new Set(memberships.map((m) => m.project_id).filter((id): id is string => Boolean(id))),
   );
 
   const projectRows = new Map<string, { id: string; name: string; profile_photo_path: string | null }>();
@@ -167,7 +185,7 @@ export async function getTasksForUser(
     };
   });
 
-  return { tasks, projectsById, membersByProject };
+  return { tasks, projectsById, membersByProject, projectsLoadFailed: false };
 }
 
 export type TaskCommentItem = {
