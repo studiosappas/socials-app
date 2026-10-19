@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
+import type { ProjectRole } from "@/types/database";
 import { logActivity } from "@/lib/activity-log";
 import { NOTIFICATION_EVENTS } from "@/lib/notification-events";
 import {
@@ -320,28 +321,133 @@ export async function duplicateProject(projectId: string) {
   redirect(`/projects/${copy.id}/grid`);
 }
 
-export async function archiveProject(projectId: string) {
-  const supabase = await createClient();
-  const { error } = await supabase.from("projects").update({ archived: true }).eq("id", projectId);
-  if (error) throw new Error(error.message);
+export type ProjectLifecycleResult = { ok: true } | { ok: false; message: string };
+
+// Archive/restore/delete all change which projects appear in the top nav's
+// switcher, and that list is rendered by THREE separate layouts -- the old
+// "/projects"-only revalidation left the switcher stale on /tasks and
+// /account. These are also the only pages with a project list (Projects
+// page, To-Do's project filter, Account's Archived Projects).
+function revalidateProjectLists() {
   revalidatePath("/projects", "layout");
+  revalidatePath("/tasks", "layout");
+  revalidatePath("/account", "layout");
+}
+
+// The caller's own role in a project, read explicitly so these actions can
+// reject with a real message. RLS stays the actual enforcement, but an
+// RLS-blocked update/delete matches zero rows and returns NO error, which
+// previously let a non-admin's archive "succeed" while changing nothing.
+async function getOwnProjectRole(
+  projectId: string,
+): Promise<
+  | { supabase: Awaited<ReturnType<typeof createClient>>; error: string }
+  | { supabase: Awaited<ReturnType<typeof createClient>>; role: ProjectRole | null }
+> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { supabase, error: "You're signed out. Sign in and try again." };
+
+  const { data: membership } = await supabase
+    .from("project_members")
+    .select("role")
+    .eq("project_id", projectId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  return { supabase, role: (membership?.role ?? null) as ProjectRole | null };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Redirects to /projects on success; returns a message on failure (instead of
+// throwing, which production masks into a generic error screen).
+export async function archiveProject(projectId: string): Promise<ProjectLifecycleResult> {
+  if (!UUID_RE.test(projectId)) return { ok: false, message: "Project not found." };
+  const access = await getOwnProjectRole(projectId);
+  if ("error" in access) return { ok: false, message: access.error };
+  if (!access.role) return { ok: false, message: "Project not found." };
+  if (access.role !== "owner" && access.role !== "admin") {
+    return { ok: false, message: "Only project owners and admins can archive this project." };
+  }
+
+  const { count, error } = await access.supabase
+    .from("projects")
+    .update({ archived: true }, { count: "exact" })
+    .eq("id", projectId);
+  if (error) {
+    console.error("[settings] archive failed", error.message);
+    return { ok: false, message: "The project couldn't be archived. Please try again." };
+  }
+  if (!count) return { ok: false, message: "The project couldn't be archived. Please try again." };
+
+  revalidateProjectLists();
   redirect("/projects");
 }
 
-export async function unarchiveProject(projectId: string) {
-  const supabase = await createClient();
-  const { error } = await supabase.from("projects").update({ archived: false }).eq("id", projectId);
-  if (error) throw new Error(error.message);
-  revalidatePath(`/projects/${projectId}/settings/danger`);
-  revalidatePath("/projects", "layout");
+// Only flips `archived` back to false -- no other column, membership, file or
+// content row is touched, so everything the project had comes back as-is.
+export async function restoreProject(projectId: string): Promise<ProjectLifecycleResult> {
+  if (!UUID_RE.test(projectId)) return { ok: false, message: "Project not found." };
+  const access = await getOwnProjectRole(projectId);
+  if ("error" in access) return { ok: false, message: access.error };
+  // Non-members get the same answer as a missing project (here and in
+  // archive/delete) -- no hint that it exists.
+  if (!access.role) return { ok: false, message: "Project not found." };
+  if (access.role !== "owner" && access.role !== "admin") {
+    return { ok: false, message: "Only project owners and admins can restore this project." };
+  }
+
+  const { data: project, error: readError } = await access.supabase
+    .from("projects")
+    .select("id, archived")
+    .eq("id", projectId)
+    .maybeSingle();
+  if (readError) {
+    console.error("[settings] restore read failed", readError.message);
+    return { ok: false, message: "The project couldn't be restored. Please try again." };
+  }
+  if (!project) return { ok: false, message: "Project not found." };
+  if (!project.archived) {
+    // Already active (e.g. restored in another tab) -- same end state.
+    revalidateProjectLists();
+    return { ok: true };
+  }
+
+  const { count, error } = await access.supabase
+    .from("projects")
+    .update({ archived: false }, { count: "exact" })
+    .eq("id", projectId);
+  if (error) {
+    console.error("[settings] restore failed", error.message);
+    return { ok: false, message: "The project couldn't be restored. Please try again." };
+  }
+  if (!count) return { ok: false, message: "The project couldn't be restored. Please try again." };
+
+  revalidateProjectLists();
+  return { ok: true };
 }
 
-// RLS ("Owners can delete their project") already restricts this to owners;
-// cascading FKs across every project-scoped table remove the rest.
-export async function deleteProjectPermanently(projectId: string) {
-  const supabase = await createClient();
-  const { error } = await supabase.from("projects").delete().eq("id", projectId);
-  if (error) throw new Error(error.message);
-  revalidatePath("/projects", "layout");
+// Owner-only, matching RLS ("Owners can delete their project"); cascading
+// FKs across every project-scoped table remove the rest. Redirects to
+// /projects on success; returns a message on failure.
+export async function deleteProjectPermanently(projectId: string): Promise<ProjectLifecycleResult> {
+  if (!UUID_RE.test(projectId)) return { ok: false, message: "Project not found." };
+  const access = await getOwnProjectRole(projectId);
+  if ("error" in access) return { ok: false, message: access.error };
+  if (!access.role) return { ok: false, message: "Project not found." };
+  if (access.role !== "owner") {
+    return { ok: false, message: "Only the project owner can delete this project." };
+  }
+
+  const { count, error } = await access.supabase.from("projects").delete({ count: "exact" }).eq("id", projectId);
+  if (error) {
+    console.error("[settings] delete failed", error.message);
+    return { ok: false, message: "The project couldn't be deleted. Please try again." };
+  }
+  if (!count) return { ok: false, message: "The project couldn't be deleted. Please try again." };
+
+  revalidateProjectLists();
   redirect("/projects");
 }

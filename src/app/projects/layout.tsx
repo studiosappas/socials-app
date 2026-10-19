@@ -3,7 +3,7 @@ import { PresenceHeartbeat } from "@/components/presence-heartbeat";
 import { createClient } from "@/lib/supabase/server";
 import { getUserProjectsForNav, getUserDisplayFirstName } from "@/lib/nav-data";
 import { getRecentNotifications } from "@/lib/notifications-data";
-import { resolveLandingPath } from "@/lib/account-settings";
+import { resolveLandingPath } from "@/lib/landing-path";
 
 export default async function ProjectsShellLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();

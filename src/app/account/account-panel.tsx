@@ -2,9 +2,18 @@
 
 import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { updateAccountPassword, updateAccountProfile, updatePreferences, updateWorkspaceSettings } from "@/lib/actions/settings";
+import {
+  restoreProject,
+  updateAccountPassword,
+  updateAccountProfile,
+  updatePreferences,
+  updateWorkspaceSettings,
+} from "@/lib/actions/settings";
+import type { ProjectRole } from "@/types/database";
 import { checkFile, problemMessage, SIGNED_OUT, storageErrorProblem } from "@/lib/upload-validation";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -35,22 +44,28 @@ export function AccountPanel({
   avatarUrl,
   workspaceSettings,
   preferences,
+  archivedProjects,
 }: {
   name: string;
   email: string;
   avatarUrl: string | null;
   workspaceSettings: WorkspaceSettings;
   preferences: UserPreferences;
+  // null = couldn't be loaded (shown as an error, never as "none").
+  archivedProjects: ArchivedProject[] | null;
 }) {
   return (
     <div className="flex flex-col gap-6">
       <ProfileCard name={name} email={email} avatarUrl={avatarUrl} />
       <SecurityCard />
       <WorkspaceCard settings={workspaceSettings} />
+      <ArchivedProjectsCard projects={archivedProjects} />
       <PreferencesCard preferences={preferences} />
     </div>
   );
 }
+
+export type ArchivedProject = { id: string; name: string; role: ProjectRole; avatarUrl: string | null };
 
 // One reusable shell for every section -- title, optional description, then
 // whatever the section needs. Keeping this generic (rather than one-off
@@ -434,6 +449,91 @@ function WorkspaceCard({ settings: initial }: { settings: WorkspaceSettings }) {
           <StatusNote pending={pending} state={state} />
         </div>
       </form>
+    </SettingsCard>
+  );
+}
+
+// Owner/admin-only (filtered server-side in project-lists.ts; restoreProject
+// re-checks the role itself). Restore only flips the project's archived flag,
+// so content, files, members and permissions all come back exactly as they
+// were. The action revalidates this page, so a restored project drops out of
+// this list -- and reappears in the Projects page/switcher -- on its own.
+function ArchivedProjectsCard({ projects }: { projects: ArchivedProject[] | null }) {
+  const [isPending, startTransition] = useTransition();
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ ok: boolean; message: string; projectId?: string } | null>(null);
+
+  function handleRestore(project: ArchivedProject) {
+    setStatus(null);
+    setRestoringId(project.id);
+    startTransition(async () => {
+      const result = await restoreProject(project.id);
+      setRestoringId(null);
+      setStatus(
+        result.ok
+          ? { ok: true, message: `“${project.name}” restored — it's back in your Projects list.`, projectId: project.id }
+          : { ok: false, message: result.message },
+      );
+    });
+  }
+
+  return (
+    <SettingsCard
+      title="Archived Projects"
+      description="Projects hidden from your Projects list and switcher. Only project owners and admins can see and restore them."
+    >
+      {projects === null ? (
+        <p role="alert" className="text-sm text-error">
+          We couldn&apos;t load your archived projects right now. Refresh the page to try again.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-4">
+          {projects.length === 0 ? (
+            <p className="text-sm text-muted">
+              No archived projects. When you archive a project from its Settings › Danger Zone, it&apos;ll appear here.
+            </p>
+          ) : (
+            <ul className="flex flex-col border-t border-border">
+              {projects.map((project) => {
+                const restoring = isPending && restoringId === project.id;
+                return (
+                  <li key={project.id} className="flex items-center gap-3 border-b border-border py-3">
+                    <Avatar name={project.name} avatarUrl={project.avatarUrl} size="md" />
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="truncate text-sm tracking-wide uppercase">{project.name}</span>
+                      <span className="text-xs tracking-wide text-muted uppercase">{project.role}</span>
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() => handleRestore(project)}
+                      disabled={isPending}
+                      className="shrink-0"
+                    >
+                      {restoring ? "Restoring…" : "Restore"}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {status && (
+            <p
+              role={status.ok ? "status" : "alert"}
+              className={`animate-settle-in text-xs ${status.ok ? "text-success" : "text-error"}`}
+            >
+              {status.message}
+              {status.ok && status.projectId && (
+                <>
+                  {" "}
+                  <Link href={`/projects/${status.projectId}/overview`} className="underline underline-offset-2">
+                    Open project
+                  </Link>
+                </>
+              )}
+            </p>
+          )}
+        </div>
+      )}
     </SettingsCard>
   );
 }

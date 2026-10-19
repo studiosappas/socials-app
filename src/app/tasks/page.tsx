@@ -15,7 +15,7 @@ export default async function TodoPage() {
 
   // Independent of each other -- both only need user.id, resolved above --
   // so run them at once instead of one after another.
-  const [{ tasks, projectsById, membersByProject }, { data: profile }] = await Promise.all([
+  const [{ tasks, projectsById, membersByProject, projectsLoadFailed }, { data: profile }] = await Promise.all([
     getTasksForUser(supabase, user!.id),
     supabase.from("profiles").select("preferences").eq("id", user!.id).single(),
   ]);
@@ -36,15 +36,21 @@ export default async function TodoPage() {
         <h1 className="text-2xl font-light">Tasks</h1>
       </div>
 
-      <TaskWorkspace
-        currentUserId={user!.id}
-        tasks={tasks}
-        projects={projects}
-        membersByProject={membersByProjectPlain}
-        today={today}
-        tomorrow={tomorrow}
-        autoExpandComments={interfacePrefs.auto_expand_comments}
-      />
+      {projectsLoadFailed ? (
+        <p role="alert" className="text-sm text-error">
+          We couldn&apos;t load your tasks right now. Nothing was deleted — refresh the page to try again.
+        </p>
+      ) : (
+        <TaskWorkspace
+          currentUserId={user!.id}
+          tasks={tasks}
+          projects={projects}
+          membersByProject={membersByProjectPlain}
+          today={today}
+          tomorrow={tomorrow}
+          autoExpandComments={interfacePrefs.auto_expand_comments}
+        />
+      )}
     </main>
   );
 }

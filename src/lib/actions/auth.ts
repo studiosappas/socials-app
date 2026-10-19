@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import * as z from "zod";
 import { createClient } from "@/lib/supabase/server";
-import { resolveLandingPath } from "@/lib/account-settings";
+import { resolveLandingPath } from "@/lib/landing-path";
 
 export type AuthFormState = { message?: string } | undefined;
 

@@ -21,7 +21,7 @@ export function AppHeader({
   unreadCount?: number;
   // Where the logo links -- resolved server-side from the signed-in user's
   // Account > Workspace "Default Home Page" setting (see
-  // account-settings.ts's resolveLandingPath, shared with the post-login
+  // landing-path.ts's resolveLandingPath, shared with the post-login
   // redirect). Defaults to /projects for logged-out renders.
   homeHref?: string;
   // From profiles.name (see nav-data.ts's getUserDisplayFirstName) -- null

@@ -1,5 +1,6 @@
 import type { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import { getUserProjectLists } from "@/lib/project-lists";
 import type { ProjectRole } from "@/types/database";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
@@ -22,28 +23,27 @@ export type NavProject = {
 // getCachedSignedUrls also means the SAME cache entry (keyed by storage
 // path, not by which page asked) is shared with Grid/Overview/Tasks, which
 // each independently sign this exact same profile_photo_path.
+//
+// Active projects only, in the same order as the Projects page -- both read
+// getUserProjectLists, so the two lists can't disagree. If the archived
+// state can't be read, the switcher shows nothing rather than an unfiltered
+// list.
 export async function getUserProjectsForNav(
   supabase: SupabaseServerClient,
   userId: string,
 ): Promise<NavProject[]> {
-  const { data: memberships } = await supabase
-    .from("project_members")
-    .select("role, custom_permissions, projects(id, name, profile_photo_path, created_at)")
-    .eq("user_id", userId);
+  const lists = await getUserProjectLists(userId);
+  if (!lists.ok) return [];
 
-  const rows = (memberships ?? [])
-    .filter((m): m is typeof m & { projects: NonNullable<(typeof m)["projects"]> } => Boolean(m.projects?.id))
-    .sort((a, b) => (a.projects.created_at < b.projects.created_at ? 1 : -1));
-
-  const paths = rows.map((m) => m.projects.profile_photo_path).filter((p): p is string => Boolean(p));
+  const paths = lists.active.map((p) => p.profilePhotoPath).filter((p): p is string => Boolean(p));
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", paths);
 
-  return rows.map((m) => ({
-    id: m.projects.id,
-    name: m.projects.name,
-    avatarUrl: m.projects.profile_photo_path ? urlByPath.get(m.projects.profile_photo_path) ?? null : null,
-    role: m.role,
-    customPermissions: m.custom_permissions ?? null,
+  return lists.active.map((p) => ({
+    id: p.id,
+    name: p.name,
+    avatarUrl: p.profilePhotoPath ? urlByPath.get(p.profilePhotoPath) ?? null : null,
+    role: p.role,
+    customPermissions: p.customPermissions,
   }));
 }
 
