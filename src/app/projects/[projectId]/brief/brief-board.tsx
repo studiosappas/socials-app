@@ -56,8 +56,15 @@ import { useUndoStack, useUndoRedoShortcuts, type UndoableCommand } from "@/lib/
 import { MINI_ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
-import { generateVideoPosterBlob } from "@/lib/video-poster";
+import {
+  checkFile,
+  problemMessage,
+  serverUploadProblem,
+  UNSUPPORTED_VIDEO,
+  VIDEO_PREVIEW_UNAVAILABLE,
+  VIDEO_PREVIEW_UNAVAILABLE_UPLOADED,
+} from "@/lib/upload-validation";
+import { checkBriefVideo } from "@/lib/video-poster";
 import type { BriefFrameSection, BriefItemKind, BriefItemSection, BriefTaskStatus, BriefTaskType } from "@/types/database";
 
 export type BriefTaskItem = {
@@ -1201,6 +1208,9 @@ function ItemSection({
   const [linkError, setLinkError] = useState<string | undefined>();
   const [imagePending, setImagePending] = useState(false);
   const [imageError, setImageError] = useState<string | undefined>();
+  // Non-blocking notice (not an error): a reference video was stored but
+  // this browser can't preview it -- see checkBriefVideo.
+  const [imageNotice, setImageNotice] = useState<string | undefined>();
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const urlRef = useRef<HTMLInputElement>(null);
   const linkNotesRef = useRef<HTMLInputElement>(null);
@@ -1302,8 +1312,23 @@ function ItemSection({
     const fileName = file.name;
     const isVideo = file.type.startsWith("video/");
     setImageError(undefined);
+    setImageNotice(undefined);
     setImagePending(true);
     startTransition(async () => {
+      // Brief is the one exception to "an unplayable video never reaches
+      // storage": it keeps reference/source videos, so a recognised video
+      // container this browser can't play (e.g. an MJPEG AVI) is stored
+      // without a poster, with a non-blocking notice. Only a file that
+      // merely claims to be a video is rejected. See checkBriefVideo. The
+      // decoded frame (when there is one) is kept as the poster below, so
+      // the video is only decoded once.
+      const decoded = isVideo ? await checkBriefVideo(file) : null;
+      if (decoded?.status === "rejected") {
+        setImagePending(false);
+        setImageError(problemMessage(UNSUPPORTED_VIDEO));
+        return;
+      }
+
       // The file itself goes direct browser-to-Storage (brief-media bucket,
       // same as this app's other uploads) before the action ever runs --
       // bypasses Vercel's Function request-body limit entirely.
@@ -1317,14 +1342,15 @@ function ItemSection({
 
       // Poster generation only applies to video, and only ever runs
       // client-side (a real <video>/<canvas>, same as Grid/Post/Story --
-      // see video-poster.ts). A failure here is NOT fatal to the upload:
+      // see video-poster.ts). A missing frame is NOT fatal to the upload
+      // (an undetermined decode, e.g. a timeout, is never a rejection):
       // posterStoragePath is simply omitted, and the item still saves with
       // its video playable, just without a real poster frame -- the chip
       // falls back to a generic video icon in that case (see VideoItemChip).
       let posterStoragePath: string | null = null;
       if (isVideo) {
         try {
-          const posterBlob = await generateVideoPosterBlob(file);
+          const posterBlob = decoded?.status === "decoded" ? decoded.poster : null;
           if (posterBlob) {
             const posterFile = new File([posterBlob], "poster.jpg", { type: "image/jpeg" });
             const posterPath = newStoragePath(projectId, "poster.jpg");
@@ -1345,9 +1371,13 @@ function ItemSection({
         : await addBriefTaskImage(projectId, taskId, section, notes, position, formData);
       setImagePending(false);
       if (!result.success) {
-        setImageError(result.message ?? `Couldn't upload that ${isVideo ? "video" : "image"}.`);
+        // The save step's own text can be a raw database error -- logged,
+        // never shown.
+        console.error("[brief] media save failed", { fileName, message: result.message });
+        setImageError(problemMessage(serverUploadProblem(result.message)));
         return;
       }
+      if (decoded?.status === "preview-unavailable") setImageNotice(VIDEO_PREVIEW_UNAVAILABLE_UPLOADED);
       setPendingFile(null);
       if (imageNotesRef.current) imageNotesRef.current.value = "";
       router.refresh();
@@ -1400,13 +1430,17 @@ function ItemSection({
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
+      // Only pasted FILES are handled here -- pasted text never reaches this
+      // branch and keeps the browser's normal behavior. A pasted file that
+      // isn't an image used to be ignored silently; it now gets the shared
+      // "only images" message.
+      if (item.kind === "file") {
         const file = item.getAsFile();
         if (!file) continue;
         e.preventDefault();
-        const sizeCheck = validateUploadSize(file);
-        if (!sizeCheck.ok) {
-          setImageError(sizeCheck.message);
+        const problem = checkFile(file, "image");
+        if (problem) {
+          setImageError(problemMessage(problem));
           return;
         }
         setImageError(undefined);
@@ -1612,9 +1646,9 @@ function ItemSection({
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
                   if (file) {
-                    const sizeCheck = validateUploadSize(file);
-                    if (!sizeCheck.ok) {
-                      setImageError(sizeCheck.message);
+                    const problem = checkFile(file, "media");
+                    if (problem) {
+                      setImageError(problemMessage(problem));
                       e.target.value = "";
                       return;
                     }
@@ -1641,6 +1675,11 @@ function ItemSection({
               </Button>
             </div>
             {imageError && <p className="text-xs text-error">{imageError}</p>}
+            {imageNotice && (
+              <p role="status" className="text-xs text-muted">
+                {imageNotice}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -1874,7 +1913,25 @@ function ImageItemChip({
 // keeps the SAME visual language (full-screen dark backdrop, Escape/close
 // button, native <video controls>) without forcing Brief's arbitrary-aspect
 // videos into a box built for a different, fixed-ratio use case.
-function VideoLightbox({ url, poster, onClose }: { url: string; poster: string | null; onClose: () => void }) {
+// Exported only so scripts/upload-validation.check.mjs can mount it.
+export function VideoLightbox({
+  url,
+  poster,
+  downloadName,
+  onClose,
+}: {
+  url: string;
+  poster: string | null;
+  downloadName: string;
+  onClose: () => void;
+}) {
+  // Brief keeps reference videos this browser can't play (see
+  // checkBriefVideo), so the player can fail. When it does, this shows why
+  // and offers the original file instead of a blank player -- to anyone who
+  // can open the preview, i.e. anyone allowed to view Brief.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [unplayable, setUnplayable] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -1882,6 +1939,15 @@ function VideoLightbox({ url, poster, onClose }: { url: string; poster: string |
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+  // An error that fired before React attached onError is otherwise missed.
+  useEffect(() => {
+    if (videoRef.current?.error) setUnplayable(true);
+  }, [url]);
+
+  function handleDownload() {
+    setDownloading(true);
+    downloadAsset(url, filenameFromUrl(url, downloadName)).finally(() => setDownloading(false));
+  }
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background/98 backdrop-blur-sm">
       <button type="button" aria-label="Close" onClick={onClose} className="fixed inset-0 -z-10 cursor-default" />
@@ -1895,14 +1961,34 @@ function VideoLightbox({ url, poster, onClose }: { url: string; poster: string |
           <path d="M6 6l12 12M18 6L6 18" />
         </svg>
       </button>
-      <video
-        src={url}
-        poster={poster ?? undefined}
-        controls
-        playsInline
-        autoPlay
-        className="max-h-[86dvh] max-w-[92vw]"
-      />
+      {unplayable ? (
+        <div className="flex max-w-md flex-col items-center gap-4 px-6 text-center">
+          <span aria-hidden className="flex h-16 w-16 items-center justify-center rounded-full bg-black/10 text-3xl">
+            🎬
+          </span>
+          <p role="status" className="text-sm text-foreground">
+            {VIDEO_PREVIEW_UNAVAILABLE}
+          </p>
+          <Button type="button" variant="primary" radius="full" onClick={handleDownload} disabled={downloading} className="px-6">
+            {downloading ? "Downloading..." : "Download video"}
+          </Button>
+        </div>
+      ) : (
+        <video
+          ref={videoRef}
+          src={url}
+          poster={poster ?? undefined}
+          controls
+          playsInline
+          autoPlay
+          className="max-h-[86dvh] max-w-[92vw]"
+          onError={() => setUnplayable(true)}
+          // Loaded, but no picture this browser can decode.
+          onLoadedMetadata={(e) => {
+            if (e.currentTarget.videoWidth === 0 && e.currentTarget.videoHeight === 0) setUnplayable(true);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2065,7 +2151,7 @@ function VideoItemChip({
         </div>
       )}
       {previewOpen && currentUrl && (
-        <VideoLightbox url={currentUrl} poster={item.posterUrl} onClose={() => setPreviewOpen(false)} />
+        <VideoLightbox url={currentUrl} poster={item.posterUrl} downloadName={label || "video"} onClose={() => setPreviewOpen(false)} />
       )}
     </div>
   );

@@ -23,7 +23,7 @@ import { updateTaskStatus } from "@/lib/actions/todo";
 import { externalUrl, socialProfileUrl } from "@/lib/social-links";
 import { computeTileLayout, MAX_ORBIT_TILES, ORBIT_DOT_LAYOUT } from "@/lib/orbit-layout";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
+import { checkFile, problemMessage } from "@/lib/upload-validation";
 import type { AiInsights, Platform } from "@/types/database";
 
 const labelClass = "text-xs font-semibold tracking-wide uppercase";
@@ -258,6 +258,7 @@ function EditProfileDialog({
   const [state, action, pending] = useActionState(updateProjectProfile.bind(null, projectId), undefined);
   const [rows, setRows] = useState(() => sections.map((s) => ({ title: s.title, body: s.body })));
   const [preview, setPreview] = useState<string | null>(null);
+  const [photoError, setPhotoError] = useState<string | undefined>();
   const [selectedPlatform, setSelectedPlatform] = useState<Platform>(platform);
 
   useEffect(() => {
@@ -292,7 +293,19 @@ function EditProfileDialog({
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
-                if (file) setPreview(URL.createObjectURL(file));
+                setPhotoError(undefined);
+                if (!file) return;
+                // Checked BEFORE the form posts it: this photo travels in the
+                // Server Action body (20 MB), so a larger one used to fail
+                // with a technical error instead of a size message. Clearing
+                // the input keeps a rejected file out of the submit.
+                const problem = checkFile(file, "project-photo");
+                if (problem) {
+                  setPhotoError(problemMessage(problem));
+                  e.target.value = "";
+                  return;
+                }
+                setPreview(URL.createObjectURL(file));
               }}
             />
           </label>
@@ -303,6 +316,7 @@ function EditProfileDialog({
             className="flex-1 border-0 border-b border-border bg-transparent py-1 text-lg focus:border-foreground focus:outline-none"
           />
         </div>
+        {photoError && <p className="-mt-3 text-xs text-error">{photoError}</p>}
 
         <label className="flex flex-col gap-1.5">
           <span className={labelClass}>@Username</span>
@@ -943,9 +957,9 @@ function BrandKnowledgeDialog({
             onChange={(e) => {
               const file = e.target.files?.[0] ?? null;
               if (file) {
-                const sizeCheck = validateUploadSize(file);
-                if (!sizeCheck.ok) {
-                  setUploadError(sizeCheck.message);
+                const problem = checkFile(file, "brand-document");
+                if (problem) {
+                  setUploadError(problemMessage(problem));
                   e.target.value = "";
                   return;
                 }

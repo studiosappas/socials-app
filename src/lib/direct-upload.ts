@@ -1,7 +1,7 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
-import { tooLargeMessage } from "@/lib/upload-limits";
+import { problemMessage, storageErrorProblem, type UploadProblem } from "@/lib/upload-validation";
 
 // Uploads straight to Supabase Storage from the browser -- bypasses the
 // Server Action entirely (and therefore Vercel's hard, non-configurable
@@ -11,20 +11,25 @@ import { tooLargeMessage } from "@/lib/upload-limits";
 // action already used (${projectId}/${uuid}.ext), so the existing RLS
 // policies -- already scoped by that same path prefix -- apply completely
 // unchanged; this is a transport change, not a security change.
+//
+// Never surfaces Supabase's own raw error text. `problem` says WHY it failed
+// (too large / not allowed / network / server -- see storageErrorProblem),
+// and `error` is the same thing as one ready-to-show message.
 export async function uploadFileDirect(
   bucket: string,
   path: string,
   file: File,
-): Promise<{ path: string } | { error: string }> {
-  const supabase = createClient();
-  const { error } = await supabase.storage.from(bucket).upload(path, file, { contentType: file.type });
-  if (error) {
-    // Never surface Supabase's own raw error text (e.g. its own oversize
-    // message, or a raw network/HTTP error) directly to the user.
-    const message = error.message.toLowerCase().includes("size") ? tooLargeMessage() : "Couldn't upload this file. Please try again.";
-    return { error: message };
+): Promise<{ path: string } | { error: string; problem: UploadProblem }> {
+  let problem: UploadProblem | null = null;
+  try {
+    const supabase = createClient();
+    const { error } = await supabase.storage.from(bucket).upload(path, file, { contentType: file.type });
+    if (error) problem = storageErrorProblem(error as { message?: string; statusCode?: string | number });
+  } catch (error) {
+    // A thrown fetch failure is a network problem, never a bad file.
+    problem = storageErrorProblem({ message: error instanceof Error ? `network: ${error.message}` : "network" });
   }
-  return { path };
+  return problem ? { error: problemMessage(problem), problem } : { path };
 }
 
 // Same convention every upload action already used server-side --

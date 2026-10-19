@@ -27,7 +27,8 @@ import {
   uploadStoryFrame,
 } from "@/lib/actions/stories";
 import { SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { uploadFilesAndSummarize } from "@/lib/video-poster";
+import { problemMessage, serverUploadProblem } from "@/lib/upload-validation";
 import { downloadAssetsAsZip, filenameFromUrl, shareOriginalAssets } from "@/lib/download-zip";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { convertToTask } from "@/lib/actions/todo";
@@ -446,12 +447,14 @@ function UploadFrameTile({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs (uploadFilesWithPosters rejects it client-side).
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  // Every upload failure -- each file rejected before the Server Action
+  // runs (named in one summary) and the save step's own failure -- is ONE
+  // dismissible upload-error toast; no inline copy.
+  const { showUploadError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
+    else if (state?.message) showUploadError(problemMessage(serverUploadProblem(state.message)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
@@ -467,9 +470,10 @@ function UploadFrameTile({
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           e.target.value = "";
-          setUploadError(null);
           if (files.length > 0) {
-            uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+            void uploadFilesAndSummarize(projectId, action, files, "media").then((summary) => {
+              if (summary) showUploadError(summary);
+            });
           }
         }}
       />
@@ -482,9 +486,6 @@ function UploadFrameTile({
       >
         {pending ? "…" : "+"}
       </button>
-      {(uploadError || state?.message) && (
-        <p className="text-xs text-error">{uploadError || state?.message}</p>
-      )}
     </form>
   );
 }

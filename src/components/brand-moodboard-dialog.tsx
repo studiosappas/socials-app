@@ -8,7 +8,7 @@ import { uploadMoodboardItem, addMoodboardLink, deleteMoodboardItem } from "@/li
 import { useCustomFonts } from "@/lib/use-custom-fonts";
 import { deriveCustomFontFaces, type BrandMoodboardItem } from "@/lib/data/brand-moodboard";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
+import { checkFile, problemMessage, serverUploadProblem } from "@/lib/upload-validation";
 import type { BrandMoodboardCategory } from "@/types/database";
 
 const FONT_WEIGHT_OPTIONS = [
@@ -96,17 +96,19 @@ export function BrandMoodboardDialog({
     if (!file) return;
     setError(undefined);
 
+    // Fonts are checked as soon as they're chosen (it used to wait until
+    // "Add"), everything else against the moodboard's images-and-PDFs rule.
+    const problem = checkFile(file, category === "font" ? "font" : "moodboard");
+    if (problem) {
+      setError(problemMessage(problem));
+      return;
+    }
+
     if (category === "font") {
       setPendingFontFile(file);
       setFontName(file.name.replace(/\.[^./]+$/, "").trim());
       setFontWeight("400");
       setFontStyle("normal");
-      return;
-    }
-
-    const sizeCheck = validateUploadSize(file);
-    if (!sizeCheck.ok) {
-      setError(sizeCheck.message);
       return;
     }
 
@@ -122,7 +124,10 @@ export function BrandMoodboardDialog({
       const result = await uploadMoodboardItem(projectId, category, file.name, uploaded.path, file.name);
       setUploading(false);
       if (!result.success) {
-        setError(result.message ?? "Couldn't upload.");
+        // The save step's own text can be a raw database error -- logged,
+        // never shown.
+        console.error("[moodboard] save failed", result.message);
+        setError(problemMessage(serverUploadProblem(result.message)));
         return;
       }
       router.refresh();
@@ -134,19 +139,12 @@ export function BrandMoodboardDialog({
     if (!pendingFontFile || !fontName.trim() || uploading) return;
     setError(undefined);
 
-    // Same check uploadMoodboardItem makes server-side -- duplicated (not
-    // imported) since a "use server" file can only export async functions,
-    // never a plain constant. Catching it here avoids uploading a file to
-    // Storage that's certain to be rejected right after.
-    const fontExt = pendingFontFile.name.includes(".") ? pendingFontFile.name.split(".").pop()?.toLowerCase() : undefined;
-    if (!fontExt || !["ttf", "otf", "woff", "woff2"].includes(fontExt)) {
-      setError("Unsupported font file -- use .woff, .woff2, .ttf, or .otf.");
-      return;
-    }
-
-    const sizeCheck = validateUploadSize(pendingFontFile);
-    if (!sizeCheck.ok) {
-      setError(sizeCheck.message);
+    // Same extension rule uploadMoodboardItem enforces server-side (shared
+    // via upload-validation.ts's "font" context). Catching it here avoids
+    // uploading a file to Storage that's certain to be rejected right after.
+    const problem = checkFile(pendingFontFile, "font");
+    if (problem) {
+      setError(problemMessage(problem));
       return;
     }
 
@@ -166,7 +164,8 @@ export function BrandMoodboardDialog({
       });
       setUploading(false);
       if (!result.success) {
-        setError(result.message ?? "Couldn't upload font.");
+        console.error("[moodboard] font save failed", result.message);
+        setError(problemMessage(serverUploadProblem(result.message)));
         return;
       }
       setPendingFontFile(null);

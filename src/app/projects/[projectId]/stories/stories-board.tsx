@@ -13,7 +13,9 @@ import {
   type ActionResult,
 } from "@/lib/actions/stories";
 import { createShareLink } from "@/lib/actions/share-links";
-import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { uploadFilesAndSummarize } from "@/lib/video-poster";
+import { problemMessage, serverUploadProblem } from "@/lib/upload-validation";
+import { useToast } from "@/lib/hooks/use-toast";
 import { StoryCard } from "./story-card";
 import { ShareMenuButton } from "../share-menu";
 import { Button } from "@/components/ui/button";
@@ -722,22 +724,26 @@ function UploadAssetsZone({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragDepth = useRef(0);
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs (uploadFilesWithPosters rejects it client-side).
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  // Every upload failure -- each file rejected before the Server Action
+  // runs (named in one summary) and the save step's own failure -- is ONE
+  // dismissible upload-error toast; no inline copy.
+  const { showUploadError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
+    else if (state?.message) showUploadError(problemMessage(serverUploadProblem(state.message)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
+  // Picker and drag-and-drop alike. Unsupported files used to be filtered
+  // out of a drop silently; the shared "content" rules now reject and name
+  // them while the rest upload.
   function handleFiles(fileList: FileList | File[]) {
-    const files = Array.from(fileList).filter(
-      (f) => f.type.startsWith("image/") || f.type.startsWith("video/") || f.type === "application/pdf",
-    );
-    setUploadError(null);
+    const files = Array.from(fileList);
     if (files.length > 0) {
-      uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+      void uploadFilesAndSummarize(projectId, action, files, "content").then((summary) => {
+        if (summary) showUploadError(summary);
+      });
     }
   }
 
@@ -803,9 +809,6 @@ function UploadAssetsZone({
         </span>
       </button>
       {children}
-      {(uploadError || state?.message) && (
-        <p className="col-span-full text-xs text-error">{uploadError || state?.message}</p>
-      )}
     </div>
   );
 }

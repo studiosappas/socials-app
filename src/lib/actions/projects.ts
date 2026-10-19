@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { inviteMember } from "@/lib/actions/members";
+import { problemMessage, storageErrorProblem } from "@/lib/upload-validation";
 import type { ProjectRole } from "@/types/database";
 
 export type CreateProjectResult =
@@ -94,7 +95,9 @@ export async function setProjectAvatar(
     .from("project-media")
     .upload(storagePath, photo, { contentType: photo.type, upsert: true });
   if (uploadError) {
-    return { message: uploadError.message };
+    // Classified like every other upload -- never the raw storage text.
+    console.error("[projects] project photo upload failed", uploadError.message);
+    return { message: problemMessage(storageErrorProblem(uploadError)) };
   }
 
   const { error } = await supabase.from("projects").update({ profile_photo_path: storagePath }).eq("id", projectId);
@@ -205,7 +208,9 @@ export async function updateProjectProfile(
       .upload(storagePath, photo, { contentType: photo.type, upsert: true });
 
     if (uploadError) {
-      return { message: uploadError.message };
+      // Classified like every other upload -- never the raw storage text.
+      console.error("[projects] project photo upload failed", uploadError.message);
+      return { message: problemMessage(storageErrorProblem(uploadError)) };
     }
 
     update.profile_photo_path = storagePath;

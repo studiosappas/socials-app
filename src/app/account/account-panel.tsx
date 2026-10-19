@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { updateAccountPassword, updateAccountProfile, updatePreferences, updateWorkspaceSettings } from "@/lib/actions/settings";
-import { validateUploadSize, tooLargeMessage } from "@/lib/upload-limits";
+import { checkFile, problemMessage, SIGNED_OUT, storageErrorProblem } from "@/lib/upload-validation";
 import { createClient } from "@/lib/supabase/client";
 import {
   DATE_FORMAT_OPTIONS,
@@ -154,9 +154,9 @@ function ProfileCard({
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
     if (file) {
-      const sizeCheck = validateUploadSize(file);
-      if (!sizeCheck.ok) {
-        setUploadError(sizeCheck.message);
+      const problem = checkFile(file, "image");
+      if (problem) {
+        setUploadError(problemMessage(problem));
         e.target.value = "";
         return;
       }
@@ -193,7 +193,7 @@ function ProfileCard({
         } = await supabase.auth.getUser();
         if (!user) {
           setUploading(false);
-          setUploadError("Not signed in.");
+          setUploadError(problemMessage(SIGNED_OUT));
           return;
         }
         const ext = avatarFile.name.includes(".") ? avatarFile.name.split(".").pop() : undefined;
@@ -203,11 +203,9 @@ function ProfileCard({
           .upload(path, avatarFile, { contentType: avatarFile.type, upsert: true });
         setUploading(false);
         if (supabaseUpload.error) {
-          setUploadError(
-            supabaseUpload.error.message.toLowerCase().includes("size")
-              ? tooLargeMessage()
-              : "Couldn't upload this photo. Please try again.",
-          );
+          // Same classification as every other upload: too large / not
+          // allowed / network / server -- never the raw storage text.
+          setUploadError(problemMessage(storageErrorProblem(supabaseUpload.error as { message?: string; statusCode?: string })));
           return;
         }
         formData.set("avatar_storage_path", path);

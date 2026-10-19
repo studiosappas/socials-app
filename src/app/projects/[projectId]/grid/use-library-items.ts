@@ -10,6 +10,14 @@ import {
   type UploadMediaState,
 } from "@/lib/actions/grid";
 import { uploadFilesConcurrently, type ConcurrentUploadOutcome } from "@/lib/video-poster";
+import {
+  failureSummary,
+  serverUploadProblem,
+  uploadServerProblem,
+  validateFiles,
+  type UploadFailure,
+  type UploadProblem,
+} from "@/lib/upload-validation";
 import { useToast } from "@/lib/hooks/use-toast";
 import { createInsertSequencer, insertOrderForNewestFirst } from "@/lib/upload-insert-order";
 import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
@@ -48,9 +56,8 @@ export function useLibraryItems(
   demoMode: boolean,
 ) {
   const router = useRouter();
-  const { showError } = useToast();
+  const { showError, showUploadError } = useToast();
 
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadBatch, setUploadBatch] = useState<{ total: number; done: number } | null>(null);
   function advanceUploadBatch() {
     setUploadBatch((current) => {
@@ -87,7 +94,10 @@ export function useLibraryItems(
   // therefore sorts above it, matching where its placeholders were shown).
   const [insertSequencer] = useState(createInsertSequencer);
 
-  function handleUploadResult(outcome: ConcurrentUploadOutcome<UploadMediaState>) {
+  // Failures are collected per batch (`failures`) and reported ONCE when the
+  // batch ends, naming every file -- the toast has a single slot, so one
+  // toast per failed file used to leave only the last one visible.
+  function handleUploadResult(outcome: ConcurrentUploadOutcome<UploadMediaState>, failures: UploadFailure[]) {
     // First, before any early return below -- every outcome (success OR
     // failure) must free this file's insert turn or later uploads would
     // wait on it forever.
@@ -95,9 +105,8 @@ export function useLibraryItems(
     endMutation();
     advanceUploadBatch();
 
-    function failThisFile(message: string) {
-      setUploadError(message);
-      showError(message);
+    function failThisFile(problem: UploadProblem) {
+      failures.push({ fileName: outcome.fileName, problem });
       const failed = itemsRef.current.find((i) => i.id === outcome.tempId);
       if (failed?.url && pendingBlobUrlsRef.current.has(failed.url)) {
         pendingBlobUrlsRef.current.delete(failed.url);
@@ -107,17 +116,20 @@ export function useLibraryItems(
     }
 
     if (outcome.status === "error") {
-      failThisFile(outcome.message);
+      failThisFile(outcome.problem);
       return;
     }
     if (outcome.result?.message) {
-      failThisFile(outcome.result.message);
+      // The save step's own text can be a raw database error -- logged,
+      // never shown; a reliable "signed out" becomes the sign-in message.
+      console.error("[media-library] upload save failed", { fileName: outcome.fileName, message: outcome.result.message });
+      failThisFile(serverUploadProblem(outcome.result.message));
       return;
     }
 
     const result = outcome.result;
     if (!result?.id) {
-      failThisFile("Upload didn't complete. Please try again.");
+      failThisFile(uploadServerProblem());
       return;
     }
     const tempId = outcome.tempId;
@@ -196,9 +208,24 @@ export function useLibraryItems(
   // reverse of selection order (see insertOrderForNewestFirst), so the order
   // shown here is exactly what the server returns after a refresh.
   const uploadFiles = useCallback(
-    (files: File[]) => {
-      setUploadError(null);
-      if (files.length === 0) return;
+    (selected: File[]) => {
+      if (selected.length === 0) return;
+      // Picker, drag-and-drop and the Choose-from-library dialog all land
+      // here, so this is the one place the Library's file rules apply.
+      // Rejected files never get a placeholder; the rest still upload.
+      const { accepted: files, rejected } = validateFiles(selected, "media");
+      const failures: UploadFailure[] = [...rejected];
+      // The toast is the Library's ONE upload-error notification -- the
+      // sidebar and the Choose-from-library dialog no longer repeat it
+      // inline.
+      const report = () => {
+        const summary = failureSummary(failures, "media");
+        if (summary) showUploadError(summary);
+      };
+      if (files.length === 0) {
+        report();
+        return;
+      }
       const optimistic = files.map((file) => {
         const url = URL.createObjectURL(file);
         pendingBlobUrlsRef.current.add(url);
@@ -234,9 +261,9 @@ export function useLibraryItems(
           if (typeof tempId === "string") await insertSequencer.waitTurn(tempId);
           return uploadMedia(projectId, undefined, formData);
         },
-        handleUploadResult,
+        (outcome) => handleUploadResult(outcome, failures),
         UPLOAD_CONCURRENCY,
-      );
+      ).then(report);
     },
     // handleUploadResult and beginMutation close over stable/current values
     // already (itemsRef, functional setState); intentionally not listed to
@@ -345,7 +372,6 @@ export function useLibraryItems(
 
   return {
     effectiveItems,
-    uploadError,
     uploadBatch,
     uploadFiles,
     deleteItem,

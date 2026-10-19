@@ -29,9 +29,9 @@ import {
 } from "@/lib/actions/posts";
 import { saveMediaAssetAnnotation, saveMediaAssetPosterAnnotation } from "@/lib/actions/media";
 import { updatePostCoverTransform } from "@/lib/actions/grid";
-import { uploadFilesWithPosters } from "@/lib/video-poster";
+import { probeVideoFile, uploadFilesAndSummarize } from "@/lib/video-poster";
+import { checkFile, problemMessage, serverUploadProblem, UNSUPPORTED_VIDEO } from "@/lib/upload-validation";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
-import { validateUploadSize } from "@/lib/upload-limits";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
 import { filenameFromUrl, shareOrDownloadAsset, shareOriginalAssets } from "@/lib/download-zip";
 import { saveAs } from "file-saver";
@@ -1278,14 +1278,21 @@ function ReplaceMenu({
     e.target.value = "";
     if (!file) return;
 
-    const sizeCheck = validateUploadSize(file);
-    if (!sizeCheck.ok) {
-      setError(sizeCheck.message);
+    const problem = checkFile(file, "media");
+    if (problem) {
+      setError(problemMessage(problem));
       return;
     }
 
     setPending(true);
     setError(undefined);
+    // Same rule as every other upload: a video the browser definitely can't
+    // play never reaches storage.
+    if (file.type.startsWith("video/") && (await probeVideoFile(file)).status === "unsupported") {
+      setPending(false);
+      setError(problemMessage(UNSUPPORTED_VIDEO));
+      return;
+    }
     const path = newStoragePath(projectId, file.name);
     const uploaded = await uploadFileDirect("project-media", path, file);
     if ("error" in uploaded) {
@@ -1370,12 +1377,14 @@ function UploadAssetTile({
   );
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Surfaces a too-large/direct-upload-failed file before the Server Action
-  // ever runs (uploadFilesWithPosters rejects it client-side).
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  // Every upload failure -- each file rejected before the Server Action
+  // runs (named in one summary) and the save step's own failure -- is ONE
+  // dismissible upload-error toast; no inline copy.
+  const { showUploadError } = useToast();
 
   useEffect(() => {
     if (state?.success) onUploaded();
+    else if (state?.message) showUploadError(problemMessage(serverUploadProblem(state.message)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
@@ -1391,9 +1400,10 @@ function UploadAssetTile({
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           e.target.value = "";
-          setUploadError(null);
           if (files.length > 0) {
-            uploadFilesWithPosters(projectId, action, files, (_name, message) => setUploadError(message));
+            void uploadFilesAndSummarize(projectId, action, files, "media").then((summary) => {
+              if (summary) showUploadError(summary);
+            });
           }
         }}
       />
@@ -1406,9 +1416,6 @@ function UploadAssetTile({
       >
         {pending ? "…" : "+"}
       </button>
-      {(uploadError || state?.message) && (
-        <p className="text-xs text-error">{uploadError || state?.message}</p>
-      )}
     </form>
   );
 }

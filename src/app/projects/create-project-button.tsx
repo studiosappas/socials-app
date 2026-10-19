@@ -6,6 +6,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Avatar } from "@/components/ui/avatar";
 import { useToast } from "@/lib/hooks/use-toast";
+import { checkFile, problemMessage } from "@/lib/upload-validation";
 import { createProjectWithSetup, setProjectAvatar } from "@/lib/actions/projects";
 import { INVITABLE_ROLES, ROLE_DESCRIPTION, ROLE_LABEL } from "@/lib/role-permissions";
 import type { ProjectRole } from "@/types/database";
@@ -22,7 +23,7 @@ export function CreateProjectButton({
   currentUser: { name: string; email: string; avatarUrl: string | null };
 }) {
   const router = useRouter();
-  const { showError } = useToast();
+  const { showError, showUploadError } = useToast();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -100,7 +101,7 @@ export function CreateProjectButton({
           avatarFormData.set("avatar", imageFile);
           const avatarResult = await setProjectAvatar(result.projectId, undefined, avatarFormData);
           if (avatarResult?.message) {
-            showError(`Project created, but the image couldn't be saved: ${avatarResult.message}`);
+            showUploadError(`Project created, but the image couldn't be saved: ${avatarResult.message}`);
           }
         }
 
@@ -161,6 +162,15 @@ export function CreateProjectButton({
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) {
+                    // This photo is saved through a Server Action (20 MB),
+                    // so it's checked here, before the project is created.
+                    const problem = checkFile(file, "project-photo");
+                    if (problem) {
+                      setError(problemMessage(problem));
+                      e.target.value = "";
+                      return;
+                    }
+                    setError(null);
                     setImageFile(file);
                     setImagePreview(URL.createObjectURL(file));
                   }
