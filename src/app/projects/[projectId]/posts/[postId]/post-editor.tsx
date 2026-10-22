@@ -19,7 +19,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   addPostAsset,
   addPostLink,
-  loadMorePostMediaLibrary,
+  loadPostMediaLibraryPage,
   removePostAsset,
   removePostLink,
   reorderPostAssets,
@@ -49,6 +49,7 @@ import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { useToast } from "@/lib/hooks/use-toast";
+import { appendLibraryPage, reconcileFirstPage, type LibraryPage } from "@/lib/media-library-paging";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { ScheduleTimeField } from "@/components/ui/schedule-time-field";
@@ -161,7 +162,7 @@ export function PostEditor({
   // ReplaceAssetPopover below actually consume it (via use()), each
   // suspending in its own small boundary, so the primary editor (post
   // fields, asset carousel, links, save) never waits on it.
-  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
+  mediaLibraryPromise: Promise<LibraryPage<MediaLibraryItem>>;
   canManage: boolean;
   // Raw role, alongside canManage -- only consumed by PostMainForm, to
   // offer Client their own narrow Approval Status control. Every other
@@ -628,6 +629,10 @@ export function PostEditor({
       {canManage && (
         <Suspense fallback={null}>
           <AddFromLibrarySection
+            // Keyed on the project: opening another project's post must
+            // start from that project's own first page, never fold it into
+            // this one's already-loaded pages.
+            key={projectId}
             projectId={projectId}
             mediaLibraryPromise={mediaLibraryPromise}
             usedMediaIds={usedMediaIds}
@@ -686,14 +691,11 @@ export function PostEditor({
 // changes what a click here means (see onAdd/handleLibraryItemClick in
 // PostEditor) and adds a minimal visual cue -- everything else about how
 // this section looks and behaves is exactly what it always was.
-// Must match lib/data/posts.ts's own MEDIA_LIBRARY_PAGE_SIZE -- can't
-// import that constant directly (it lives in a server-only data module,
-// not a "use server" actions file, so importing it here would pull
-// server-only code into the client bundle). Only used as a "did the last
-// page come back full" heuristic for whether to show Load More at all;
-// being off by one page here would just show/hide that button a page
-// late, never lose or duplicate any actual media.
-const LIBRARY_PAGE_SIZE = 24;
+// Minimum gap between two focus-triggered first-page refreshes (see
+// AddFromLibrarySection) -- switching tabs back and forth shouldn't refetch
+// and re-sign a page every time.
+const LIBRARY_REFRESH_MIN_INTERVAL_MS = 10_000;
+const EMPTY_LIBRARY_PAGE: LibraryPage<MediaLibraryItem> = { entries: [], nextCursor: null, hasMore: false };
 
 function AddFromLibrarySection({
   projectId,
@@ -705,35 +707,84 @@ function AddFromLibrarySection({
   sectionRef,
 }: {
   projectId: string;
-  mediaLibraryPromise: Promise<MediaLibraryItem[]>;
+  mediaLibraryPromise: Promise<LibraryPage<MediaLibraryItem>>;
   usedMediaIds: Set<string>;
   hideBackLink: boolean;
   onAdd: (item: MediaLibraryItem) => void;
   replaceActive: boolean;
   sectionRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const initialMediaLibrary = use(mediaLibraryPromise);
-  // Progressive pages beyond the first -- appended locally as Load More
-  // resolves each one, never re-fetching pages already loaded. Seeded
-  // from the Suspense-resolved first page; a genuinely different
-  // mediaLibraryPromise (a fresh post/project) remounts this whole
-  // component via Suspense, so this never goes stale against a prop
-  // change the way a plain prop-derived value could.
-  const [mediaLibrary, setMediaLibrary] = useState(initialMediaLibrary);
-  const [hasMoreMedia, setHasMoreMedia] = useState(initialMediaLibrary.length === LIBRARY_PAGE_SIZE);
+  const initialPage = use(mediaLibraryPromise);
+  // Pages loaded so far, keyset-paged (lib/media-library-paging.ts):
+  // nextCursor/hasMore always come from the server's RAW position, never
+  // from how many items are visible here -- the old count-based version hid
+  // Load More as soon as an archived row landed in the first page.
+  const [library, setLibrary] = useState(() => appendLibraryPage(EMPTY_LIBRARY_PAGE, initialPage));
+  // A router.refresh() (e.g. after the "+" upload tile, or any media change
+  // on this post) re-renders the page and delivers a NEW first page without
+  // remounting this component -- so useState above would otherwise keep the
+  // old snapshot forever. Folded in during render (this codebase's own
+  // convention for syncing state to a changed prop), keeping any older
+  // pages already loaded.
+  const [prevInitialPage, setPrevInitialPage] = useState(initialPage);
+  if (initialPage !== prevInitialPage) {
+    setPrevInitialPage(initialPage);
+    setLibrary(reconcileFirstPage(library, initialPage));
+  }
   const [loadingMore, setLoadingMore] = useState(false);
+  const { showError } = useToast();
+  const mediaLibrary = library.entries.map((e) => e.item);
+  const hasMoreMedia = library.hasMore;
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
   async function handleLoadMore() {
+    if (loadingMore || !library.hasMore) return;
+    const requestedCursor = library.nextCursor;
     setLoadingMore(true);
     try {
-      const result = await loadMorePostMediaLibrary(projectId, mediaLibrary.length);
-      setMediaLibrary((current) => [...current, ...result.items]);
-      setHasMoreMedia(result.hasMore);
+      const page = await loadPostMediaLibraryPage(projectId, requestedCursor);
+      // Applied only if nothing moved the cursor in the meantime (a
+      // first-page refresh landing mid-request) -- otherwise this page was
+      // fetched from a stale position; the button stays for another try.
+      setLibrary((current) => (current.nextCursor === requestedCursor ? appendLibraryPage(current, page) : current));
+    } catch (error) {
+      console.error("Failed to load more media:", error);
+      showError("Couldn't load more media. Please try again.");
     } finally {
       setLoadingMore(false);
     }
   }
+
+  // Uploads made elsewhere while this editor stays open (the Library in
+  // another tab, another team member) -- re-fetch just the first page when
+  // the tab regains focus and fold it in, same reconcile as a refresh.
+  // Throttled; a failure keeps what's already shown.
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+    let lastRefreshAt = Date.now();
+    function refreshFirstPage() {
+      if (document.visibilityState !== "visible" || inFlight) return;
+      if (Date.now() - lastRefreshAt < LIBRARY_REFRESH_MIN_INTERVAL_MS) return;
+      inFlight = true;
+      lastRefreshAt = Date.now();
+      loadPostMediaLibraryPage(projectId, null)
+        .then((fresh) => {
+          if (!cancelled) setLibrary((current) => reconcileFirstPage(current, fresh));
+        })
+        .catch((error) => console.error("Failed to refresh the media library:", error))
+        .finally(() => {
+          inFlight = false;
+        });
+    }
+    window.addEventListener("focus", refreshFirstPage);
+    document.addEventListener("visibilitychange", refreshFirstPage);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", refreshFirstPage);
+      document.removeEventListener("visibilitychange", refreshFirstPage);
+    };
+  }, [projectId]);
 
   // Fixes the SAME bug at sm:+ widths that media-library.tsx's own
   // --tile-row-h/wide-mode comment documents (and that THIS grid's own

@@ -21,8 +21,8 @@ export default async function InterceptedPostPage({
   // PostEditor suspend on this promise, each in their own boundary. Only
   // the FIRST page -- see getPostMediaLibraryPage's own comment --
   // AddFromLibrarySection's own Load More button pages through
-  // loadMorePostMediaLibrary for the rest.
-  const mediaLibraryPromise = getPostMediaLibraryPage(projectId, 0, MEDIA_LIBRARY_PAGE_SIZE).then((r) => r.items);
+  // loadPostMediaLibraryPage for the rest.
+  const mediaLibraryPromise = getPostMediaLibraryPage(projectId, null, MEDIA_LIBRARY_PAGE_SIZE);
 
   return (
     <Modal>

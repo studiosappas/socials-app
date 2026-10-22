@@ -41,6 +41,7 @@
     "src/lib/upload-validation.test.ts",
     "src/lib/post-export-plan.test.ts",
     "src/lib/project-list-filter.test.ts",
+    "src/lib/media-library-paging.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }
