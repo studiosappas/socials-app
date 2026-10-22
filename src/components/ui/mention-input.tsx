@@ -132,7 +132,7 @@ export function MentionField({
         <input type="text" {...sharedProps} />
       )}
       {mention && matches.length > 0 && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-56 max-w-[80vw] rounded-none border border-border bg-background shadow-[0_4px_20px_rgba(0,0,0,0.1)]">
+        <div className="absolute left-0 top-full z-20 mt-1 w-56 max-w-[80vw] rounded-none border border-border bg-background text-foreground shadow-[0_4px_20px_rgba(0,0,0,0.1)]">
           {matches.map((m, i) => (
             <button
               key={m.id}

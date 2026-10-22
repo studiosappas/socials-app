@@ -689,19 +689,35 @@ const DayCell = memo(function DayCell({
       className={`flex min-w-0 flex-col items-start gap-1 overflow-hidden border p-1 text-left text-xs transition-[background-color,border-color,min-height] duration-200 sm:p-2 ${
         isExpanded ? "min-h-40 sm:min-h-56" : "min-h-16 sm:min-h-24"
       } ${
-        hasContent
-          ? cell.isCurrentMonth
-            ? "border-border"
-            : "border-black/5 text-muted"
-          : cell.isCurrentMonth
-            ? "border-dashed border-border"
-            : "border-dashed border-black/5 text-muted"
-      } ${cell.isToday ? "outline outline-2 outline-offset-[-2px] outline-foreground" : ""} ${
         // Every item in the day is Published -- the "completed day" dark
         // read-at-a-glance state. A mix of published/unpublished items keeps
         // the cell's normal border/background; each tile still shows its own
-        // published state individually (see ExpandedItemTile).
-        allPublished ? "border-foreground bg-foreground text-background" : isOver ? "bg-black/[.04]" : "hover:bg-black/[.02]"
+        // published state individually (see ExpandedItemTile). Exclusive of
+        // the normal branches below rather than appended after them: an
+        // outside-the-month day used to get BOTH text-muted and
+        // text-background, two conflicting color utilities, and which one won
+        // depended on stylesheet order, not on this class string. Outside the
+        // month it is softened (bg-foreground/80) instead of muted, which
+        // keeps its text readable.
+        allPublished
+          ? cell.isCurrentMonth
+            ? "border-foreground bg-foreground text-background"
+            : "border-foreground/80 bg-foreground/80 text-background"
+          : `${
+              hasContent
+                ? cell.isCurrentMonth
+                  ? "border-border"
+                  : "border-black/5 text-muted"
+                : cell.isCurrentMonth
+                  ? "border-dashed border-border"
+                  : "border-dashed border-black/5 text-muted"
+            } ${isOver ? "bg-black/[.04]" : "hover:bg-black/[.02]"}`
+      } ${
+        // Inset outline -- drawn inside the cell, so on a published day's
+        // bg-foreground it has to invert too or today's ring disappears.
+        cell.isToday
+          ? `outline outline-2 outline-offset-[-2px] ${allPublished ? "outline-background/70" : "outline-foreground"}`
+          : ""
       }`}
     >
       <div className="flex w-full shrink-0 items-center justify-between">
@@ -732,7 +748,9 @@ const DayCell = memo(function DayCell({
               }
             }}
             title="Day options"
-            className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted before:absolute before:-inset-2 before:content-[''] sm:hidden"
+            className={`relative flex h-5 w-5 shrink-0 items-center justify-center rounded before:absolute before:-inset-2 before:content-[''] sm:hidden ${
+              allPublished ? "text-background/70" : "text-muted"
+            }`}
           >
             ⋮
           </span>
@@ -755,7 +773,7 @@ const DayCell = memo(function DayCell({
           onClick={(e) => e.stopPropagation()}
           onKeyDown={handleNoteKeyDown}
           onBlur={() => onSaveNote(cell.date, noteText)}
-          className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] focus:outline-none sm:text-[10px]"
+          className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] text-foreground focus:outline-none sm:text-[10px]"
         />
       ) : (
         cell.note && (
@@ -779,9 +797,9 @@ const DayCell = memo(function DayCell({
               }
             }}
             title={cell.note}
-            className={`w-full shrink-0 rounded-none border border-border bg-black/[.02] px-1 py-0.5 text-left text-[9px] text-muted sm:text-[10px] ${
-              isExpanded ? "line-clamp-3 whitespace-pre-wrap" : "truncate"
-            }`}
+            className={`w-full shrink-0 rounded-none border px-1 py-0.5 text-left text-[9px] sm:text-[10px] ${
+              allPublished ? "border-background/30 bg-background/10 text-background/80" : "border-border bg-black/[.02] text-muted"
+            } ${isExpanded ? "line-clamp-3 whitespace-pre-wrap" : "truncate"}`}
           >
             {cell.note}
           </div>
@@ -797,12 +815,15 @@ const DayCell = memo(function DayCell({
                 projectId={projectId}
                 item={item}
                 canManage={canManage}
+                onDarkCell={allPublished}
               />
             ) : (
               <CompactItemChip key={`${item.itemType}-${item.itemId}`} item={item} />
             ),
           )}
-          {hiddenCount > 0 && <span className="text-[9px] text-muted">+{hiddenCount}</span>}
+          {hiddenCount > 0 && (
+            <span className={`text-[9px] ${allPublished ? "text-background/70" : "text-muted"}`}>+{hiddenCount}</span>
+          )}
         </div>
       )}
     </button>
@@ -1036,7 +1057,11 @@ const CompactItemChip = memo(function CompactItemChip({ item }: { item: Calendar
         // cursor. draggable={false} turns the native one off; dnd-kit's own
         // drag (via the wrapper's listeners) is unaffected.
         draggable={false}
-        className="flex max-w-full items-center gap-1 rounded-full border border-border bg-background py-0.5 pr-1.5 pl-0.5 text-[9px] transition-colors duration-150 hover:border-foreground/30 sm:text-[10px]"
+        // text-foreground is explicit, not inherited: this chip paints its
+        // own bg-background, and a fully published day's cell sets
+        // text-background -- inheriting that drew the label in the chip's
+        // own background color, invisible in both themes.
+        className="flex max-w-full items-center gap-1 rounded-full border border-border bg-background py-0.5 pr-1.5 pl-0.5 text-[9px] text-foreground transition-colors duration-150 hover:border-foreground/30 sm:text-[10px]"
       >
         <span className="h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full bg-black/10 sm:h-4 sm:w-4">
           {item.thumbnailUrl ? (
@@ -1067,6 +1092,7 @@ const ExpandedItemTile = memo(function ExpandedItemTile({
   canManage,
   widthClassName = "w-full",
   draggable = true,
+  onDarkCell = false,
 }: {
   projectId: string;
   item: CalendarItem;
@@ -1079,6 +1105,10 @@ const ExpandedItemTile = memo(function ExpandedItemTile({
   // pass fixes, and drag-to-reschedule isn't essential there since tapping
   // into the post/story to change its date already works.
   draggable?: boolean;
+  // Set by DayCell when every item in the day is published, so the cell
+  // itself is bg-foreground -- the published border (foreground/60) would
+  // vanish against it, so it inverts instead.
+  onDarkCell?: boolean;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
@@ -1120,7 +1150,11 @@ const ExpandedItemTile = memo(function ExpandedItemTile({
         // own Link above -- see its comment for why.
         draggable={false}
         className={`group relative block aspect-[3/4] w-full overflow-hidden border transition-colors duration-150 ${
-          published ? "border-foreground/60 bg-black/[.03]" : "border-border bg-black/[.03] hover:border-foreground/30"
+          published
+            ? onDarkCell
+              ? "border-background/50 bg-black/[.03]"
+              : "border-foreground/60 bg-black/[.03]"
+            : "border-border bg-black/[.03] hover:border-foreground/30"
         }`}
       >
         {item.thumbnailUrl ? (
