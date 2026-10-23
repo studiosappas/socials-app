@@ -32,7 +32,14 @@ import {
   computeCanvasFrame,
   type AnnotationSaveAction,
 } from "@/lib/annotation-engine";
-import { planAnnotationRestore, rescaleAnnotationJson } from "@/lib/annotation-frame";
+import {
+  isLegacy34Restore,
+  planAnnotationRestore,
+  proposeReframeWindow,
+  reframeBlockers,
+  rescaleAnnotationJson,
+  type ReframeBlocker,
+} from "@/lib/annotation-frame";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 import {
   annotationCropStateFromWindow,
@@ -408,6 +415,24 @@ export function AnnotationEditor({
   // there was no way to tell "still applying" from "silently did nothing."
   const [applyingCrop, setApplyingCrop] = useState(false);
   const [cropError, setCropError] = useState<string | undefined>();
+  // "Re-frame to 4:5" -- offered only when a SAVED edit reopened in an older
+  // 3:4 frame where new edits are 4:5 (lib/annotation-frame.ts). Nothing is
+  // written until the user applies it AND presses Save Changes:
+  //   legacyFrame  set on restore; shows the header action.
+  //   reframe      the confirmation dialog: either the proposed framing
+  //                (zoom/offset over the ORIGINAL photo) or, when re-framing
+  //                would lose/move something, only the reasons.
+  //   reframeUndo  the exact 3:4 canvas state from before Apply -- "Undo
+  //                re-frame" restores it (frame size included, which the
+  //                regular Undo history can't do).
+  const [legacyFrame, setLegacyFrame] = useState(false);
+  const [reframe, setReframe] = useState<
+    | { blockers: ReframeBlocker[]; sourceUrl: string; zoom: number; offset: { x: number; y: number } }
+    | null
+  >(null);
+  const [reframeUndo, setReframeUndo] = useState<{ json: string; width: number; height: number; exportScale: number } | null>(null);
+  const [reframeBusy, setReframeBusy] = useState(false);
+  const [reframeError, setReframeError] = useState<string | undefined>();
   // The base photo's CURRENT full source (getElement().src), captured fresh
   // every time the crop tool opens -- must match whatever handleApplyCrop
   // itself crops from, or the live drag-to-position preview shows the wrong
@@ -625,6 +650,10 @@ export function AnnotationEditor({
       setTextEditing(false);
       setAdjustPanelOpen(false);
       setRotatePanelOpen(false);
+      setLegacyFrame(false);
+      setReframe(null);
+      setReframeUndo(null);
+      setReframeError(undefined);
 
       setupCanvas(canvas);
     })();
@@ -754,6 +783,9 @@ export function AnnotationEditor({
             canvas.sendObjectToBack(legacyPhoto);
           }
           canvas.requestRenderAll();
+          // An older 3:4 image edit where new edits are 4:5: offer the
+          // explicit Re-frame action (never automatic).
+          if (!isVideo && isLegacy34Restore(restorePlan, targetAspect)) setLegacyFrame(true);
           finish();
         });
       } else {
@@ -1335,6 +1367,141 @@ export function AnnotationEditor({
   // template (preserving whatever shape Fabric already uses for type/
   // originX/originY/etc, which side-steps needing to guess it), and only
   // override the crop-specific fields.
+  // Re-measures what the guide-line overlay sizes itself to after the
+  // canvas frame itself changed size (Re-frame / Undo re-frame).
+  function remeasureCanvasBox(canvas: fabric.Canvas) {
+    requestAnimationFrame(() => {
+      const rect = canvasElRef.current?.getBoundingClientRect();
+      if (rect) setCanvasBox({ width: rect.width, height: rect.height });
+      setCanvasResolution({ width: canvas.getWidth(), height: canvas.getHeight() });
+    });
+  }
+
+  // Opens the Re-frame dialog on the CURRENT canvas (so anything added this
+  // session counts): the proposal when nothing would be lost, else only the
+  // reasons -- never a destructive shortcut.
+  function openReframe() {
+    const canvas = fabricRef.current;
+    const basePhoto = canvas ? findBasePhoto(canvas) : null;
+    if (!canvas || !basePhoto || !targetAspect) return;
+    if (rotatingRef.current || applyingCropRef.current) return;
+    activateTool("select");
+    const json = canvas.toJSON();
+    const el = basePhoto.getElement() as HTMLImageElement;
+    const blockers = reframeBlockers(json);
+    const proposal = blockers.length === 0 ? proposeReframeWindow(json, targetAspect) : null;
+    const start =
+      proposal && el.naturalWidth && el.naturalHeight
+        ? annotationCropStateFromWindow(proposal.frame, { w: el.naturalWidth, h: el.naturalHeight }, proposal.photo, CROP_MAX_ZOOM)
+        : { zoom: 1, offset: { x: 0, y: 0 } };
+    setReframeError(undefined);
+    setReframe({ blockers: proposal || blockers.length ? blockers : ["unreadable"], sourceUrl: el.src, ...start });
+  }
+
+  // Applies the confirmed 4:5 framing: a new 4:5 canvas frame and the base
+  // photo re-windowed from its ORIGINAL element (adjustment filters kept).
+  // Not saved -- Save Changes does that; closing without saving keeps the
+  // 3:4 edit exactly as it was.
+  async function applyReframe() {
+    const canvas = fabricRef.current;
+    const basePhoto = canvas ? findBasePhoto(canvas) : null;
+    if (!canvas || !basePhoto || !reframe || reframe.blockers.length > 0 || !targetAspect) return;
+    if (applyingCropRef.current) return;
+    applyingCropRef.current = true;
+    setReframeBusy(true);
+    setReframeError(undefined);
+    await trackPendingEdit(async () => {
+      const before = {
+        json: JSON.stringify(canvas.toJSON()),
+        width: canvas.getWidth(),
+        height: canvas.getHeight(),
+        exportScale: exportScaleRef.current,
+      };
+      try {
+        const el = basePhoto.getElement() as HTMLImageElement;
+        const naturalW = el.naturalWidth;
+        const naturalH = el.naturalHeight;
+        const frame = computeCanvasFrame(targetAspect);
+        // handleApplyCrop's window math, on the new frame.
+        const coverScale = Math.max(frame.canvasW / naturalW, frame.canvasH / naturalH);
+        const cropW = clamp(frame.canvasW / (coverScale * reframe.zoom), 0, naturalW);
+        const cropH = clamp(frame.canvasH / (coverScale * reframe.zoom), 0, naturalH);
+        const cropX = clamp((naturalW - cropW) / 2 - reframe.offset.x * cropW, 0, naturalW - cropW);
+        const cropY = clamp((naturalH - cropH) / 2 - reframe.offset.y * cropH, 0, naturalH - cropH);
+        const json = canvas.toJSON() as { objects?: Record<string, unknown>[]; [k: string]: unknown };
+        json.objects = (json.objects ?? []).map((o) =>
+          o.appRole === BASE_PHOTO_ROLE
+            ? {
+                ...o,
+                src: reframe.sourceUrl,
+                cropX,
+                cropY,
+                width: cropW,
+                height: cropH,
+                scaleX: frame.canvasW / cropW,
+                scaleY: frame.canvasH / cropH,
+                left: 0,
+                top: 0,
+                originX: "left",
+                originY: "top",
+              }
+            : o,
+        );
+        canvas.setDimensions({ width: frame.canvasW, height: frame.canvasH });
+        exportScaleRef.current = frame.exportScale;
+        await canvas.loadFromJSON(json);
+        if (fabricRef.current !== canvas) return;
+        canvas.requestRenderAll();
+        // The regular Undo history holds 3:4-frame snapshots; it restarts
+        // here so Undo can never load one into the 4:5 frame. "Undo
+        // re-frame" is the way back.
+        historyRef.current = [JSON.stringify(canvas.toJSON())];
+        historyIndexRef.current = 0;
+        setReframeUndo(before);
+        setReframe(null);
+        remeasureCanvasBox(canvas);
+      } catch (error) {
+        console.error("Failed to re-frame:", error);
+        if (fabricRef.current === canvas) {
+          // Put the 3:4 state back exactly as it was.
+          canvas.setDimensions({ width: before.width, height: before.height });
+          exportScaleRef.current = before.exportScale;
+          await canvas.loadFromJSON(JSON.parse(before.json)).catch(() => {});
+          canvas.requestRenderAll();
+          setReframeError("Couldn't re-frame this image. Your 3:4 edit is unchanged.");
+        }
+      } finally {
+        applyingCropRef.current = false;
+        setReframeBusy(false);
+      }
+    });
+  }
+
+  async function undoReframe() {
+    const canvas = fabricRef.current;
+    const snapshot = reframeUndo;
+    if (!canvas || !snapshot || applyingCropRef.current) return;
+    activateTool("select");
+    applyingCropRef.current = true;
+    setReframeBusy(true);
+    await trackPendingEdit(async () => {
+      try {
+        canvas.setDimensions({ width: snapshot.width, height: snapshot.height });
+        exportScaleRef.current = snapshot.exportScale;
+        await canvas.loadFromJSON(JSON.parse(snapshot.json));
+        if (fabricRef.current !== canvas) return;
+        canvas.requestRenderAll();
+        historyRef.current = [snapshot.json];
+        historyIndexRef.current = 0;
+        setReframeUndo(null);
+        remeasureCanvasBox(canvas);
+      } finally {
+        applyingCropRef.current = false;
+        setReframeBusy(false);
+      }
+    });
+  }
+
   async function handleApplyCrop() {
     const canvas = fabricRef.current;
     const basePhoto = canvas ? findBasePhoto(canvas) : null;
@@ -2282,6 +2449,41 @@ export function AnnotationEditor({
               )}
             </>
           )}
+          {tool !== "crop" && ready && legacyFrame && !reframeUndo && (
+            <>
+              <span className="hidden shrink-0 text-xs text-muted sm:inline">Older 3:4 edit</span>
+              <Button
+                type="button"
+                variant="secondary"
+                radius="full"
+                onClick={openReframe}
+                disabled={reframeBusy}
+                className="shrink-0 py-1.5 text-xs"
+              >
+                Re-frame to 4:5
+              </Button>
+            </>
+          )}
+          {tool !== "crop" && ready && reframeUndo && (
+            <>
+              <span className="hidden min-w-0 truncate text-xs text-muted sm:inline">Re-framed to 4:5 · not saved yet</span>
+              <Button
+                type="button"
+                variant="secondary"
+                radius="full"
+                onClick={() => void undoReframe()}
+                disabled={reframeBusy}
+                className="shrink-0 py-1.5 text-xs"
+              >
+                Undo re-frame
+              </Button>
+            </>
+          )}
+          {reframeError && !reframe && (
+            <p role="alert" title={reframeError} className="min-w-0 truncate text-xs text-error">
+              {reframeError}
+            </p>
+          )}
         </div>
         <button
           type="button"
@@ -2291,6 +2493,21 @@ export function AnnotationEditor({
           Close <span aria-hidden>✕</span>
         </button>
       </div>
+
+      {reframe && (
+        <ReframeDialog
+          reframe={reframe}
+          busy={reframeBusy}
+          error={reframeError}
+          onZoomChange={(zoom) => setReframe((r) => (r ? { ...r, zoom } : r))}
+          onOffsetChange={(offset) => setReframe((r) => (r ? { ...r, offset } : r))}
+          onApply={() => void applyReframe()}
+          onCancel={() => {
+            setReframe(null);
+            setReframeError(undefined);
+          }}
+        />
+      )}
 
       {isVideo && forcePicker ? (
         <VideoFramePicker
@@ -3022,6 +3239,107 @@ function pointerAngleDeg(clientX: number, clientY: number, cx: number, cy: numbe
 // works) specifically so handleApplyCrop's own already-correct pan-
 // direction math needed no changes beyond adding rotation -- only the
 // zoom/pan CLAMP bounds needed to become rotation-aware.
+const REFRAME_BLOCKER_TEXT: Record<ReframeBlocker, string> = {
+  objects:
+    "It has text, drawings, arrows or a logo placed for the 3:4 frame. A 4:5 frame would move them relative to the photo, so they'd no longer be where you put them.",
+  "baked-pixels":
+    "The photo itself was rotated, flipped or had its background removed. Re-framing starts from your original photo, which would undo that.",
+  unreadable: "This edit's saved framing couldn't be read, so a 4:5 framing can't be proposed safely.",
+};
+
+// Re-frame to 4:5's confirmation: the proposed framing over the ORIGINAL
+// photo, adjustable before anything changes -- or, when re-framing would
+// lose or move something, just the reasons and no way to apply.
+function ReframeDialog({
+  reframe,
+  busy,
+  error,
+  onZoomChange,
+  onOffsetChange,
+  onApply,
+  onCancel,
+}: {
+  reframe: { blockers: ReframeBlocker[]; sourceUrl: string; zoom: number; offset: { x: number; y: number } };
+  busy: boolean;
+  error: string | undefined;
+  onZoomChange: (zoom: number) => void;
+  onOffsetChange: (offset: { x: number; y: number }) => void;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  const blocked = reframe.blockers.length > 0;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reframe-title"
+      data-reframe-dialog=""
+      className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-background/95 p-4"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onCancel();
+        }
+      }}
+    >
+      <div className="flex w-full max-w-md flex-col items-center gap-4">
+        <h2 id="reframe-title" className="text-sm font-semibold tracking-wide uppercase">
+          Re-frame to 4:5
+        </h2>
+        {blocked ? (
+          <>
+            <p className="text-sm">Re-framing isn&apos;t available for this edit:</p>
+            <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
+              {reframe.blockers.map((b) => (
+                <li key={b}>{REFRAME_BLOCKER_TEXT[b]}</li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted">Your 3:4 edit stays exactly as it is. To get a 4:5 version, start a new edit of this image.</p>
+            <Button type="button" variant="primary" radius="full" onClick={onCancel} autoFocus>
+              OK
+            </Button>
+          </>
+        ) : (
+          <>
+            <p className="text-center text-xs text-muted">
+              Starts from your original photo, not the current 3:4 crop. Drag to reposition, drag a corner to zoom.
+              Adjustments are kept. Your 3:4 edit isn&apos;t changed unless you apply this and then press Save Changes.
+            </p>
+            <div
+              className="relative bg-background"
+              style={{ width: "min(320px, 70vw, calc((100dvh - 260px) * 0.8))", aspectRatio: "4 / 5" }}
+            >
+              <AnnotationCropOverlay
+                imageUrl={reframe.sourceUrl}
+                zoom={reframe.zoom}
+                offset={reframe.offset}
+                rotation={0}
+                onZoomChange={onZoomChange}
+                onOffsetChange={onOffsetChange}
+                onRotationChange={() => {}}
+                allowRotation={false}
+              />
+            </div>
+            {error && (
+              <p role="alert" className="text-xs text-error">
+                {error}
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="primary" radius="full" onClick={onApply} disabled={busy} autoFocus>
+                {busy ? "Applying…" : "Apply re-frame"}
+              </Button>
+              <Button type="button" variant="secondary" radius="full" onClick={onCancel} disabled={busy}>
+                Cancel
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AnnotationCropOverlay({
   imageUrl,
   zoom,
@@ -3030,6 +3348,7 @@ function AnnotationCropOverlay({
   onZoomChange,
   onOffsetChange,
   onRotationChange,
+  allowRotation = true,
 }: {
   imageUrl: string;
   zoom: number;
@@ -3038,6 +3357,9 @@ function AnnotationCropOverlay({
   onZoomChange: (zoom: number) => void;
   onOffsetChange: (offset: { x: number; y: number }) => void;
   onRotationChange: (rotation: number) => void;
+  // false hides the rotate handle (Re-frame's dialog: rotation isn't part
+  // of a re-frame).
+  allowRotation?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const natural = useImageNaturalSize(imageUrl);
@@ -3370,17 +3692,19 @@ function AnnotationCropOverlay({
             this editor has no portal escaping its own layout to guarantee
             room above the frame; keeps this a minimal, contained addition
             rather than a second positioning system to get right. */}
-        <div
-          onPointerDown={handleRotateHandlePointerDown}
-          onPointerMove={handleRotateHandlePointerMove}
-          onPointerUp={handleRotateHandlePointerUp}
-          onPointerCancel={handleRotateHandlePointerUp}
-          title="Drag to rotate"
-          className="absolute left-1/2 top-2 z-10 flex h-7 w-7 -translate-x-1/2 touch-none cursor-grab items-center justify-center rounded-full bg-background/85 text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)] active:cursor-grabbing"
-        >
-          <CropRotateHandleIcon className="h-3.5 w-3.5" />
-          <span className="sr-only">Rotate</span>
-        </div>
+        {allowRotation && (
+          <div
+            onPointerDown={handleRotateHandlePointerDown}
+            onPointerMove={handleRotateHandlePointerMove}
+            onPointerUp={handleRotateHandlePointerUp}
+            onPointerCancel={handleRotateHandlePointerUp}
+            title="Drag to rotate"
+            className="absolute left-1/2 top-2 z-10 flex h-7 w-7 -translate-x-1/2 touch-none cursor-grab items-center justify-center rounded-full bg-background/85 text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)] active:cursor-grabbing"
+          >
+            <CropRotateHandleIcon className="h-3.5 w-3.5" />
+            <span className="sr-only">Rotate</span>
+          </div>
+        )}
       </>
     );
   }

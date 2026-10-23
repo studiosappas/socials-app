@@ -274,6 +274,134 @@ async function run(browser, photo) {
     assert.ok(Math.abs(m.width / m.height - 0.75) < 0.005, `${m.width}x${m.height}`);
   });
   await reopened34.ctx.close();
+
+  // --- E: Re-frame to 4:5 (D3) ------------------------------------------------
+  // Mean colour of the centre of the canvas -- the framing's centre must survive a re-frame.
+  const centreColour = async (png) => {
+    const m = await sharp(png).metadata();
+    const s = Math.round(Math.min(m.width, m.height) / 10);
+    const raw = await sharp(png).removeAlpha().extract({ left: Math.round(m.width / 2 - s / 2), top: Math.round(m.height / 2 - s / 2), width: s, height: s }).raw().toBuffer();
+    const c = [0, 0, 0];
+    for (let i = 0; i < raw.length; i += 3) for (let k = 0; k < 3; k++) c[k] += raw[i + k];
+    return c.map((v) => v / (raw.length / 3));
+  };
+  const saveCount = (page) => page.evaluate(() => (window.__saves ?? []).length);
+  const reframeBtn = (page) => page.getByRole("button", { name: "Re-frame to 4:5" });
+  const dialog = (page) => page.locator("[data-reframe-dialog]");
+
+  // an older 3:4 edit WITH a crop (made under the old rule), nothing else on it
+  const old = await open({ width: 1280, height: 900 }, "?aspect=34");
+  await enterCrop(old.page);
+  const of = await old.page.locator("div.absolute.z-10.bg-background").boundingBox();
+  await old.page.mouse.move(of.x + of.width - 2, of.y + of.height - 2);
+  await old.page.mouse.down();
+  await old.page.mouse.move(of.x + of.width + 50, of.y + of.height + 50, { steps: 6 });
+  await old.page.mouse.up();
+  await old.page.mouse.move(of.x + of.width / 2, of.y + of.height / 2);
+  await old.page.mouse.down();
+  await old.page.mouse.move(of.x + of.width / 2 + 40, of.y + of.height / 2 - 20, { steps: 6 });
+  await old.page.mouse.up();
+  await applyCrop(old.page);
+  const clean34 = await save(old.page);
+  // and one with an arrow placed for the 3:4 frame
+  await sidebar(old.page, "Arrows").click();
+  await old.page.mouse.click(5, 5);
+  const arrow34 = await save(old.page);
+  await old.ctx.close();
+
+  const rf = await open({ width: 1280, height: 900 }, restoreQuery(clean34.json, "45"));
+  const legacyShot = await shot(rf.page);
+  const legacyCentre = await centreColour(legacyShot);
+  await check("E. an older 3:4 edit opened where new edits are 4:5 offers 'Re-frame to 4:5' (and stays 3:4 until asked)", async () => {
+    assert.equal(await reframeBtn(rf.page).count(), 1);
+    const b = await box(rf.page);
+    assert.ok(Math.abs(b.w / b.h - 0.75) < 0.01, JSON.stringify(b));
+  });
+  await reframeBtn(rf.page).click();
+  await dialog(rf.page).waitFor();
+  await check("E. the dialog shows the PROPOSED 4:5 framing before anything changes", async () => {
+    const frameBox = await rf.page.locator("[data-reframe-dialog] div.relative").first().boundingBox();
+    assert.ok(Math.abs(frameBox.width / frameBox.height - 0.8) < 0.01, JSON.stringify(frameBox));
+    assert.ok((await rf.page.getByRole("button", { name: "Apply re-frame" }).count()) === 1);
+    // it works on the ORIGINAL upload, not the saved 3:4 export
+    const src = await rf.page.locator("[data-reframe-dialog] img").first().getAttribute("src");
+    assert.equal(src, "https://media.test/photo.png");
+    const b = await box(rf.page);
+    assert.ok(Math.abs(b.w / b.h - 0.75) < 0.01, "canvas still 3:4 while the dialog is open");
+  });
+  await rf.page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await dialog(rf.page).waitFor({ state: "detached" });
+  await check("E. Cancel changes nothing -- same 3:4 canvas, same pixels, nothing saved", async () => {
+    const b = await box(rf.page);
+    assert.ok(Math.abs(b.w / b.h - 0.75) < 0.01);
+    assert.ok((await meanDiff(legacyShot, await shot(rf.page))) < 1.5);
+    assert.equal(await saveCount(rf.page), 0);
+  });
+  await reframeBtn(rf.page).click();
+  await dialog(rf.page).waitFor();
+  await rf.page.keyboard.press("Escape");
+  await check("E. Escape closes the dialog (and only the dialog)", async () => {
+    await dialog(rf.page).waitFor({ state: "detached", timeout: 3000 });
+    assert.equal(await reframeBtn(rf.page).count(), 1);
+  });
+  await reframeBtn(rf.page).click();
+  await rf.page.getByRole("button", { name: "Apply re-frame" }).click();
+  await dialog(rf.page).waitFor({ state: "detached", timeout: 15000 });
+  await rf.page.getByRole("button", { name: "Undo re-frame" }).waitFor();
+  await rf.page.waitForTimeout(300);
+  await check("E. Apply re-frame: the canvas becomes 4:5, centred on the same part of the photo, NOT saved yet", async () => {
+    const b = await box(rf.page);
+    assert.ok(Math.abs(b.w / b.h - 0.8) < 0.01, JSON.stringify(b));
+    const c = await centreColour(await shot(rf.page));
+    assert.ok(c.every((v, k) => Math.abs(v - legacyCentre[k]) < 25), `centre ${c} vs ${legacyCentre}`);
+    assert.equal(await saveCount(rf.page), 0);
+  });
+  await rf.page.getByRole("button", { name: "Undo re-frame" }).click();
+  await reframeBtn(rf.page).waitFor();
+  await rf.page.waitForTimeout(300);
+  await check("E. Undo re-frame restores the exact 3:4 edit (frame and pixels)", async () => {
+    const b = await box(rf.page);
+    assert.ok(Math.abs(b.w / b.h - 0.75) < 0.01, JSON.stringify(b));
+    const d = await meanDiff(legacyShot, await shot(rf.page));
+    assert.ok(d < 1.5, `mean diff ${d.toFixed(2)}`);
+  });
+  await reframeBtn(rf.page).click();
+  await rf.page.getByRole("button", { name: "Apply re-frame" }).click();
+  await rf.page.getByRole("button", { name: "Undo re-frame" }).waitFor();
+  const reframedLook = await shot(rf.page);
+  const reframed = await save(rf.page);
+  await check("E. Apply + Save Changes exports a 4:5 JPEG at >= 1080 wide", async () => {
+    const m = await sharp(reframed.jpeg).metadata();
+    assert.ok(Math.abs(m.width / m.height - 0.8) < 0.005 && m.width >= 1080, `${m.width}x${m.height}`);
+  });
+  await rf.ctx.close();
+  const reopenedRf = await open({ width: 1000, height: 800 }, restoreQuery(reframed.json, "45"));
+  await check("E. the saved re-frame reopens as a normal 4:5 edit (no Re-frame offer), same picture", async () => {
+    assert.equal(await reframeBtn(reopenedRf.page).count(), 0);
+    const b = await box(reopenedRf.page);
+    assert.ok(Math.abs(b.w / b.h - 0.8) < 0.01);
+    const d = await meanDiff(reframedLook, await shot(reopenedRf.page));
+    assert.ok(d < 6, `mean diff ${d.toFixed(2)}`);
+  });
+  await reopenedRf.ctx.close();
+
+  const blocked = await open({ width: 1280, height: 900 }, restoreQuery(arrow34.json, "45"));
+  const blockedLook = await shot(blocked.page);
+  await reframeBtn(blocked.page).click();
+  await dialog(blocked.page).waitFor();
+  await check("E. an edit with an arrow/text explains why it can't be re-framed -- and offers no way to apply", async () => {
+    assert.match(await dialog(blocked.page).innerText(), /text, drawings, arrows or a logo/);
+    assert.equal(await blocked.page.getByRole("button", { name: "Apply re-frame" }).count(), 0);
+  });
+  await blocked.page.getByRole("button", { name: "OK" }).click();
+  await check("E. ...and closing that explanation leaves the 3:4 edit untouched", async () => {
+    await dialog(blocked.page).waitFor({ state: "detached" });
+    const b = await box(blocked.page);
+    assert.ok(Math.abs(b.w / b.h - 0.75) < 0.01);
+    assert.ok((await meanDiff(blockedLook, await shot(blocked.page))) < 1.5);
+    assert.equal(await saveCount(blocked.page), 0);
+  });
+  await blocked.ctx.close();
 }
 
 let server;

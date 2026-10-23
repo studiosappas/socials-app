@@ -8,10 +8,14 @@
 
 import assert from "node:assert/strict";
 import {
+  isLegacy34Restore,
   planAnnotationRestore,
+  proposeReframeWindow,
   recoverSavedFrame,
+  reframeBlockers,
   rescaleAnnotationJson,
 } from "./annotation-frame.ts";
+import { annotationCropStateFromWindow } from "./crop-geometry.ts";
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -155,6 +159,77 @@ test("rescale: saved at 512px tall, reopened at 640px -- every object keeps its 
   assert.ok(close(rec.height, 640) && close(rec.width, frame.width * ratio));
   // ratio 1 is a no-op that returns the same object
   assert.equal(rescaleAnnotationJson(json, 1), json);
+});
+
+// --- Re-frame to 4:5 ------------------------------------------------------
+
+test("re-frame is offered only for an older 3:4 frame reopened where new edits are 4:5", () => {
+  const legacy = { objects: [croppedPhoto(frameOf(ASPECTS.cover34), { w: 4000, h: 3000 }, 1200)] };
+  assert.equal(isLegacy34Restore(planAnnotationRestore(legacy, ASPECTS.feed45), ASPECTS.feed45), true);
+  // already 4:5, a 9:16 target, no restore, unreadable: not offered
+  const new45 = { objects: [croppedPhoto(frameOf(ASPECTS.feed45), { w: 4000, h: 3000 }, 1200)] };
+  assert.equal(isLegacy34Restore(planAnnotationRestore(new45, ASPECTS.feed45), ASPECTS.feed45), false);
+  assert.equal(isLegacy34Restore(planAnnotationRestore(legacy, ASPECTS.reel916), ASPECTS.reel916), false);
+  assert.equal(isLegacy34Restore(null, ASPECTS.feed45), false);
+  assert.equal(isLegacy34Restore(planAnnotationRestore({ objects: [] }, ASPECTS.feed45), ASPECTS.feed45), false);
+});
+
+test("re-frame blockers: text/drawings/logos and in-place photo changes block it; adjustments alone don't", () => {
+  const photo = croppedPhoto(frameOf(ASPECTS.cover34), { w: 4000, h: 3000 }, 1200);
+  assert.deepEqual(reframeBlockers({ objects: [{ ...photo, src: "https://x/orig.png", filters: [{ type: "Brightness", brightness: 0.1 }] }] }), []);
+  assert.deepEqual(reframeBlockers({ objects: [photo, text(10, 10)] }), ["objects"]);
+  assert.deepEqual(reframeBlockers({ objects: [{ ...photo, src: "data:image/jpeg;base64,AAAA" }] }), ["baked-pixels"]);
+  assert.deepEqual(reframeBlockers({ objects: [{ ...photo, src: "data:image/png;base64,AA" }, { type: "Path" }] }), ["objects", "baked-pixels"]);
+  assert.deepEqual(reframeBlockers({ objects: [text(1, 1)] }), ["unreadable"]);
+  // legacy backgroundImage shape with nothing else: eligible
+  assert.deepEqual(reframeBlockers({ objects: [], backgroundImage: { ...photo, src: "https://x/o.png" } }), []);
+});
+
+// Oracle: AnnotationEditor's window math (handleApplyCrop / applyReframe).
+function windowFor(frame: { w: number; h: number }, natural: { w: number; h: number }, zoom: number, offset: { x: number; y: number }) {
+  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+  const cs = Math.max(frame.w / natural.w, frame.h / natural.h);
+  const cropW = clamp(frame.w / (cs * zoom), 0, natural.w);
+  const cropH = clamp(frame.h / (cs * zoom), 0, natural.h);
+  return {
+    cropW,
+    cropH,
+    cropX: clamp((natural.w - cropW) / 2 - offset.x * cropW, 0, natural.w - cropW),
+    cropY: clamp((natural.h - cropH) / 2 - offset.y * cropH, 0, natural.h - cropH),
+  };
+}
+
+test("proposed 4:5 framing keeps the saved edit's centre and visible height, over the ORIGINAL photo", () => {
+  const natural = { w: 4000, h: 3000 };
+  // a legacy 3:4 crop: a 1200 x 1600 window at (1300, 700)
+  const legacy = { objects: [{ ...croppedPhoto(frameOf(ASPECTS.cover34, 600), natural, 1200), cropX: 1300, cropY: 700 }] };
+  const proposal = proposeReframeWindow(legacy, ASPECTS.feed45)!;
+  const state = annotationCropStateFromWindow(proposal.frame, natural, proposal.photo, 4);
+  const w = windowFor({ w: 4, h: 5 }, natural, state.zoom, state.offset);
+  assert.ok(close(w.cropH, 1600), `height ${w.cropH}`);
+  assert.ok(close(w.cropW / w.cropH, 0.8, 1e-9), "4:5");
+  assert.ok(close(w.cropX + w.cropW / 2, 1900) && close(w.cropY + w.cropH / 2, 1500), "same centre");
+});
+
+test("proposed framing near the photo's edge is clamped inside the photo (never empty space)", () => {
+  const natural = { w: 3000, h: 4000 };
+  // a full-width 3:4 window at the top: widening to 4:5 at the same height can't fit
+  const legacy = { objects: [{ ...croppedPhoto(frameOf(ASPECTS.cover34, 600), natural, 3000), cropX: 0, cropY: 0 }] };
+  const proposal = proposeReframeWindow(legacy, ASPECTS.feed45)!;
+  const state = annotationCropStateFromWindow(proposal.frame, natural, proposal.photo, 4);
+  const w = windowFor({ w: 4, h: 5 }, natural, state.zoom, state.offset);
+  assert.ok(w.cropX >= 0 && w.cropY >= 0 && w.cropX + w.cropW <= natural.w + 1e-6 && w.cropY + w.cropH <= natural.h + 1e-6, JSON.stringify(w));
+  assert.ok(close(w.cropW / w.cropH, 0.8, 1e-9));
+  assert.ok(state.zoom >= 1);
+});
+
+test("an uncropped (cover-fit) 3:4 edit proposes the 4:5 view of the same centred photo", () => {
+  const natural = { w: 4000, h: 3000 };
+  const legacy = { objects: [coverFitPhoto(frameOf(ASPECTS.cover34, 600), natural)] };
+  const proposal = proposeReframeWindow(legacy, ASPECTS.feed45)!;
+  const state = annotationCropStateFromWindow(proposal.frame, natural, proposal.photo, 4);
+  const w = windowFor({ w: 4, h: 5 }, natural, state.zoom, state.offset);
+  assert.ok(close(w.cropH, 3000) && close(w.cropX + w.cropW / 2, 2000), JSON.stringify(w));
 });
 
 console.log(`\n${passed} tests passed`);

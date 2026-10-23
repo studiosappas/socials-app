@@ -111,3 +111,60 @@ export function rescaleAnnotationJson<T extends object>(annotationJson: T, ratio
   if (clone.backgroundImage) scaleObject(clone.backgroundImage);
   return clone as T;
 }
+
+// --- Re-frame to 4:5 (an older 3:4 edit -> the feed's 4:5) -----------------
+// An explicit, per-image action in Edit Image (never automatic, never batch).
+// It starts from the ORIGINAL photo, so it's only offered when nothing would
+// be lost or silently moved by doing that.
+
+const near = (a: number, b: number) => Math.abs(a / b - 1) <= SAME_ASPECT_TOLERANCE;
+
+// Whether a restore kept an older 3:4 frame where new edits are 4:5.
+export function isLegacy34Restore(plan: RestorePlan | null, targetAspect: { w: number; h: number } | undefined): boolean {
+  if (!plan?.keptSavedAspect || !targetAspect) return false;
+  return near(plan.aspect.w / plan.aspect.h, 3 / 4) && near(targetAspect.w / targetAspect.h, 4 / 5);
+}
+
+// Why re-framing would lose or move something, if it would:
+//  "objects"      text, drawings, arrows or logos were placed for the 3:4
+//                 frame -- a 4:5 frame would move them relative to the photo.
+//  "baked-pixels" the photo itself was changed in place (rotate/flip,
+//                 freeform-rotation crop, background removal) -- re-framing
+//                 starts from the original photo, which would undo that.
+//  "unreadable"   no base photo found in the saved edit.
+// Adjustments (brightness etc.) live on the photo as filters and ARE kept.
+export type ReframeBlocker = "objects" | "baked-pixels" | "unreadable";
+export function reframeBlockers(annotationJson: object | null | undefined): ReframeBlocker[] {
+  const json = (annotationJson ?? {}) as RawJson;
+  const photo = findSavedBasePhoto(json);
+  if (!photo) return ["unreadable"];
+  const blockers: ReframeBlocker[] = [];
+  if ((json.objects ?? []).some((o) => o !== photo && o.appRole !== BASE_PHOTO_ROLE)) blockers.push("objects");
+  if (typeof photo.src === "string" && photo.src.startsWith("data:")) blockers.push("baked-pixels");
+  return blockers;
+}
+
+// The proposed 4:5 framing shown before anything is applied: the same
+// centre and the same visible HEIGHT of the photo as the saved 3:4 edit,
+// widened to 4:5. Returned as a placement on a frame of `targetAspect`
+// units (Fabric's crop window + scale) -- the caller turns it into the Crop
+// tool's zoom/offset with crop-geometry.ts's annotationCropStateFromWindow,
+// which also clamps it inside the photo. Null when the saved frame can't be
+// read.
+export function proposeReframeWindow(
+  annotationJson: object | null | undefined,
+  targetAspect: { w: number; h: number },
+): { frame: { width: number; height: number }; photo: { cropX: number; cropY: number; left: number; top: number; scaleX: number; scaleY: number } } | null {
+  const saved = recoverSavedFrame(annotationJson);
+  const photo = annotationJson ? findSavedBasePhoto(annotationJson as RawJson) : null;
+  if (!saved || !photo) return null;
+  const scaleX = num(photo.scaleX, 1);
+  const scaleY = num(photo.scaleY, 1);
+  const visH = saved.height / scaleY;
+  const centreX = num(photo.cropX, 0) - num(photo.left, 0) / scaleX + saved.width / scaleX / 2;
+  const centreY = num(photo.cropY, 0) - num(photo.top, 0) / scaleY + visH / 2;
+  const frame = { width: targetAspect.w, height: targetAspect.h };
+  const s = frame.height / visH;
+  const visW = frame.width / s;
+  return { frame, photo: { cropX: centreX - visW / 2, cropY: centreY - visH / 2, left: 0, top: 0, scaleX: s, scaleY: s } };
+}
