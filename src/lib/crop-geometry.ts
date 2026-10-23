@@ -124,6 +124,55 @@ export function clampOffsetPx(
   return rotateVec(clampedLocal, rotationDeg);
 }
 
+// Reopening Edit Image's Crop tool on an already-cropped photo: the
+// zoom/offset that make the crop overlay show EXACTLY the window the base
+// photo currently shows -- the inverse of AnnotationEditor's handleApplyCrop
+// (axis-aligned branch), so re-entering Crop opens on the saved framing
+// instead of resetting to the whole image at zoom 1 (which an immediate
+// Apply would then have baked in as a different crop).
+//
+// Units are the editor's own: `frame` is the canvas frame (any unit -- only
+// its aspect and its ratio to the photo's scale matter), `natural` the base
+// photo element's full pixel size, `photo` Fabric's crop window + placement
+// (cropX/Y in natural px; left/top in frame units; scaleX/Y frame units per
+// natural px). Works for a never-cropped cover-fit photo too (its window is
+// whatever the frame clips of the centred image). offset is a fraction of
+// the FRAME, zoom is relative to cover-fit (1 = the frame's own cover fit).
+export function annotationCropStateFromWindow(
+  frame: { width: number; height: number },
+  natural: { w: number; h: number },
+  photo: { cropX?: number; cropY?: number; left?: number; top?: number; scaleX?: number; scaleY?: number },
+  maxZoom: number,
+): { zoom: number; offset: { x: number; y: number } } {
+  const scaleX = photo.scaleX || 1;
+  const scaleY = photo.scaleY || 1;
+  // The visible window, in natural pixels of the element.
+  const visW = frame.width / scaleX;
+  const visH = frame.height / scaleY;
+  const visX = (photo.cropX ?? 0) - (photo.left ?? 0) / scaleX;
+  const visY = (photo.cropY ?? 0) - (photo.top ?? 0) / scaleY;
+
+  const cover = coverBaseScale(frame.width, frame.height, natural.w, natural.h);
+  // A real crop fills the frame on both axes with ONE uniform scale, so the
+  // two candidates agree; the larger is the one that still covers the frame
+  // if they ever don't (rounding in a saved file).
+  const rawZoom = Math.max(frame.width / (cover * visW), frame.height / (cover * visH));
+  const zoom = clampNum(Number.isFinite(rawZoom) ? rawZoom : 1, 1, maxZoom);
+  const cropW = frame.width / (cover * zoom);
+  const cropH = frame.height / (cover * zoom);
+  // Same window centre as before, re-expressed for a (possibly clamped)
+  // zoom: handleApplyCrop's cropX = (natW - cropW)/2 - offset.x * cropW.
+  const centreX = visX + visW / 2;
+  const centreY = visY + visH / 2;
+  const slackX = Math.max(0, (natural.w - cropW) / 2);
+  const slackY = Math.max(0, (natural.h - cropH) / 2);
+  const offset = {
+    x: cropW > 0 ? clampNum(natural.w / 2 - centreX, -slackX, slackX) / cropW : 0,
+    y: cropH > 0 ? clampNum(natural.h / 2 - centreY, -slackY, slackY) / cropH : 0,
+  };
+  return { zoom, offset };
+}
+
 // Post Editor's enlarged Crop stage (GridCropOverlay presentation
 // "enlarged"): the anchor tile's ASPECT, at the largest size that fits the
 // viewport with room left around it for the rotate handle above and the

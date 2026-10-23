@@ -43,6 +43,7 @@
     "src/lib/project-list-filter.test.ts",
     "src/lib/media-library-paging.test.ts",
     "src/lib/post-type.test.ts",
+    "src/lib/annotation-frame.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }

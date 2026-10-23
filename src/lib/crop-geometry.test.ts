@@ -15,6 +15,7 @@
 
 import assert from "node:assert/strict";
 import {
+  annotationCropStateFromWindow,
   clampOffsetPx,
   coverBaseScale,
   coverageSlackPx,
@@ -328,6 +329,83 @@ test("portrait and square sources: existing behavior -- width fills, vertical pa
 });
 
 const close = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
+
+// --- Edit Image Crop re-entry (annotationCropStateFromWindow) --------------
+// Oracle: AnnotationEditor.handleApplyCrop's axis-aligned window math,
+// copied verbatim -- (zoom, offset) on a frame of `frame` (CSS) size -> the
+// Fabric crop window placed on a canvas of `canvas` size.
+function applyCropOracle(
+  frame: { w: number; h: number },
+  canvas: { w: number; h: number },
+  natural: { w: number; h: number },
+  zoom: number,
+  offset: { x: number; y: number },
+) {
+  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+  const coverScale = Math.max(frame.w / natural.w, frame.h / natural.h);
+  const cropW = clamp(frame.w / (coverScale * zoom), 0, natural.w);
+  const cropH = clamp(frame.h / (coverScale * zoom), 0, natural.h);
+  const cropX = clamp((natural.w - cropW) / 2 - offset.x * cropW, 0, natural.w - cropW);
+  const cropY = clamp((natural.h - cropH) / 2 - offset.y * cropH, 0, natural.h - cropH);
+  return { cropX, cropY, width: cropW, height: cropH, scaleX: canvas.w / cropW, scaleY: canvas.h / cropH, left: 0, top: 0 };
+}
+
+test("crop re-entry: reopening Crop reproduces the applied zoom + offset exactly (landscape, portrait, square sources)", () => {
+  const canvas = { w: 512, h: 640 }; // a 4:5 frame in canvas units
+  const display = { w: 384, h: 480 }; // the same frame, smaller on screen (crop row / phone)
+  for (const natural of [{ w: 4000, h: 3000 }, { w: 1080, h: 1920 }, { w: 2000, h: 2000 }]) {
+    for (const zoom of [1, 1.37, 2.5, 4]) {
+      for (const offset of [{ x: 0, y: 0 }, { x: 0.12, y: -0.2 }, { x: -0.3, y: 0.05 }]) {
+        const photo = applyCropOracle(display, canvas, natural, zoom, offset);
+        // the offset the oracle actually honoured (it clamps to the image)
+        const honoured = {
+          x: ((natural.w - photo.width) / 2 - photo.cropX) / photo.width,
+          y: ((natural.h - photo.height) / 2 - photo.cropY) / photo.height,
+        };
+        const back = annotationCropStateFromWindow({ width: canvas.w, height: canvas.h }, natural, photo, 4);
+        const where = `${natural.w}x${natural.h} zoom ${zoom} offset ${JSON.stringify(offset)}`;
+        assert.ok(close(back.zoom, zoom), `zoom ${back.zoom} vs ${zoom} -- ${where}`);
+        assert.ok(close(back.offset.x, honoured.x) && close(back.offset.y, honoured.y), `offset ${JSON.stringify(back.offset)} -- ${where}`);
+        // and Applying what re-entry shows gives the SAME crop window (an immediate Apply changes nothing)
+        const again = applyCropOracle(display, canvas, natural, back.zoom, back.offset);
+        for (const k of ["cropX", "cropY", "width", "height"] as const) assert.ok(close(again[k], photo[k]), `${k} -- ${where}`);
+      }
+    }
+  }
+});
+
+test("crop re-entry: a never-cropped, cover-fit photo opens at zoom 1, centred -- the previous behaviour for that case", () => {
+  const canvas = { width: 480, height: 640 };
+  for (const natural of [{ w: 4000, h: 3000 }, { w: 1080, h: 1920 }]) {
+    const s = coverBaseScale(canvas.width, canvas.height, natural.w, natural.h);
+    const photo = { cropX: 0, cropY: 0, scaleX: s, scaleY: s, left: (canvas.width - natural.w * s) / 2, top: (canvas.height - natural.h * s) / 2 };
+    const back = annotationCropStateFromWindow(canvas, natural, photo, 4);
+    assert.ok(close(back.zoom, 1), `zoom ${back.zoom}`);
+    assert.ok(close(back.offset.x, 0) && close(back.offset.y, 0), JSON.stringify(back.offset));
+  }
+});
+
+test("crop re-entry: independent of the canvas's working size (same saved crop, rescaled frame)", () => {
+  const natural = { w: 3000, h: 4000 };
+  const small = applyCropOracle({ w: 300, h: 400 }, { w: 300, h: 400 }, natural, 1.8, { x: 0.1, y: 0.15 });
+  const big = { ...small, scaleX: small.scaleX * 2, scaleY: small.scaleY * 2 };
+  const a = annotationCropStateFromWindow({ width: 300, height: 400 }, natural, small, 4);
+  const b = annotationCropStateFromWindow({ width: 600, height: 800 }, natural, big, 4);
+  assert.ok(close(a.zoom, b.zoom) && close(a.offset.x, b.offset.x) && close(a.offset.y, b.offset.y));
+});
+
+test("crop re-entry: zoom is clamped into [1, max] and the offset stays inside the image", () => {
+  const natural = { w: 1000, h: 1000 };
+  // a window smaller than max zoom allows (e.g. a crop made under a different cap)
+  const tiny = { cropX: 480, cropY: 480, scaleX: 400 / 40, scaleY: 400 / 40, left: 0, top: 0 };
+  const t = annotationCropStateFromWindow({ width: 400, height: 400 }, natural, tiny, 4);
+  assert.equal(t.zoom, 4);
+  const cropW = 400 / (0.4 * 4);
+  assert.ok(Math.abs(t.offset.x) * cropW <= (natural.w - cropW) / 2 + 1e-9);
+  // degenerate scale values never produce NaN
+  const d = annotationCropStateFromWindow({ width: 400, height: 400 }, natural, { scaleX: 0, scaleY: 0 }, 4);
+  assert.ok(Number.isFinite(d.zoom) && Number.isFinite(d.offset.x) && Number.isFinite(d.offset.y));
+});
 
 // --- Post Editor enlarged Crop stage (fitEnlargedCropFrame) -----------------
 

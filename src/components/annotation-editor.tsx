@@ -32,8 +32,10 @@ import {
   computeCanvasFrame,
   type AnnotationSaveAction,
 } from "@/lib/annotation-engine";
+import { planAnnotationRestore, rescaleAnnotationJson } from "@/lib/annotation-frame";
 import type { CustomFontFace } from "@/lib/data/brand-moodboard";
 import {
+  annotationCropStateFromWindow,
   clampNum,
   clampOffsetPx,
   coverBaseScale,
@@ -656,7 +658,18 @@ export function AnnotationEditor({
       // function's own comment on the real bug this fixed: a headless
       // engine using a different frame size than a real editor session
       // visibly shrank/mispositioned objects on load).
-      const targetFrame = targetAspect ? computeCanvasFrame(targetAspect) : null;
+      //
+      // Reopening a SAVED edit builds the frame the edit was saved in, not
+      // the current position's rule: same aspect (an edit saved at 3:4 stays
+      // 3:4 even where new edits now use another ratio -- never recropped),
+      // and every saved object rescaled from the saved frame's working size
+      // to this window's (lib/annotation-frame.ts). Previously both came
+      // from the current window/position only, so a save made in a
+      // different-sized window, or under a different ratio rule, reopened
+      // with the photo cut off or not filling the frame and text displaced
+      // -- the "saved result doesn't match what I set" mismatch.
+      const restorePlan = restoreAnnotation && targetAspect ? planAnnotationRestore(restoreAnnotation, targetAspect) : null;
+      const targetFrame = targetAspect ? computeCanvasFrame(restorePlan?.aspect ?? targetAspect) : null;
       const canvasW = targetFrame ? targetFrame.canvasW : naturalW * displayScale;
       const canvasH = targetFrame ? targetFrame.canvasH : naturalH * displayScale;
       exportScaleRef.current = targetFrame
@@ -718,7 +731,8 @@ export function AnnotationEditor({
         // Shared with Grid's headless Paste Style engine -- see
         // annotation-engine.ts's own comment on why only the src field is
         // touched.
-        const patched = isVideo ? restoreAnnotation : patchRestoredAnnotationSrc(restoreAnnotation, url);
+        const srcPatched = isVideo ? restoreAnnotation : patchRestoredAnnotationSrc(restoreAnnotation, url);
+        const patched = restorePlan?.savedHeight ? rescaleAnnotationJson(srcPatched, canvasH / restorePlan.savedHeight) : srcPatched;
 
         // Reload the exact saved state -- objects, background crop, everything --
         // so annotations remain fully editable across sessions, not just baked pixels.
@@ -1151,11 +1165,31 @@ export function AnnotationEditor({
         // the canvas's PRE-crop-mode box -- taller than its actual size
         // once the button row has taken its own space -- and the crop
         // overlay would then be sized/positioned against a stale frame.
-        setCropZoom(1);
-        setCropOffset({ x: 0, y: 0 });
-        setCropRotation(0);
+        //
+        // Opens on the photo's CURRENT framing, not the whole image at
+        // zoom 1: re-entering Crop on an already-cropped photo (this session,
+        // or a saved edit reopened later) used to show the full source, so
+        // the saved crop looked lost and an immediate Apply replaced it with
+        // a different one. The overlay always shows the full element
+        // (cropSourceUrl) -- the zoom/offset below position it so exactly
+        // the current window fills the frame (the inverse of
+        // handleApplyCrop's window math). A freeform-rotated crop is already
+        // baked into its element, so it correctly opens at zoom 1.
         const basePhoto = findBasePhoto(canvas);
-        setCropSourceUrl(basePhoto ? (basePhoto.getElement() as HTMLImageElement).src : null);
+        const el = basePhoto ? (basePhoto.getElement() as HTMLImageElement) : null;
+        const current =
+          basePhoto && el && el.naturalWidth && el.naturalHeight
+            ? annotationCropStateFromWindow(
+                { width: canvas.getWidth(), height: canvas.getHeight() },
+                { w: el.naturalWidth, h: el.naturalHeight },
+                basePhoto,
+                CROP_MAX_ZOOM,
+              )
+            : { zoom: 1, offset: { x: 0, y: 0 } };
+        setCropZoom(current.zoom);
+        setCropOffset(current.offset);
+        setCropRotation(0);
+        setCropSourceUrl(el ? el.src : null);
       }
     });
   }
@@ -2210,7 +2244,45 @@ export function AnnotationEditor({
           : { top: 0, bottom: 0 }
       }
     >
-      <div className="flex items-center justify-end px-6 py-4">
+      {/* Fixed h-12 (the height this row always had: py-4 + one text-xs
+          line) and home to Crop's Apply/Cancel -- those used to be a row
+          inserted ABOVE the canvas on entering Crop, which shrank the
+          canvas's available height mid-edit, so the image visibly jumped
+          to a smaller size the moment Crop opened. Nothing here can change
+          this row's height, so entering/leaving Crop never resizes the
+          canvas. */}
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 px-6">
+        <div className="flex min-w-0 items-center gap-2">
+          {tool === "crop" && (
+            <>
+              <Button
+                type="button"
+                variant="primary"
+                radius="full"
+                onClick={handleApplyCrop}
+                disabled={applyingCrop}
+                className="shrink-0 py-1.5 text-xs"
+              >
+                {applyingCrop ? "Applying…" : "Apply crop"}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                radius="full"
+                onClick={() => activateTool("select")}
+                disabled={applyingCrop}
+                className="shrink-0 py-1.5 text-xs"
+              >
+                Cancel crop
+              </Button>
+              {cropError && (
+                <p role="alert" title={cropError} className="min-w-0 truncate text-xs text-error">
+                  {cropError}
+                </p>
+              )}
+            </>
+          )}
+        </div>
         <button
           type="button"
           onClick={onClose}
@@ -2504,32 +2576,6 @@ export function AnnotationEditor({
               </button>
             ))}
           </div>
-        </div>
-      )}
-
-      {tool === "crop" && (
-        <div className="flex flex-col items-center gap-1 pb-2">
-          <div className="flex items-center justify-center gap-2">
-            <Button
-              type="button"
-              variant="primary"
-              radius="full"
-              onClick={handleApplyCrop}
-              disabled={applyingCrop}
-            >
-              {applyingCrop ? "Applying…" : "Apply crop"}
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              radius="full"
-              onClick={() => activateTool("select")}
-              disabled={applyingCrop}
-            >
-              Cancel crop
-            </Button>
-          </div>
-          {cropError && <p className="text-xs text-error">{cropError}</p>}
         </div>
       )}
 

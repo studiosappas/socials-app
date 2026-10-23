@@ -17,6 +17,7 @@ import * as fabric from "fabric";
 // why this exists and when to remove it (once the real Adjustments-only
 // production failure is root-caused and fixed).
 import { diagStage, diagFail } from "@/lib/paste-diagnostics";
+import { planAnnotationRestore, recoverSavedFrame, rescaleAnnotationJson } from "@/lib/annotation-frame";
 
 export type AnnotationSaveAction = (
   projectId: string,
@@ -159,7 +160,11 @@ export async function buildAnnotationCanvas(opts: {
   opId?: string;
 }): Promise<{ canvas: fabric.Canvas; exportScale: number; canvasH: number }> {
   const { imageUrl, annotationJson, targetAspect, opId } = opts;
-  const { canvasW, canvasH, exportScale } = computeCanvasFrame(targetAspect);
+  // A saved edit is rebuilt in the frame it was saved in -- same rule as
+  // AnnotationEditor's restore (lib/annotation-frame.ts): its own aspect
+  // when that differs from targetAspect, rescaled to this window's size.
+  const restorePlan = annotationJson ? planAnnotationRestore(annotationJson, targetAspect) : null;
+  const { canvasW, canvasH, exportScale } = computeCanvasFrame(restorePlan?.aspect ?? targetAspect);
   if (opId) diagStage(opId, "canvas-built", { canvasW, canvasH, restoring: Boolean(annotationJson) });
 
   const el = document.createElement("canvas");
@@ -167,7 +172,8 @@ export async function buildAnnotationCanvas(opts: {
   canvas.setDimensions({ width: canvasW, height: canvasH });
 
   if (annotationJson) {
-    const patched = patchRestoredAnnotationSrc(annotationJson, imageUrl);
+    const srcPatched = patchRestoredAnnotationSrc(annotationJson, imageUrl);
+    const patched = restorePlan?.savedHeight ? rescaleAnnotationJson(srcPatched, canvasH / restorePlan.savedHeight) : srcPatched;
     try {
       await canvas.loadFromJSON(patched);
     } catch (err) {
@@ -397,6 +403,12 @@ export function recoverSourceFrameHeight(
   sourceJson: object | null,
   targetAspect: { w: number; h: number },
 ): number | null {
+  // Exact whenever the base photo's placement is one the editor produces
+  // (lib/annotation-frame.ts) -- the min() heuristic below assumes the
+  // frame is targetAspect, which misreads a portrait photo in a 4:5 slide
+  // frame. Kept as the fallback for anything that can't be recovered.
+  const exact = recoverSavedFrame(sourceJson);
+  if (exact) return exact.height;
   const objects = (sourceJson as RawAnnotationJson | null)?.objects;
   const basePhoto = objects?.find((o) => o.appRole === BASE_PHOTO_ROLE);
   if (!basePhoto) return null;
