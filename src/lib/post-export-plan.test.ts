@@ -77,7 +77,20 @@ test("edited cover + Grid framing: the framing starts from the SAVED EDIT (the i
   ]);
 });
 
-test("videos always export the real video file, untouched -- and an automatic, never-changed poster adds nothing", () => {
+test("a standalone Reel with only its AUTOMATIC poster exports that poster as its one cover image, byte-for-byte", () => {
+  const auto = { posterPath: "proj/auto-poster.jpg", coverEdited: false };
+  assert.deepEqual(summarize(planPostExport([vid(1, null, auto)], null, "edited")), [
+    "cover.mov <- proj/orig-1.mov [verbatim]",
+    "cover-image.jpg <- proj/auto-poster.jpg [verbatim]",
+  ]);
+  // never a second / duplicate cover file
+  const plan = planPostExport([vid(1, null, auto)], FRAMING, "edited");
+  assert.equal(plan.filter((i) => i.part === "cover-image").length, 1);
+  // no poster file at all: nothing is invented
+  assert.deepEqual(summarize(planPostExport([vid(1, null, { posterPath: null })], null, "edited")), ["cover.mov <- proj/orig-1.mov [verbatim]"]);
+});
+
+test("carousel videos always export just the real video file -- an automatic poster adds nothing", () => {
   const auto = { posterPath: "proj/auto-poster.jpg", coverEdited: false };
   assert.deepEqual(summarize(planPostExport([img(1), vid(2, null, auto), vid(3)], null, "edited")), [
     "cover.png <- proj/orig-1.png [verbatim]",
@@ -262,13 +275,14 @@ test("client: a framed Reel cover's image is rendered by the export route, edite
   }
 });
 
-test("client: no cover image for images, unchanged automatic posters, or videos without a poster", () => {
+test("client: a standalone Reel's AUTOMATIC poster downloads as its cover image, straight from storage", () => {
+  assert.deepEqual(videoCoverDownloadSource(videoShown(false), true, null, 1, "p", "q"), { url: "https://s/poster.jpg", viaServer: false });
+});
+
+test("client: no cover image for images, or videos without a poster", () => {
   assert.equal(videoCoverDownloadSource(shown, true, FRAMING, 1, "p", "q"), null);
-  assert.equal(videoCoverDownloadSource(videoShown(false), true, null, 1, "p", "q"), null);
-  assert.equal(videoCoverDownloadSource(videoShown(undefined), false, FRAMING, 1, "p", "q"), null, "framing never applies to a non-cover slide");
   assert.equal(videoCoverDownloadSource({ ...videoShown(true), posterUrl: null }, true, FRAMING, 1, "p", "q"), null);
-  // an explicit session-local "not edited" wins over annotation_json
-  assert.equal(videoCoverDownloadSource(videoShown(false, { objects: [] }), true, null, 1, "p", "q"), null);
+  assert.equal(videoCoverDownloadSource({ ...videoShown(false), posterUrl: null }, true, null, 1, "p", "q"), null);
 });
 
 test("client and server agree on which items need rendering", () => {

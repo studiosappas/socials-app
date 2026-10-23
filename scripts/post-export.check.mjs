@@ -55,6 +55,9 @@ import sharp from "sharp";
 import JSZip from "jszip";
 import { parseExportPart, parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
 import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib/post-export";
+// The export plan exactly as it is in Production (78042ae), written next to this
+// route by the check script -- for the legacy before/after comparison (part D).
+import { planPostExport as planPostExportBefore } from "./plan-before";
 
 const quad = (w: number, h: number, colors: string[]) =>
   sharp({ create: { width: w, height: h, channels: 3, background: colors[0] } }).composite([
@@ -91,6 +94,8 @@ function fixtures() {
     m.set("p/orig-w.mp4", Buffer.from(video.map((b) => 255 - b)));
     m.set("p/poster-v-edit.jpg", await quad(1080, 1440, ["#ff8000", "#8000ff", "#008080", "#ff69b4"]).jpeg({ quality: 92 }).toBuffer());
     m.set("p/poster-w-auto.jpg", await sharp({ create: { width: 720, height: 1280, channels: 3, background: "#777777" } }).jpeg({ quality: 92 }).toBuffer());
+    // A LEGACY 3:4 saved edit (made when covers were edited at 3:4), 1080x1440.
+    m.set("p/edit-l-preview.jpg", await quad(1080, 1440, ["#204060", "#604020", "#206040", "#402060"]).jpeg({ quality: 92 }).toBuffer());
     return m;
   })();
   return cache;
@@ -104,7 +109,27 @@ const GONE: PostExportAsset = { postAssetId: "pa-gone", mediaType: "image", stor
 // a video whose cover was saved through Edit Cover, and one with only its automatic poster
 const VE: PostExportAsset = { postAssetId: "pa-ve", mediaType: "video", storagePath: "p/orig-v.mp4", previewPath: null, posterPath: "p/poster-v-edit.jpg", coverEdited: true };
 const VA: PostExportAsset = { postAssetId: "pa-va", mediaType: "video", storagePath: "p/orig-w.mp4", previewPath: null, posterPath: "p/poster-w-auto.jpg", coverEdited: false };
+const L: PostExportAsset = { postAssetId: "pa-l", mediaType: "image", storagePath: "p/orig-c.png", previewPath: "p/edit-l-preview.jpg" };
+const FRAME = { scale: 1.6, x: 0.08, y: -0.05, rotation: 0 };
+// Part D: posts as they exist in Production today -- legacy 3:4 edits, Grid
+// framings, older video covers -- plus new-style ones, each exported by the
+// Production plan (before) and the current plan (after), same renderer.
+const LEGACY: Record<string, { assets: PostExportAsset[]; transform: typeof FRAME | null }> = {
+  "framed original image": { assets: [B], transform: FRAME },
+  "framed legacy 3:4 edit": { assets: [L], transform: FRAME },
+  "unframed legacy 3:4 edit": { assets: [L], transform: null },
+  "framed 4:5 edit": { assets: [A], transform: FRAME },
+  "unframed 4:5 edit": { assets: [A], transform: null },
+  "image carousel, framed legacy cover": { assets: [L, A, C], transform: FRAME },
+  "Reel, legacy 3:4 edited cover, framed": { assets: [VE], transform: FRAME },
+  "Reel, legacy 3:4 edited cover, unframed": { assets: [VE], transform: null },
+  "Reel, automatic poster, framed": { assets: [VA], transform: FRAME },
+  "Reel, automatic poster, unframed": { assets: [VA], transform: null },
+  "mixed carousel, framed": { assets: [L, VE, VA], transform: FRAME },
+};
 const SCENARIOS: Record<string, { assets: PostExportAsset[]; transform: { scale: number; x: number; y: number; rotation?: number } | null }> = {
+  // a standalone Reel with only its automatic poster, unframed
+  "reel-auto": { assets: [VA], transform: null },
   // edited + framed cover, untouched slide, edited slide, video
   carousel: { assets: [A, B, C, V], transform: { scale: 2, x: 0, y: 0 } },
   // same post, nobody framed the cover
@@ -135,6 +160,21 @@ export async function GET(request: Request) {
   if (fixture) {
     const buf = files.get(fixture);
     return buf ? new Response(new Uint8Array(buf)) : new Response("no such fixture", { status: 404 });
+  }
+  if (url.searchParams.get("legacy")) {
+    const describe = async (rendered: { item: { filename: string }; data: Buffer }[]) =>
+      Promise.all(rendered.map(async ({ item, data }) => {
+        const meta = item.filename.endsWith(".mp4") ? null : await sharp(data).metadata();
+        return { name: item.filename, size: meta ? meta.width + "x" + meta.height : data.length + " B video", sha: (await import("node:crypto")).createHash("sha256").update(data).digest("hex").slice(0, 12) };
+      }));
+    const out = [];
+    for (const [name, s] of Object.entries(LEGACY)) {
+      const download = async (p: string) => files.get(p) ?? null;
+      const before = await describe(await renderPostExport(planPostExportBefore(s.assets, s.transform, "edited"), s.transform, download));
+      const after = await describe(await renderPostExport(planPostExport(s.assets, s.transform, "edited"), s.transform, download));
+      out.push({ name, before, after });
+    }
+    return Response.json(out);
   }
   const scenario = SCENARIOS[url.searchParams.get("scenario") ?? ""];
   if (!scenario) return new Response("no such scenario", { status: 400 });
@@ -480,11 +520,18 @@ async function partA() {
     assert.equal(video.res.headers.get("content-type"), "video/mp4");
     assert.equal(sha(video.buf), sha(F["p/orig-v.mp4"]));
     const none = await get("scenario=video-covers&asset=pa-va&part=cover-image");
-    assert.equal(none.res.status, 404, "an automatic, unframed poster is not offered");
+    assert.equal(none.res.status, 404, "a carousel video's automatic poster is not offered");
     const carouselEdited = await get("scenario=video-covers&asset=pa-ve&part=cover-image");
     assert.equal(carouselEdited.res.status, 404, "a carousel video's edited cover is not offered");
     const carouselFramed = await get("scenario=framed-video-carousel&asset=pa-ve&part=cover-image");
     assert.equal(carouselFramed.res.status, 404, "a carousel's framed first-item video cover is not offered");
+  });
+
+  await check("standalone Reel with only its AUTOMATIC poster: video + that poster as ONE cover image, byte-for-byte", async () => {
+    const z = await unzip((await get("scenario=reel-auto")).buf);
+    assert.deepEqual(z.names, ["cover.mp4", "cover-image.jpg"]);
+    assert.equal(sha(z.files["cover.mp4"]), sha(F["p/orig-w.mp4"]));
+    assert.equal(sha(z.files["cover-image.jpg"]), sha(F["p/poster-w-auto.jpg"]));
   });
 
   await check("internal variant=original with video covers: only the untouched files -- no cover images", async () => {
@@ -492,6 +539,42 @@ async function partA() {
     assert.deepEqual(o.names, ["cover.png", "slide-2.mp4", "slide-3.mp4"]);
     assert.equal(sha(o.files["slide-2.mp4"]), sha(F["p/orig-v.mp4"]));
     assert.equal(sha(o.files["slide-3.mp4"]), sha(F["p/orig-w.mp4"]));
+  });
+
+  // --- D. legacy before/after (Production plan vs this branch) ------------
+  console.log("\n### D. legacy exports -- Production plan (78042ae) vs this branch, same renderer");
+  const legacy = await (await fetch(`${BASE}/files?legacy=1`)).json();
+  // The only intended differences; everything else must be byte-identical.
+  const EXPECTED_CHANGES = {
+    "Reel, automatic poster, unframed": "adds the automatic poster as the Reel's one cover image (D2, approved)",
+    "mixed carousel, framed": "drops the carousel video's separate cover JPG (approved in the previous cycle)",
+  };
+  for (const row of legacy) {
+    const fmt = (files) => files.map((f) => `${f.name} ${f.size}`).join(", ");
+    console.log(`   ${row.name}\n     before: ${fmt(row.before)}\n     after:  ${fmt(row.after)}`);
+  }
+  await check("D. every legacy framed/edited post exports the SAME files, dimensions and bytes as Production -- except the two approved changes", async () => {
+    for (const row of legacy) {
+      const same = JSON.stringify(row.before) === JSON.stringify(row.after);
+      if (EXPECTED_CHANGES[row.name]) assert.equal(same, false, `${row.name}: expected a change`);
+      else assert.ok(same, `${row.name} changed:\n before ${JSON.stringify(row.before)}\n after  ${JSON.stringify(row.after)}`);
+    }
+  });
+  await check("D. the approved changes are exactly as described (one added auto cover; carousel video cover removed, slides unchanged)", async () => {
+    const reel = legacy.find((r) => r.name === "Reel, automatic poster, unframed");
+    assert.deepEqual(reel.after.slice(0, reel.before.length), reel.before);
+    assert.deepEqual(reel.after.slice(reel.before.length).map((f) => [f.name, f.size]), [["cover-image.jpg", "720x1280"]]);
+    const mixed = legacy.find((r) => r.name === "mixed carousel, framed");
+    assert.deepEqual(mixed.after, mixed.before.filter((f) => !/^slide-\d+-cover\./.test(f.name)));
+  });
+  await check("D. legacy framed covers still export at the Grid's 3:4; unframed edits at their own saved size", async () => {
+    const pick = (name, file) => legacy.find((r) => r.name === name).after.find((f) => f.name === file).size;
+    for (const [name, file] of [["framed legacy 3:4 edit", "cover.jpg"], ["framed original image", "cover.jpg"], ["Reel, legacy 3:4 edited cover, framed", "cover-image.jpg"]]) {
+      const [w, h] = pick(name, file).split("x").map(Number);
+      assert.ok(Math.abs(w / h - 0.75) < 0.01, `${name}: ${w}x${h}`);
+    }
+    assert.equal(pick("unframed legacy 3:4 edit", "cover.jpg"), "1080x1440");
+    assert.equal(pick("unframed 4:5 edit", "cover.jpg"), "1600x2000");
   });
 
   await check("exporting is read-only: every fixture is byte-identical after all of the above", async () => {
@@ -711,6 +794,16 @@ async function partC(engine, browser, video) {
     await ctx.close();
   }
   {
+    const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-auto&framing=off" });
+    await check(`${engine} desktop: an unframed standalone Reel with only its AUTOMATIC poster offers that poster as its cover image`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
+      assert.deepEqual(requests, ["poster-4.jpg"]);
+      assert.equal(name, "poster-4.jpg");
+    });
+    await ctx.close();
+  }
+  {
     const { ctx, page, requests, frameMenu } = await open({ query: "?framing=off" });
     await check(`${engine} desktop: an edited cover WITHOUT framing downloads its saved edit directly (no server render)`, async () => {
       requests.length = 0;
@@ -826,6 +919,11 @@ try {
     fs.mkdirSync(path.join(HARNESS_DIR, dir), { recursive: true });
     fs.writeFileSync(path.join(HARNESS_DIR, dir, file), source);
   }
+  fs.writeFileSync(
+    path.join(HARNESS_DIR, "files", "plan-before.ts"),
+    "// TEMPORARY -- Production's post-export-plan.ts (78042ae), written by scripts/post-export.check.mjs.\n" +
+      execSync("git show 78042aed6c9aff8eae72c2934f1ce98c5a4b9920:src/lib/post-export-plan.ts", { cwd: ROOT, encoding: "utf8" }),
+  );
   server = spawn(`npx next dev --port ${PORT}`, { cwd: ROOT, shell: true, stdio: "ignore" });
   await waitForServer(`${BASE}/editor`, 180000);
   await partA();

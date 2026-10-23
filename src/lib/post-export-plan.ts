@@ -20,13 +20,12 @@
 // "edited" (the default download) = what the app shows:
 //   image  -> layer 2 if it exists, else layer 1; the cover additionally
 //             gets layer 3 applied when a framing is saved.
-//   video  -> the real video file, untouched. A video's saved cover edit /
-//             framing belongs to its poster image, not to the file, so when
-//             the user explicitly changed that cover (Edit Cover, or a Grid
-//             framing on the post's cover) the poster is exported as a
-//             SEPARATE image next to the video -- with the framing applied
-//             when there is one. An automatic, never-touched poster is not.
-//             Only for a standalone Reel (the post's ONLY item): a video
+//   video  -> the real video file, untouched. A standalone Reel (the
+//             post's ONLY item) also exports its cover as ONE separate
+//             image next to the video: the cover the app shows -- the Edit
+//             Cover result, or the automatic poster when it was never
+//             edited -- with the Grid framing applied when there is one.
+//             Nothing is generated: no poster file, no cover image. A video
 //             inside a carousel never gets a separate cover image -- the
 //             platform has no per-slide cover to upload it as.
 // "original" = layer 1 for everything, byte-for-byte.
@@ -80,19 +79,12 @@ export function parseExportPart(value: string | null | undefined): PostExportPar
 
 // Whether a video's cover image belongs in the edited download: only for a
 // standalone Reel (the post's only item -- `itemCount` is the post's total
-// media count), and only when the user explicitly changed that cover --
-// saved through Edit Cover, or given a Grid framing. A video inside a
-// carousel (mixed or not) never exports a standalone cover JPG. Shared by
-// server and client so the zip, the share sheet and the per-frame menu
-// always agree.
-export function includesVideoCover(
-  video: { hasPoster: boolean; coverEdited: boolean },
-  isCover: boolean,
-  coverTransform: object | null | undefined,
-  itemCount: number,
-): boolean {
-  if (itemCount !== 1) return false;
-  return video.hasPoster && (video.coverEdited || (isCover && Boolean(coverTransform)));
+// media count) that has a poster file -- edited through Edit Cover or the
+// automatic one. A video inside a carousel (mixed or not) never exports a
+// standalone cover JPG. Shared by server and client so the zip, the share
+// sheet and the per-frame menu always agree.
+export function includesVideoCover(hasPoster: boolean, itemCount: number): boolean {
+  return itemCount === 1 && hasPoster;
 }
 
 function extensionOf(path: string, fallback: string): string {
@@ -122,11 +114,7 @@ export function planPostExport(
         filename: `${base}.${extensionOf(asset.storagePath, asset.mediaType === "video" ? "mp4" : "jpg")}`,
       };
       const posterPath = asset.posterPath ?? null;
-      if (
-        variant === "original" ||
-        !posterPath ||
-        !includesVideoCover({ hasPoster: true, coverEdited: Boolean(asset.coverEdited) }, isCover, coverTransform, assets.length)
-      ) {
+      if (variant === "original" || !posterPath || !includesVideoCover(true, assets.length)) {
         return [file];
       }
       const framed = isCover && Boolean(coverTransform);
@@ -222,9 +210,8 @@ export function editedDownloadSource(
 
 // A video's cover image, when the edited download includes one (see
 // includesVideoCover): straight from storage, or rendered by the export route
-// when it is the post's cover with a saved Grid framing. Null for images,
-// for videos inside a carousel (`itemCount` > 1), and for videos whose cover
-// was never explicitly changed.
+// when it is the post's cover with a saved Grid framing. Null for images, for
+// videos inside a carousel (`itemCount` > 1), and for videos with no poster.
 export function videoCoverDownloadSource(
   asset: DownloadableAsset,
   isCover: boolean,
@@ -234,8 +221,7 @@ export function videoCoverDownloadSource(
   postId: string,
 ): DownloadSource | null {
   if (asset.mediaType !== "video" || !asset.posterUrl) return null;
-  const coverEdited = asset.coverEdited ?? Boolean(asset.annotationJson);
-  if (!includesVideoCover({ hasPoster: true, coverEdited }, isCover, coverTransform, itemCount)) return null;
+  if (!includesVideoCover(true, itemCount)) return null;
   if (isCover && coverTransform) {
     return {
       url: postExportUrl(projectId, postId, { postAssetId: asset.postAssetId, part: "cover-image" }),
