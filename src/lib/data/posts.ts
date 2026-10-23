@@ -12,6 +12,7 @@ import {
   type LibraryPage,
 } from "@/lib/media-library-paging";
 import { canEditContent } from "@/lib/role-permissions";
+import { effectiveCarouselPostIds } from "@/lib/post-type";
 import { mergeWorkspaceSettings, type WorkspaceSettings } from "@/lib/account-settings";
 import type { MediaType, PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 
@@ -259,16 +260,21 @@ export async function getPostMediaLibraryPage(
   // Same "already used in a carousel" lookup as Grid's own media library
   // (grid/page.tsx) -- project-wide, so fetched once per page (not per raw
   // batch), started now so it runs alongside the batches below.
+  //
+  // "Carousel" here is the EFFECTIVE type (lib/post-type.ts): stored
+  // "reel" posts are fetched too, and count when they hold 2+ items -- the
+  // mixed carousels the old type rule saved as "reel". Read-only.
   const usedInCarouselPromise = (async () => {
-    const { data: carouselPosts } = await supabase
+    const { data: candidatePosts } = await supabase
       .from("posts")
-      .select("id")
+      .select("id, post_type")
       .eq("project_id", projectId)
-      .eq("post_type", "carousel");
-    const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
-    if (carouselPostIds.length === 0) return new Set<string>();
-    const { data: carouselAssetRows } = await supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds);
-    return new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+      .in("post_type", ["carousel", "reel"]);
+    const candidateIds = (candidatePosts ?? []).map((p) => p.id);
+    if (candidateIds.length === 0) return new Set<string>();
+    const { data: assetRows } = await supabase.from("post_assets").select("post_id, media_asset_id").in("post_id", candidateIds);
+    const carouselIds = effectiveCarouselPostIds(candidatePosts ?? [], assetRows ?? []);
+    return new Set((assetRows ?? []).filter((r) => carouselIds.has(r.post_id)).map((r) => r.media_asset_id));
   })();
 
   const { rows: mediaAssets, nextCursor, hasMore } = await collectLibraryPage<RawMediaRow>({

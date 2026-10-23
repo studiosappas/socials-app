@@ -15,6 +15,7 @@ import { mergeWorkspaceSettings } from "@/lib/account-settings";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { AccessRestricted } from "../access-restricted";
+import { effectivePostType } from "@/lib/post-type";
 
 export default async function CalendarPage({
   params,
@@ -182,6 +183,13 @@ export default async function CalendarPage({
 
   const thumbnailByPost = new Map<string, string | null>();
   const assetsByPost = new Map<string, string[]>();
+  // Real media count per post (every item, signed URL or not) -- what
+  // effectivePostType needs to show a 2+ item post as a Carousel even when
+  // its stored post_type is an older "reel". Display only; nothing written.
+  const itemCountByPost = new Map<string, number>();
+  for (const a of postAssets ?? []) {
+    if (a.media_assets) itemCountByPost.set(a.post_id, (itemCountByPost.get(a.post_id) ?? 0) + 1);
+  }
   for (const a of postAssets ?? []) {
     const path = (a.media_assets as { storage_path: string } | null)?.storage_path;
     const url = path ? urlByPath.get(path) ?? null : null;
@@ -205,7 +213,7 @@ export default async function CalendarPage({
     list.push({
       itemType: "post",
       itemId: post.id,
-      label: post.post_type,
+      label: effectivePostType(post.post_type, itemCountByPost.get(post.id) ?? 0),
       thumbnailUrl: thumbnailByPost.get(post.id) ?? null,
       assetUrls: assetsByPost.get(post.id) ?? [],
       href: `/projects/${projectId}/posts/${post.id}`,
@@ -245,7 +253,7 @@ export default async function CalendarPage({
     ...(unscheduledPosts ?? []).map((p) => ({
       itemType: "post" as const,
       itemId: p.id,
-      label: p.post_type,
+      label: effectivePostType(p.post_type, itemCountByPost.get(p.id) ?? 0),
       thumbnailUrl: thumbnailByPost.get(p.id) ?? null,
       assetUrls: assetsByPost.get(p.id) ?? [],
       href: `/projects/${projectId}/posts/${p.id}`,

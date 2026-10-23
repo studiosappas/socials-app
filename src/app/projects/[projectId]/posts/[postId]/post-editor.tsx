@@ -42,6 +42,7 @@ import {
 } from "@/lib/post-export-plan";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { newEditAspect } from "@/lib/media-aspect";
+import { effectivePostType } from "@/lib/post-type";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
@@ -644,6 +645,7 @@ export function PostEditor({
       <PostMainForm
         projectId={projectId}
         post={post}
+        itemCount={orderedAssets.length}
         links={links}
         canManage={canManage}
         role={role}
@@ -1595,6 +1597,7 @@ const POST_TYPES: PostType[] = ["post", "reel", "carousel"];
 function PostMainForm({
   projectId,
   post,
+  itemCount,
   links,
   canManage,
   role,
@@ -1602,6 +1605,8 @@ function PostMainForm({
 }: {
   projectId: string;
   post: PostRecord;
+  // The post's media count as shown in the editor right now.
+  itemCount: number;
   links: PostLinkItem[];
   canManage: boolean;
   role: ProjectRole;
@@ -1610,16 +1615,25 @@ function PostMainForm({
   const isClient = canSubmitClientReview(role);
   // Adding/replacing/removing media auto-suggests the right type (see
   // lib/post-type.ts's syncPostType, which writes posts.post_type directly
-  // and revalidates) -- this follows that fresh server value whenever it
-  // changes, so the pill selection updates itself, while still staying a
-  // real pick the user can override by hand and Save. "Adjust state during
-  // render" (this codebase's own convention) rather than an effect, since
-  // resetting local state to match a changed prop needs no external sync.
-  const [prevPostType, setPrevPostType] = useState(post.post_type);
-  const [postType, setPostType] = useState<PostType>(post.post_type);
-  if (post.post_type !== prevPostType) {
-    setPrevPostType(post.post_type);
-    setPostType(post.post_type);
+  // and revalidates) -- this follows that fresh value whenever it changes,
+  // so the pill selection updates itself, while still staying a real pick
+  // the user can override by hand and Save. "Adjust state during render"
+  // (this codebase's own convention) rather than an effect, since resetting
+  // local state to match a changed prop needs no external sync.
+  //
+  // The pill shows the EFFECTIVE type (effectivePostType): 2+ items is a
+  // Carousel even when the stored value is an older "reel". Display only --
+  // Save sends post_type ONLY when the user actually picked a pill this
+  // session (postTypePicked), so saving a caption on an older mislabelled
+  // post never rewrites its stored type behind the user's back.
+  const shownPostType = effectivePostType(post.post_type, itemCount);
+  const [prevShownPostType, setPrevShownPostType] = useState(shownPostType);
+  const [postType, setPostType] = useState<PostType>(shownPostType);
+  const [postTypePicked, setPostTypePicked] = useState(false);
+  if (shownPostType !== prevShownPostType) {
+    setPrevShownPostType(shownPostType);
+    setPostType(shownPostType);
+    setPostTypePicked(false);
   }
 
   // Same pattern, one block covering the rest of the form's fields -- but
@@ -1712,7 +1726,8 @@ function PostMainForm({
     setSaved(false);
     setSaving(true);
     const formData = new FormData();
-    formData.set("post_type", postType);
+    // Omitted unless picked: updatePost then keeps the stored value as is.
+    if (postTypePicked) formData.set("post_type", postType);
     formData.set("caption", caption);
     formData.set("notes", notes);
     formData.set("status", status);
@@ -1752,7 +1767,10 @@ function PostMainForm({
               key={type}
               type="button"
               disabled={!canManage}
-              onClick={() => setPostType(type)}
+              onClick={() => {
+                setPostType(type);
+                setPostTypePicked(true);
+              }}
               className={`flex-1 rounded-full border px-4 py-2 text-xs tracking-wide uppercase transition-colors duration-150 ${
                 postType === type
                   ? "border-foreground bg-foreground text-background"

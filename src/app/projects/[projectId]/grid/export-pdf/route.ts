@@ -2,7 +2,7 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
-import { exportPostType } from "@/lib/post-type";
+import { effectivePostType } from "@/lib/post-type";
 import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
 
 const PAGE_W = 612; // US Letter, points
@@ -214,10 +214,10 @@ export async function GET(
     const allPaths = imagePathsByPostId.get(postId) ?? [];
     // Only a carousel shows every slide, laid out across one row -- a
     // single-image post or reel just shows its one cover, same as before.
-    // exportPostType, not the raw stored value: a mixed image/video
+    // effectivePostType, not the raw stored value: a mixed image/video
     // carousel saved as "reel" under the old derivation rule is still a
     // carousel here (read-time only, nothing is written).
-    const postType = exportPostType(post.post_type, allPaths.length);
+    const postType = effectivePostType(post.post_type, allPaths.length);
     const paths = postType === "carousel" ? allPaths : allPaths.slice(0, 1);
     const count = Math.max(paths.length, 1);
 

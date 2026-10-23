@@ -12,21 +12,35 @@ type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 // This used to return "reel" whenever ANY item was a video, which mis-typed
 // every mixed carousel -- and the Grid PDF export then showed only its first
 // slide. Posts saved under that old rule keep their stored post_type (no
-// backfill); see exportPostType for how export reads them.
+// backfill); see effectivePostType for how they are shown and exported.
 export function derivePostType(assets: { mediaType: "image" | "video" }[]): PostType | null {
   if (assets.length === 0) return null;
   if (assets.length >= 2) return "carousel";
   return assets[0].mediaType === "video" ? "reel" : "post";
 }
 
-// The type an EXPORT treats a post as, from its stored post_type and its
-// real media count -- read-time only, never written back. The one
-// correction: a stored "reel" with 2+ items can only be a carousel (a Reel
-// is a single video), which is exactly what the old derivePostType rule
-// produced for mixed carousels. Every other stored value -- including a
-// manual pick like "post" on a multi-image post -- is respected as saved.
-export function exportPostType(stored: PostType, itemCount: number): PostType {
-  return stored === "reel" && itemCount >= 2 ? "carousel" : stored;
+// The type every surface SHOWS and EXPORTS a post as (Post Editor, Calendar,
+// Grid PDF export, the library's "in a carousel" badge), from its stored
+// post_type and its real media count -- read-time only, never written back.
+// 2+ media items is always a Carousel (a Post or a Reel is a single item),
+// whatever was stored: this corrects every mixed carousel the old
+// derivePostType rule saved as "reel". A single item keeps its stored type,
+// which syncPostType already sets to Post (image) / Reel (video) on every
+// media change. No media yet (count 0) keeps the stored type.
+export function effectivePostType(stored: PostType, itemCount: number): PostType {
+  return itemCount >= 2 ? "carousel" : stored;
+}
+
+// Which of `posts` are effectively carousels, given their post_assets rows
+// (one row per media item) -- effectivePostType applied per post. Used by
+// the media library's "in a carousel" badge.
+export function effectiveCarouselPostIds(
+  posts: { id: string; post_type: PostType }[],
+  assetRows: { post_id: string }[],
+): Set<string> {
+  const counts = new Map<string, number>();
+  for (const row of assetRows) counts.set(row.post_id, (counts.get(row.post_id) ?? 0) + 1);
+  return new Set(posts.filter((p) => effectivePostType(p.post_type, counts.get(p.id) ?? 0) === "carousel").map((p) => p.id));
 }
 
 // Server-only orchestration: re-reads a post's current assets, derives the
