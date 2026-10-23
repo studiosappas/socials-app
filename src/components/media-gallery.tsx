@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CroppedCoverImage } from "@/app/projects/[projectId]/grid/grid-crop-overlay";
 import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 
@@ -72,13 +72,9 @@ export function MediaFrame({
   const className = `${WIDTH_CLASS[type][grouped ? "grouped" : "solo"]} ${ASPECT_CLASS[type]} shrink-0 overflow-hidden bg-black/[.03]`;
   if (media.mediaType === "video") {
     return (
-      <video
-        src={media.url}
-        poster={media.posterUrl ?? undefined}
-        controls
-        playsInline
-        className={`${className} object-cover`}
-      />
+      <div className={className}>
+        <VideoCoverPlayer url={media.url} posterUrl={media.posterUrl} coverTransform={coverTransform} />
+      </div>
     );
   }
   // PDF has no equivalent to video's native poster attribute -- a plain
@@ -149,14 +145,7 @@ export function Lightbox({
 
         <div key={current.key} className={`animate-settle-in shrink-0 overflow-hidden bg-black/[.03] ${LIGHTBOX_BOX_CLASS[current.contentType]}`}>
           {current.mediaType === "video" ? (
-            <video
-              src={current.url}
-              poster={current.posterUrl ?? undefined}
-              controls
-              playsInline
-              autoPlay
-              className="h-full w-full object-cover"
-            />
+            <VideoCoverPlayer url={current.url} posterUrl={current.posterUrl} coverTransform={current.coverTransform} />
           ) : (
             // A PDF here shows its generated page-1 cover, not a live
             // embedded viewer -- this lightbox's box is a fixed, cropped
@@ -179,6 +168,105 @@ export function Lightbox({
             {index + 1} / {media.length}
           </span>
         </div>
+      )}
+    </div>
+  );
+}
+
+// A video, cover first: the cover the app shows for it -- the saved Edit
+// Cover result (or automatic poster) with the post's saved Grid framing when
+// it's the cover item -- with a Play control. Play plays the ORIGINAL video,
+// whole (object-contain on black: a landscape or 9:16 video is letter/
+// pillar-boxed in this fixed box, never cropped), with normal controls.
+// "Show cover" (or the video ending) returns to the cover. Nothing autoplays.
+//
+// This replaced a raw <video object-cover autoPlay>, which never showed the
+// edited cover (the poster attribute vanishes the moment autoplay starts),
+// ignored the Grid framing, and cropped every video to the box.
+//
+// One <video> is always mounted underneath (preload="metadata", so a cover
+// that's showing costs no video download) and Play calls play() directly in
+// the tap handler -- iOS only allows sound playback started inside the
+// user's gesture, which a freshly-mounted autoPlay element isn't. With no
+// cover image at all, that paused video (its first frame) is the cover.
+// Fills its parent box; never changes size, so nothing jumps.
+export function VideoCoverPlayer({
+  url,
+  posterUrl,
+  coverTransform,
+}: {
+  url: string;
+  posterUrl: string | null;
+  coverTransform: GridCoverTransform | null;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  function play() {
+    // A load failure usually surfaces early (preload="metadata"), before
+    // Play. Retry once from scratch: the error event fires again if it's
+    // still broken, which shows the message while "playing".
+    if (failed) {
+      setFailed(false);
+      videoRef.current?.load();
+    }
+    setPlaying(true);
+    const video = videoRef.current;
+    video?.play().catch((error: unknown) => {
+      // NotSupportedError = no playable source (missing file, unsupported
+      // format): say so. Anything else (e.g. an autoplay policy) leaves the
+      // native controls showing, so the user can start it themselves.
+      if ((error instanceof DOMException && error.name === "NotSupportedError") || video.error) setFailed(true);
+    });
+  }
+  function showCover() {
+    videoRef.current?.pause();
+    setPlaying(false);
+  }
+
+  return (
+    <div className="relative h-full w-full bg-black" data-video-player={playing ? "playing" : "cover"}>
+      <video
+        ref={videoRef}
+        src={url}
+        preload="metadata"
+        playsInline
+        controls={playing}
+        onEnded={() => setPlaying(false)}
+        onError={() => setFailed(true)}
+        className="h-full w-full object-contain"
+      />
+      {!playing && posterUrl && (
+        <CroppedCoverImage src={posterUrl} transform={coverTransform} className="absolute inset-0 h-full w-full select-none" />
+      )}
+      {!playing && (
+        <button
+          type="button"
+          onClick={play}
+          aria-label="Play video"
+          className="group absolute inset-0 flex items-center justify-center bg-transparent focus-visible:outline-none"
+        >
+          <span className="flex h-14 w-14 items-center justify-center rounded-full bg-black/55 text-white shadow-[0_2px_10px_rgba(0,0,0,0.35)] transition-transform duration-150 group-hover:scale-105 group-focus-visible:ring-2 group-focus-visible:ring-white">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="ml-0.5 h-6 w-6">
+              <path d="M8 5.5v13l11-6.5z" />
+            </svg>
+          </span>
+        </button>
+      )}
+      {playing && (
+        <button
+          type="button"
+          onClick={showCover}
+          className="absolute left-2 top-2 rounded-full bg-black/55 px-3 py-1 text-xs tracking-wide text-white uppercase transition-colors duration-150 hover:bg-black/70"
+        >
+          Show cover
+        </button>
+      )}
+      {playing && failed && (
+        <p role="alert" className="absolute inset-x-3 top-1/2 -translate-y-1/2 text-center text-sm text-white">
+          This video can&apos;t be played here.
+        </p>
       )}
     </div>
   );

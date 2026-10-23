@@ -208,24 +208,33 @@ async function run(browser, video) {
       }
       assert.deepEqual(seq, ["4 / 4", "1 / 4", "2 / 4", "1 / 4", "4 / 4"]);
     });
-    await check(`${label}: item 2 is the real video (poster only as poster) and it plays`, async () => {
+    await check(`${label}: item 2 (a video) opens on its COVER, not autoplaying; Play plays the real video, whole`, async () => {
       await click(viewerBtn("Next"));
       await click(viewerBtn("Next"));
       const s = await viewerState(page);
       assert.equal(s.counter, "2 / 4");
       assert.match(s.video, /video-2\.webm$/);
+      assert.match(s.img, /poster-2\.svg$/, "the cover image is what shows first");
+      await page.waitForTimeout(800);
+      const before = await page.evaluate(() => {
+        const v = document.querySelector("[data-post-media-viewer] video");
+        return { paused: v.paused, t: v.currentTime };
+      });
+      assert.equal(before.paused, true, "no autoplay");
+      assert.equal(before.t, 0);
+      await click(page.locator("[data-post-media-viewer] button[aria-label='Play video']"));
       const t = await page.evaluate(async () => {
         const v = document.querySelector("[data-post-media-viewer] video");
-        v.muted = true;
         await new Promise((r) => (v.readyState >= 2 ? r() : ((v.onloadeddata = r), setTimeout(r, 5000))));
-        await v.play().catch(() => {});
         const a = v.currentTime;
         await new Promise((r) => setTimeout(r, 900));
-        return { a, b: v.currentTime, w: v.videoWidth, poster: v.getAttribute("poster") };
+        return { a, b: v.currentTime, w: v.videoWidth, fit: getComputedStyle(v).objectFit };
       });
       assert.ok(t.b - t.a > 0.4, `advanced ${t.a} -> ${t.b}`);
       assert.ok(t.w > 0);
-      assert.match(t.poster, /poster-2\.svg$/);
+      assert.equal(t.fit, "contain");
+      await click(page.locator("[data-post-media-viewer] button", { hasText: "Show cover" }));
+      assert.match((await viewerState(page)).img, /poster-2\.svg$/);
     });
     if (!mobile) {
       await check(`${label}: arrows navigate; Escape closes ONLY the viewer (the popup's own Escape never fires)`, async () => {
