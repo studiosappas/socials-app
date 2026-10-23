@@ -39,14 +39,17 @@ const assets = [a("1", "https://media.test/img-1.svg", "image"), a("2", "https:/
 // Promise.resolve per render re-suspends use(), and [] has no .entries.
 const LIBRARY = Promise.resolve({ entries: [], nextCursor: null, hasMore: false });
 export default function Harness() {
-  const viewerOn = useSearchParams().get("viewer") !== "off";
+  const params = useSearchParams();
+  const viewerOn = params.get("viewer") !== "off";
+  // ?stored=reel: an older mixed carousel saved as "reel" by the old type rule (D1)
+  const storedType = params.get("stored") === "reel" ? "reel" : "carousel";
   const [closes, setCloses] = useState(0);
   return (
     <div data-modal-closes={closes}>
       {closes === 0 && (
         <Modal onClose={() => setCloses((c) => c + 1)}>
           <PostEditor projectId="00000000-0000-0000-0000-000000000000"
-            post={{ id: "00000000-0000-0000-0000-000000000001", post_type: "carousel", caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
+            post={{ id: "00000000-0000-0000-0000-000000000001", post_type: storedType, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
             assets={assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
             currentUserId="00000000-0000-0000-0000-000000000002" members={[]} dateFormat="DD/MM/YYYY" hideBackLink enableMediaViewer={viewerOn} />
         </Modal>
@@ -372,6 +375,61 @@ async function run(browser, video) {
     assert.equal(await modalCloses(page), 0);
   });
   await ctx.close();
+
+  // --- D1: an older mixed carousel stored as "reel" -------------------------
+  // Server Action requests are captured and ABORTED here: nothing reaches a
+  // real backend, only the request body the editor would send is inspected.
+  {
+    const legacy = await setup({ width: 1400, height: 900 }, { query: "?stored=reel" });
+    const bodies = [];
+    await legacy.page.route("**/*", (route) => {
+      const req = route.request();
+      if (req.method() === "POST" && req.headers()["next-action"]) {
+        bodies.push(req.postData() ?? "");
+        return route.abort();
+      }
+      return route.fallback();
+    });
+    const pill = (name) => legacy.page.getByRole("button", { name, exact: true });
+    const selected = async () => {
+      for (const n of ["post", "reel", "carousel"]) {
+        if (/bg-foreground/.test((await pill(n).getAttribute("class")) ?? "")) return n;
+      }
+      return null;
+    };
+    await check("D1: a 4-item post stored as 'reel' shows Post Type CAROUSEL in the Post Editor", async () => {
+      assert.equal(await selected(), "carousel");
+    });
+    await check("D1: Save without picking a type does NOT send post_type (the stored value is left as is)", async () => {
+      await legacy.page.locator("textarea").first().fill("caption only");
+      await legacy.page.getByRole("button", { name: "Save Changes" }).click();
+      await legacy.page.waitForTimeout(1000);
+      const save = bodies.find((b) => b.includes("caption only"));
+      assert.ok(save, `a save request was made (${bodies.length} captured)`);
+      assert.ok(!/post_type/.test(save), "no post_type in the save");
+    });
+    await legacy.ctx.close();
+  }
+  {
+    // fresh page: an aborted Server Action leaves the dev page in an error state
+    const picked = await setup({ width: 1400, height: 900 }, { query: "?stored=reel" });
+    const bodies = [];
+    await picked.page.route("**/*", (route) => {
+      const req = route.request();
+      if (req.method() === "POST" && req.headers()["next-action"]) {
+        bodies.push(req.postData() ?? "");
+        return route.abort();
+      }
+      return route.fallback();
+    });
+    await check("D1: an explicit pick is still sent on Save (manual override unchanged)", async () => {
+      await picked.page.getByRole("button", { name: "post", exact: true }).click();
+      await picked.page.getByRole("button", { name: "Save Changes" }).click();
+      await picked.page.waitForTimeout(1000);
+      assert.ok(bodies.some((b) => /post_type[\s\S]{0,80}post/.test(b)), `bodies: ${bodies.map((b) => b.slice(0, 200)).join(" | ")}`);
+    });
+    await picked.ctx.close();
+  }
 }
 
 if (fs.existsSync(HARNESS_DIR)) {
