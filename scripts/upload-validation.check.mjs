@@ -692,12 +692,15 @@ import { PostEditor, type PostAssetItem } from "@/app/projects/[projectId]/posts
 const assets: PostAssetItem[] = [
   { postAssetId: "pa-1", mediaAssetId: "m-1", url: "https://media.test/img-1.png", originalUrl: "https://media.test/img-1.png", annotationJson: null, mediaType: "image", posterUrl: null },
 ];
+// Module-level and in the paged LibraryPage shape (Issue 6) -- an inline
+// Promise.resolve per render re-suspends use(), and [] has no .entries.
+const LIBRARY = Promise.resolve({ entries: [], nextCursor: null, hasMore: false });
 export default function Page() {
   return (
     <Modal onClose={() => {}}>
       <PostEditor projectId="00000000-0000-0000-0000-000000000000"
         post={{ id: "00000000-0000-0000-0000-000000000001", post_type: "post", caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: null }}
-        assets={assets} links={[]} mediaLibraryPromise={Promise.resolve([])} canManage role="owner"
+        assets={assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
         currentUserId="00000000-0000-0000-0000-000000000002" members={[]} dateFormat="DD/MM/YYYY" hideBackLink />
     </Modal>
   );

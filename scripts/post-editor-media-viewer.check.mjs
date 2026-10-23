@@ -35,6 +35,9 @@ import { PostEditor, type PostAssetItem } from "../projects/[projectId]/posts/[p
 const a = (id: string, url: string, mediaType: "image" | "video", posterUrl: string | null = null): PostAssetItem =>
   ({ postAssetId: "pa-" + id, mediaAssetId: "m-" + id, url, originalUrl: url, annotationJson: null, mediaType, posterUrl });
 const assets = [a("1", "https://media.test/img-1.svg", "image"), a("2", "https://media.test/video-2.webm", "video", "https://media.test/poster-2.svg"), a("3", "https://media.test/img-3.svg", "image"), a("4", "https://media.test/img-4.svg", "image")];
+// Module-level and in the paged LibraryPage shape (Issue 6) -- an inline
+// Promise.resolve per render re-suspends use(), and [] has no .entries.
+const LIBRARY = Promise.resolve({ entries: [], nextCursor: null, hasMore: false });
 export default function Harness() {
   const viewerOn = useSearchParams().get("viewer") !== "off";
   const [closes, setCloses] = useState(0);
@@ -44,7 +47,7 @@ export default function Harness() {
         <Modal onClose={() => setCloses((c) => c + 1)}>
           <PostEditor projectId="00000000-0000-0000-0000-000000000000"
             post={{ id: "00000000-0000-0000-0000-000000000001", post_type: "carousel", caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
-            assets={assets} links={[]} mediaLibraryPromise={Promise.resolve([])} canManage role="owner"
+            assets={assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
             currentUserId="00000000-0000-0000-0000-000000000002" members={[]} dateFormat="DD/MM/YYYY" hideBackLink enableMediaViewer={viewerOn} />
         </Modal>
       )}
@@ -296,6 +299,29 @@ async function run(browser, video) {
       await page.waitForTimeout(300);
       assert.equal(await viewerOpen(page), false);
       assert.equal(await editorMounted(page), true);
+    });
+    await check(`${label}: the Crop stage is ENLARGED and centred (same 3:4 as the 96x128 tile), inside the viewport`, async () => {
+      await click(page.locator("button[title='Frame options']").nth(0));
+      await page.waitForTimeout(200);
+      await click(page.getByRole("button", { name: "Crop", exact: true }));
+      await page.waitForTimeout(500);
+      const tileBox = await tile(0).boundingBox();
+      const f = await page.locator("div.fixed.z-\\[101\\] > div").first().boundingBox();
+      assert.ok(Math.abs(f.width / f.height - 0.75) < 0.01, `aspect ${JSON.stringify(f)}`);
+      assert.ok(f.height >= 3 * tileBox.height, `frame ${f.width}x${f.height} vs tile ${tileBox.width}x${tileBox.height}`);
+      assert.ok(f.x >= 0 && f.y >= 0 && f.x + f.width <= viewport.width && f.y + f.height <= viewport.height, JSON.stringify(f));
+      assert.ok(Math.abs(f.x + f.width / 2 - viewport.width / 2) < 2 && Math.abs(f.y + f.height / 2 - viewport.height / 2) < 2, "centred");
+      if (!mobile) {
+        // Escape cancels the crop ONLY -- the Post Editor popup stays open
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(300);
+        assert.equal(await page.locator("div.fixed.z-\\[101\\]").count(), 0, "crop closed");
+        assert.equal(await modalCloses(page), 0, "popup not closed");
+        assert.equal(await editorMounted(page), true);
+      } else {
+        await click(page.getByRole("button", { name: "Cancel", exact: true }).first());
+        await page.waitForTimeout(300);
+      }
     });
     await check(`${label}: opening/navigating/closing sends NO server actions (read-only)`, async () => {
       const before = actions.length;
