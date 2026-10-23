@@ -1336,6 +1336,9 @@ function SortableAsset({
           onSave={handleSaveCrop}
           onCancel={() => setCropMode(false)}
           anchorRef={tileRef}
+          // The 96x128 tile is too small to crop on -- same 3:4 frame,
+          // enlarged and centred; the saved crop is identical either way.
+          presentation="enlarged"
         />
       )}
       {replaceOpen && (

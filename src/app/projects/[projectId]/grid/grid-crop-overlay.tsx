@@ -8,6 +8,7 @@ import {
   clampOffsetPx,
   coverBaseScale,
   coverageSlackPx,
+  fitEnlargedCropFrame,
   minZoomForCoverage,
   normalizeRotationDeg,
 } from "@/lib/crop-geometry";
@@ -86,7 +87,18 @@ function useNaturalSize(src: string): NaturalSize | null {
 // same duration -- the simplest way to guarantee the underlying page
 // can't scroll the anchor out from under this fixed-position frame while
 // editing (page-level scroll is not expected/needed mid-crop).
-function useEditFrame(anchorRef: React.RefObject<HTMLElement | null>): FrameGeom | null {
+//
+// presentation "enlarged" (opt-in, Post Editor only): the anchor supplies
+// only the frame's ASPECT; the frame itself is sized to the viewport and
+// centred in it (fitEnlargedCropFrame). Post Editor's cover tile is a
+// 96x128 thumbnail inside a scrollable modal -- too small to crop with, and
+// body-scroll locking doesn't stop the modal's own scroll from moving it.
+// The stored crop doesn't depend on the frame's pixel size, so the result
+// is identical to cropping on the tile itself.
+function useEditFrame(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  presentation: "in-place" | "enlarged",
+): FrameGeom | null {
   const [frame, setFrame] = useState<FrameGeom | null>(null);
   useLayoutEffect(() => {
     let rafId: number | null = null;
@@ -111,6 +123,18 @@ function useEditFrame(anchorRef: React.RefObject<HTMLElement | null>): FrameGeom
           retriesLeft -= 1;
           rafId = requestAnimationFrame(recompute);
         }
+        return;
+      }
+      if (presentation === "enlarged") {
+        const vv = window.visualViewport;
+        const viewport = { width: vv?.width ?? window.innerWidth, height: vv?.height ?? window.innerHeight };
+        const size = fitEnlargedCropFrame({ width: rect.width, height: rect.height }, viewport);
+        setFrame({
+          width: size.width,
+          height: size.height,
+          centerX: (vv?.offsetLeft ?? 0) + viewport.width / 2,
+          centerY: (vv?.offsetTop ?? 0) + viewport.height / 2,
+        });
         return;
       }
       setFrame({
@@ -171,14 +195,19 @@ export function GridCropOverlay({
   onSave,
   onCancel,
   anchorRef,
+  presentation = "in-place",
 }: {
   imageUrl: string;
   initialTransform: GridCoverTransform | null;
   onSave: (transform: GridCoverTransform) => void;
   onCancel: () => void;
   anchorRef: React.RefObject<HTMLElement | null>;
+  // "in-place" (default, Grid): the frame IS the anchor tile, in place.
+  // "enlarged" (Post Editor): the anchor's aspect, viewport-sized and
+  // centred -- see useEditFrame.
+  presentation?: "in-place" | "enlarged";
 }) {
-  const frame = useEditFrame(anchorRef);
+  const frame = useEditFrame(anchorRef, presentation);
   const natural = useNaturalSize(imageUrl);
   const ready = frame !== null && natural !== null;
 
@@ -255,14 +284,23 @@ export function GridCropOverlay({
       }
     }
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancelRef.current();
+      if (e.key !== "Escape") return;
+      // Enlarged = inside Post Editor's Modal, which closes itself on a
+      // document-level Escape: claimed here in the capture phase so Escape
+      // only cancels the crop. Grid (in-place) keeps its listener as is.
+      if (presentation === "enlarged") e.stopPropagation();
+      onCancelRef.current();
     }
+    const keyTarget: Window | Document = presentation === "enlarged" ? window : document;
+    const keyCapture = presentation === "enlarged";
     document.addEventListener("pointerdown", handleDocPointerDown);
-    document.addEventListener("keydown", handleKeyDown);
+    keyTarget.addEventListener("keydown", handleKeyDown as EventListener, keyCapture);
     return () => {
       document.removeEventListener("pointerdown", handleDocPointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
+      keyTarget.removeEventListener("keydown", handleKeyDown as EventListener, keyCapture);
     };
+    // presentation is fixed for the overlay's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function commit() {

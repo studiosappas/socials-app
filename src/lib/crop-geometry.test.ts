@@ -18,6 +18,7 @@ import {
   clampOffsetPx,
   coverBaseScale,
   coverageSlackPx,
+  fitEnlargedCropFrame,
   minZoomForCoverage,
   normalizeRotationDeg,
   rotateVec,
@@ -324,6 +325,24 @@ test("portrait and square sources: existing behavior -- width fills, vertical pa
   assert.deepEqual(sq.px, { x: 0, y: 0 });
   const sqZoomed = panStored({ w: 300, h: 300 }, square, 2, { x: 0, y: 0 }, { x: 80, y: -80 });
   assert.deepEqual(sqZoomed.px, { x: 80, y: -80 }, "square zoomed in pans freely within bounds");
+});
+
+const close = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
+
+// --- Post Editor enlarged Crop stage (fitEnlargedCropFrame) -----------------
+
+test("enlarged crop frame: keeps the tile's aspect, fits the viewport, never smaller than the tile", () => {
+  const tile = { width: 96, height: 128 }; // Post Editor's 3:4 asset tile
+  for (const viewport of [{ width: 375, height: 667 }, { width: 390, height: 844 }, { width: 1440, height: 900 }, { width: 768, height: 1024 }]) {
+    const f = fitEnlargedCropFrame(tile, viewport);
+    const where = `${viewport.width}x${viewport.height} -> ${JSON.stringify(f)}`;
+    assert.ok(close(f.width / f.height, 0.75, 1e-9), `aspect ${where}`);
+    assert.ok(f.width <= viewport.width - 48 + 1e-9 && f.height <= viewport.height - 144 + 1e-9, `fits ${where}`);
+    assert.ok(f.height <= 560 + 1e-9, `capped ${where}`);
+    assert.ok(f.height >= 3 * tile.height, `substantially larger than the 96x128 tile ${where}`);
+  }
+  // a viewport too small to enlarge anything falls back to the tile itself
+  assert.deepEqual(fitEnlargedCropFrame(tile, { width: 120, height: 200 }), tile);
 });
 
 console.log(`\n${passed} passed`);

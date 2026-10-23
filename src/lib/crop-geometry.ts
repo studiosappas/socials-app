@@ -123,3 +123,29 @@ export function clampOffsetPx(
   const clampedLocal = { x: clampNum(local.x, -boundX, boundX), y: clampNum(local.y, -boundY, boundY) };
   return rotateVec(clampedLocal, rotationDeg);
 }
+
+// Post Editor's enlarged Crop stage (GridCropOverlay presentation
+// "enlarged"): the anchor tile's ASPECT, at the largest size that fits the
+// viewport with room left around it for the rotate handle above and the
+// corner handles -- never smaller than the tile itself, capped so a desktop
+// window doesn't get a wall-sized frame. The stored crop is a fraction of
+// the image's own base-cover size, so the same transform frames identically
+// at this size and at the tile's (see the "same stored offset" tests).
+export const ENLARGED_CROP_FRAME = { maxHeight: 560, sideMargin: 24, verticalMargin: 72 } as const;
+export function fitEnlargedCropFrame(
+  anchor: { width: number; height: number },
+  viewport: { width: number; height: number },
+  limits: { maxHeight: number; sideMargin: number; verticalMargin: number } = ENLARGED_CROP_FRAME,
+): { width: number; height: number } {
+  if (anchor.width <= 0 || anchor.height <= 0) return { width: anchor.width, height: anchor.height };
+  const aspect = anchor.width / anchor.height;
+  let height = Math.min(limits.maxHeight, viewport.height - 2 * limits.verticalMargin);
+  let width = height * aspect;
+  const maxWidth = viewport.width - 2 * limits.sideMargin;
+  if (width > maxWidth) {
+    width = maxWidth;
+    height = width / aspect;
+  }
+  if (height < anchor.height) return { width: anchor.width, height: anchor.height };
+  return { width, height };
+}
