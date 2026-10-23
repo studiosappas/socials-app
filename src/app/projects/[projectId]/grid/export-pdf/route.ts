@@ -2,6 +2,7 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
+import { exportPostType } from "@/lib/post-type";
 import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
 
 const PAGE_W = 612; // US Letter, points
@@ -136,18 +137,21 @@ export async function GET(
     (posterRows ?? []).map((r) => [r.id, (r as { poster_storage_path: string | null }).poster_storage_path]),
   );
 
-  const imagePathsByPostId = new Map<string, string[]>();
+  // One entry per real media item, in carousel order -- null where an item
+  // has nothing drawable (a video with no poster yet). Kept positional so
+  // index 0 is always the post's real cover (the only position its
+  // cover_transform belongs to) and the length is the post's real item count.
+  const imagePathsByPostId = new Map<string, (string | null)[]>();
   for (const pa of postAssets ?? []) {
     const media = pa.media_assets as { id: string; storage_path: string; media_type: string } | null;
     if (!media) continue;
     // Grid never shows a raw video file -- a video asset resolves to its
-    // captured poster frame (or is skipped if it has none yet), exactly
+    // captured poster frame (an empty box if it has none yet), exactly
     // like the on-screen grid and the full-feed export already do.
     const path =
       media.media_type === "video"
         ? (posterByMediaId.get(media.id) ?? null)
         : (previewByMediaId.get(media.id) || media.storage_path);
-    if (!path) continue;
     const list = imagePathsByPostId.get(pa.post_id) ?? [];
     list.push(path);
     imagePathsByPostId.set(pa.post_id, list);
@@ -177,7 +181,7 @@ export async function GET(
   // two different renders (a carousel's own slides reuse this same cache,
   // and only the cover position ever gets a non-null transform).
   const imageCache = new Map<string, Uint8Array | null>();
-  async function embedThumb(path: string | undefined, transform: CoverTransform | null) {
+  async function embedThumb(path: string | null | undefined, transform: CoverTransform | null) {
     if (!path) return null;
     const cacheKey = `${path}:${transform ? JSON.stringify(transform) : "none"}`;
     if (!imageCache.has(cacheKey)) {
@@ -208,9 +212,13 @@ export async function GET(
     if (!post) continue;
 
     const allPaths = imagePathsByPostId.get(postId) ?? [];
-    // Only a carousel shows every image, laid out across one row -- a
+    // Only a carousel shows every slide, laid out across one row -- a
     // single-image post or reel just shows its one cover, same as before.
-    const paths = post.post_type === "carousel" ? allPaths : allPaths.slice(0, 1);
+    // exportPostType, not the raw stored value: a mixed image/video
+    // carousel saved as "reel" under the old derivation rule is still a
+    // carousel here (read-time only, nothing is written).
+    const postType = exportPostType(post.post_type, allPaths.length);
+    const paths = postType === "carousel" ? allPaths : allPaths.slice(0, 1);
     const count = Math.max(paths.length, 1);
 
     let thumbW = IDEAL_THUMB_W;
@@ -260,7 +268,7 @@ export async function GET(
       page.drawText(line, { x: MARGIN, y: textY, size: 10, font, color: INK });
       textY -= 13;
     }
-    page.drawText((TYPE_LABEL[post.post_type] ?? "Single Image").toUpperCase(), {
+    page.drawText((TYPE_LABEL[postType] ?? "Single Image").toUpperCase(), {
       x: MARGIN,
       y: textY - 4,
       size: 7.5,

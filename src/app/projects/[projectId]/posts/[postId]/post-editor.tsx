@@ -478,12 +478,12 @@ export function PostEditor({
       // Gated on isTouchDevice -- some desktop browsers do support
       // canShare({files}), so shareAssetFiles' own preferMobileUx parameter
       // is what keeps the OS share dialog off desktop clicks.
-      // A video whose cover was explicitly changed contributes its cover
-      // image as a second file, same rule as the export route's zip.
+      // A standalone Reel whose cover was explicitly changed contributes its
+      // cover image as a second file, same rule as the export route's zip.
       const sources: (DownloadSource | null)[] = orderedAssets.flatMap((a, index) => {
         const transform = liveCoverTransformRef.current;
         const media = editedDownloadSource(a, index === 0, transform, projectId, post.id);
-        const cover = videoCoverDownloadSource(a, index === 0, transform, projectId, post.id);
+        const cover = videoCoverDownloadSource(a, index === 0, transform, orderedAssets.length, projectId, post.id);
         return cover ? [media, cover] : [media];
       });
       const shareable = sources
@@ -557,6 +557,7 @@ export function PostEditor({
                   asset={asset}
                   canManage={canManage}
                   isCover={index === 0}
+                  itemCount={orderedAssets.length}
                   coverTransform={effectiveCoverTransform}
                   projectId={projectId}
                   postId={post.id}
@@ -1058,6 +1059,7 @@ function SortableAsset({
   asset,
   canManage,
   isCover,
+  itemCount,
   coverTransform,
   projectId,
   postId,
@@ -1070,6 +1072,9 @@ function SortableAsset({
   asset: PostAssetItem;
   canManage: boolean;
   isCover: boolean;
+  // The post's total media count -- a video's separate cover image only
+  // exists for a standalone Reel (see includesVideoCover).
+  itemCount: number;
   coverTransform: GridCoverTransform | null;
   projectId: string;
   postId: string;
@@ -1174,9 +1179,10 @@ function SortableAsset({
   // lib/post-export-plan.ts. Only the MECHANISM differs on a touch device,
   // which prefers the native share sheet. There is deliberately no
   // user-facing "original" download: originals stay in storage for editing.
-  // "Download Cover Image": a video's explicitly changed cover, as an image
-  // (the menu entry only appears when videoCoverSource exists).
-  const videoCoverSource = videoCoverDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
+  // "Download Cover Image": a standalone Reel's explicitly changed cover, as
+  // an image (the menu entry only appears when videoCoverSource exists --
+  // never for a video inside a carousel).
+  const videoCoverSource = videoCoverDownloadSource(asset, isCover, effectiveTransform, itemCount, projectId, postId);
   function handleDownload(kind: "edited" | "cover") {
     setMenuOpen(false);
     if (downloading) return;
@@ -1738,9 +1744,9 @@ function PostMainForm({
 
       <div className="flex flex-col gap-1.5">
         <span className={labelClass}>Post Type</span>
-        {/* Auto-selected whenever media changes (1 image = Post, 2+ images
-            = Carousel, any video = Reel), but still a real pick -- click
-            another and Save to override it. */}
+        {/* Auto-selected whenever media changes (1 image = Post, 1 video =
+            Reel, 2+ items of any type = Carousel), but still a real pick --
+            click another and Save to override it. */}
         <div className="flex flex-wrap gap-2">
           {POST_TYPES.map((type) => (
             <button

@@ -92,27 +92,43 @@ test("videos always export the real video file, untouched -- and an automatic, n
   ]);
 });
 
-test("a video with an EDITED cover exports the untouched video plus its cover image, byte-for-byte", () => {
+test("a standalone Reel with an EDITED cover exports the untouched video plus its cover image, byte-for-byte", () => {
   const edited = { posterPath: "proj/poster-edit.jpg", coverEdited: true };
-  assert.deepEqual(summarize(planPostExport([img(1), vid(2, null, edited)], null, "edited")), [
-    "cover.png <- proj/orig-1.png [verbatim]",
-    "slide-2.mov <- proj/orig-2.mov [verbatim]",
-    "slide-2-cover.jpg <- proj/poster-edit.jpg [verbatim]",
-  ]);
   assert.deepEqual(summarize(planPostExport([vid(1, null, edited)], null, "edited")), [
     "cover.mov <- proj/orig-1.mov [verbatim]",
     "cover-image.jpg <- proj/poster-edit.jpg [verbatim]",
   ]);
 });
 
-test("a FRAMED video cover exports its cover image with the framing -- edited or automatic poster alike", () => {
+test("a FRAMED standalone Reel cover exports its cover image with the framing -- edited or automatic poster alike", () => {
   for (const coverEdited of [true, false]) {
-    assert.deepEqual(summarize(planPostExport([vid(1, null, { posterPath: "proj/poster.jpg", coverEdited }), img(2)], FRAMING, "edited")), [
+    assert.deepEqual(summarize(planPostExport([vid(1, null, { posterPath: "proj/poster.jpg", coverEdited })], FRAMING, "edited")), [
       "cover.mov <- proj/orig-1.mov [verbatim]",
       "cover-image.jpg <- proj/poster.jpg [cover-crop]",
-      "slide-2.png <- proj/orig-2.png [verbatim]",
     ]);
   }
+});
+
+test("mixed carousels: every slide exports, videos as their real files, and NO standalone cover JPG for any video", () => {
+  const edited = { posterPath: "proj/poster-edit.jpg", coverEdited: true };
+  // video inside a carousel, edited cover, at a non-cover position
+  assert.deepEqual(summarize(planPostExport([img(1), vid(2, null, edited)], null, "edited")), [
+    "cover.png <- proj/orig-1.png [verbatim]",
+    "slide-2.mov <- proj/orig-2.mov [verbatim]",
+  ]);
+  // video as the carousel's FIRST item, edited and framed -- still no cover JPG
+  for (const framing of [null, FRAMING]) {
+    assert.deepEqual(summarize(planPostExport([vid(1, null, edited), img(2), vid(3, null, edited)], framing, "edited")), [
+      "cover.mov <- proj/orig-1.mov [verbatim]",
+      "slide-2.png <- proj/orig-2.png [verbatim]",
+      "slide-3.mov <- proj/orig-3.mov [verbatim]",
+    ]);
+  }
+  // an all-video carousel is a carousel too
+  assert.deepEqual(summarize(planPostExport([vid(1, null, edited), vid(2, null, edited)], FRAMING, "edited")), [
+    "cover.mov <- proj/orig-1.mov [verbatim]",
+    "slide-2.mov <- proj/orig-2.mov [verbatim]",
+  ]);
 });
 
 test("a video with no poster at all never gets a cover image, edited flag or framing notwithstanding", () => {
@@ -121,13 +137,11 @@ test("a video with no poster at all never gets a cover image, edited flag or fra
   ]);
 });
 
-test("cover images carry their own part, label and a unique filename", () => {
-  const plan = planPostExport([vid(1, null, { posterPath: "p/a.jpg", coverEdited: true }), vid(2, null, { posterPath: "p/b.jpg", coverEdited: true })], null, "edited");
+test("a Reel's cover image carries its own part, label and a unique filename", () => {
+  const plan = planPostExport([vid(1, null, { posterPath: "p/a.jpg", coverEdited: true })], null, "edited");
   assert.deepEqual(plan.map((i) => [i.postAssetId, i.part, i.label]), [
     ["pa-1", "media", "the cover"],
     ["pa-1", "cover-image", "the cover image"],
-    ["pa-2", "media", "slide 2"],
-    ["pa-2", "cover-image", "the cover image of slide 2"],
   ]);
   assert.equal(new Set(plan.map((i) => i.filename)).size, plan.length);
 });
@@ -218,19 +232,29 @@ const videoShown = (coverEdited: boolean | undefined, annotationJson: object | n
   coverEdited,
 });
 
-test("client: a video's edited cover image comes straight from storage", () => {
-  assert.deepEqual(videoCoverDownloadSource(videoShown(true), false, null, "p", "q"), { url: "https://s/poster.jpg", viaServer: false });
-  assert.deepEqual(videoCoverDownloadSource(videoShown(true), true, null, "p", "q"), { url: "https://s/poster.jpg", viaServer: false });
+test("client: a standalone Reel's edited cover image comes straight from storage", () => {
+  assert.deepEqual(videoCoverDownloadSource(videoShown(true), true, null, 1, "p", "q"), { url: "https://s/poster.jpg", viaServer: false });
   // edited state read from saved annotation_json when the session didn't set it
-  assert.deepEqual(videoCoverDownloadSource(videoShown(undefined, { objects: [] }), false, null, "p", "q"), {
+  assert.deepEqual(videoCoverDownloadSource(videoShown(undefined, { objects: [] }), true, null, 1, "p", "q"), {
     url: "https://s/poster.jpg",
     viaServer: false,
   });
 });
 
-test("client: a framed video cover's image is rendered by the export route, edited or not", () => {
+test("client: no 'Download Cover Image' for a video inside a carousel, at any position, edited or framed", () => {
+  for (const itemCount of [2, 3, 10]) {
+    for (const isCover of [true, false]) {
+      for (const framing of [null, FRAMING]) {
+        assert.equal(videoCoverDownloadSource(videoShown(true), isCover, framing, itemCount, "p", "q"), null);
+        assert.equal(videoCoverDownloadSource(videoShown(undefined, { objects: [] }), isCover, framing, itemCount, "p", "q"), null);
+      }
+    }
+  }
+});
+
+test("client: a framed Reel cover's image is rendered by the export route, edited or not", () => {
   for (const coverEdited of [true, false]) {
-    assert.deepEqual(videoCoverDownloadSource(videoShown(coverEdited), true, FRAMING, "p", "q"), {
+    assert.deepEqual(videoCoverDownloadSource(videoShown(coverEdited), true, FRAMING, 1, "p", "q"), {
       url: "/projects/p/posts/q/export?asset=pa-2&part=cover-image",
       viaServer: true,
       filename: "cover-image.jpg",
@@ -239,12 +263,12 @@ test("client: a framed video cover's image is rendered by the export route, edit
 });
 
 test("client: no cover image for images, unchanged automatic posters, or videos without a poster", () => {
-  assert.equal(videoCoverDownloadSource(shown, true, FRAMING, "p", "q"), null);
-  assert.equal(videoCoverDownloadSource(videoShown(false), true, null, "p", "q"), null);
-  assert.equal(videoCoverDownloadSource(videoShown(undefined), false, FRAMING, "p", "q"), null, "framing never applies to a non-cover slide");
-  assert.equal(videoCoverDownloadSource({ ...videoShown(true), posterUrl: null }, true, FRAMING, "p", "q"), null);
+  assert.equal(videoCoverDownloadSource(shown, true, FRAMING, 1, "p", "q"), null);
+  assert.equal(videoCoverDownloadSource(videoShown(false), true, null, 1, "p", "q"), null);
+  assert.equal(videoCoverDownloadSource(videoShown(undefined), false, FRAMING, 1, "p", "q"), null, "framing never applies to a non-cover slide");
+  assert.equal(videoCoverDownloadSource({ ...videoShown(true), posterUrl: null }, true, FRAMING, 1, "p", "q"), null);
   // an explicit session-local "not edited" wins over annotation_json
-  assert.equal(videoCoverDownloadSource(videoShown(false, { objects: [] }), false, null, "p", "q"), null);
+  assert.equal(videoCoverDownloadSource(videoShown(false, { objects: [] }), true, null, 1, "p", "q"), null);
 });
 
 test("client and server agree on which items need rendering", () => {
@@ -261,18 +285,22 @@ test("client and server agree on which items need rendering", () => {
 test("client and server agree on which video cover images exist and which are rendered", () => {
   for (const framing of [null, FRAMING]) {
     for (const coverEdited of [true, false]) {
-      for (const position of [0, 1]) {
+      // "reel": the video alone; "first"/"second": the video inside a
+      // two-item carousel, at that position.
+      for (const layout of ["reel", "first", "second"] as const) {
         const video = vid(9, null, { posterPath: "proj/poster.jpg", coverEdited });
-        const assets = position === 0 ? [video, img(2)] : [img(1), video];
+        const assets = layout === "reel" ? [video] : layout === "first" ? [video, img(2)] : [img(1), video];
         const serverCover = planPostExport(assets, framing, "edited").find((i) => i.part === "cover-image");
         const clientCover = videoCoverDownloadSource(
           { postAssetId: "pa-9", mediaType: "video", url: "u", originalUrl: "o", posterUrl: "pu", coverEdited },
-          position === 0,
+          layout !== "second",
           framing,
+          assets.length,
           "p",
           "q",
         );
-        const where = `framing ${Boolean(framing)}, edited ${coverEdited}, position ${position}`;
+        const where = `framing ${Boolean(framing)}, edited ${coverEdited}, layout ${layout}`;
+        if (layout !== "reel") assert.equal(serverCover, undefined, where);
         assert.equal(Boolean(serverCover), Boolean(clientCover), where);
         if (serverCover && clientCover) assert.equal(clientCover.viaServer, serverCover.operation === "cover-crop", where);
       }

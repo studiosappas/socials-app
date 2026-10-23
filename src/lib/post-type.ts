@@ -3,14 +3,30 @@ import type { PostType } from "@/types/database";
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
-// 1 image -> Post, 2+ images -> Carousel, any video present -> Reel --
-// applies regardless of position, so a carousel with one video slide is
-// still a Reel by this rule. Empty (no assets yet) returns null rather than
+// Instagram's own structure rule: 1 image -> Post, 1 video -> Reel, 2+
+// media items of ANY type -> Carousel (a mixed image/video carousel is a
+// Carousel, never a Reel). The item count decides first; media type only
+// matters for a single item. Empty (no assets yet) returns null rather than
 // guessing, since there's nothing to derive from.
+//
+// This used to return "reel" whenever ANY item was a video, which mis-typed
+// every mixed carousel -- and the Grid PDF export then showed only its first
+// slide. Posts saved under that old rule keep their stored post_type (no
+// backfill); see exportPostType for how export reads them.
 export function derivePostType(assets: { mediaType: "image" | "video" }[]): PostType | null {
   if (assets.length === 0) return null;
-  if (assets.some((a) => a.mediaType === "video")) return "reel";
-  return assets.length === 1 ? "post" : "carousel";
+  if (assets.length >= 2) return "carousel";
+  return assets[0].mediaType === "video" ? "reel" : "post";
+}
+
+// The type an EXPORT treats a post as, from its stored post_type and its
+// real media count -- read-time only, never written back. The one
+// correction: a stored "reel" with 2+ items can only be a carousel (a Reel
+// is a single video), which is exactly what the old derivePostType rule
+// produced for mixed carousels. Every other stored value -- including a
+// manual pick like "post" on a multi-image post -- is respected as saved.
+export function exportPostType(stored: PostType, itemCount: number): PostType {
+  return stored === "reel" && itemCount >= 2 ? "carousel" : stored;
 }
 
 // Server-only orchestration: re-reads a post's current assets, derives the

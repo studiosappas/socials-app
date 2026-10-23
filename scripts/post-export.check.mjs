@@ -114,10 +114,15 @@ const SCENARIOS: Record<string, { assets: PostExportAsset[]; transform: { scale:
   // unedited cover, framed: must start from the ORIGINAL pixels
   "framed-unedited-a": { assets: [A_UNEDITED], transform: { scale: 2, x: 0, y: 0 } },
   "missing-slide": { assets: [B, GONE, C], transform: null },
-  // untouched cover image, a video with an edited cover, a video with only its automatic poster
+  // a MIXED CAROUSEL: untouched cover image, a video with an edited cover, a video with only its
+  // automatic poster -- carousel videos never get a separate cover image
   "video-covers": { assets: [B, VE, VA], transform: null },
-  // a video as the post's cover, with a Grid framing: on its edited cover / on its automatic poster
-  "framed-video-edited": { assets: [VE, B], transform: { scale: 2, x: 0, y: 0 } },
+  // a standalone Reel whose cover was saved through Edit Cover, unframed
+  "reel-edited": { assets: [VE], transform: null },
+  // a standalone Reel, with a Grid framing: on its edited cover / on its automatic poster
+  "framed-video-edited": { assets: [VE], transform: { scale: 2, x: 0, y: 0 } },
+  // the same edited, framed video as the FIRST item of a carousel -- still no cover image
+  "framed-video-carousel": { assets: [VE, B], transform: { scale: 2, x: 0, y: 0 } },
   "framed-video-auto": { assets: [VA], transform: { scale: 2, x: 0, y: 0 } },
   // the same edited video cover, framed with a 90-degree rotation
   "framed-video-rotated": { assets: [VE], transform: { scale: 1, x: 0, y: 0, rotation: 90 } },
@@ -215,17 +220,22 @@ const ASSETS: PostAssetItem[] = [
   // video whose cover was saved through Edit Cover
   { postAssetId: "pa-5", mediaAssetId: "m-5", url: M + "video-5.webm", originalUrl: M + "video-5.webm", annotationJson: { objects: [] }, mediaType: "video", posterUrl: M + "poster-5-edit.jpg" },
 ];
-// ?order=video-first: the automatic-poster video becomes the post's cover
+// ?order=video-first: the automatic-poster video becomes the CAROUSEL's cover
 const VIDEO_FIRST: PostAssetItem[] = [ASSETS[3], ASSETS[0], ASSETS[1], ASSETS[2], ASSETS[4]];
+// ?order=reel-auto / reel-edited: a standalone Reel (the video alone)
+const REEL_AUTO: PostAssetItem[] = [ASSETS[3]];
+const REEL_EDITED: PostAssetItem[] = [ASSETS[4]];
 const NO_LINKS: never[] = [];
 const NO_MEMBERS: never[] = [];
-const LIBRARY = Promise.resolve([]);
+const LIBRARY = Promise.resolve({ entries: [], nextCursor: null, hasMore: false });
 const FRAMED = { id: "${POST}", post_type: "carousel" as const, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft" as const, review_status: "pending" as const, coverTransform: { scale: 2, x: 0, y: 0, rotation: 0 } };
 const UNFRAMED = { ...FRAMED, coverTransform: null };
 export default function Harness() {
   const params = useSearchParams();
   const framed = params.get("framing") !== "off";
-  const assets = params.get("order") === "video-first" ? VIDEO_FIRST : ASSETS;
+  const order = params.get("order");
+  const assets =
+    order === "video-first" ? VIDEO_FIRST : order === "reel-auto" ? REEL_AUTO : order === "reel-edited" ? REEL_EDITED : ASSETS;
   return (
     <Modal onClose={() => {}}>
       <PostEditor projectId="${PROJECT}" post={framed ? FRAMED : UNFRAMED} assets={assets} links={NO_LINKS} mediaLibraryPromise={LIBRARY}
@@ -399,21 +409,24 @@ async function partA() {
   // --- video covers -------------------------------------------------------
   const ORANGE = [255, 128, 0], PURPLE = [128, 0, 255], TEAL = [0, 128, 128], PINK = [255, 105, 180], GREY = [119, 119, 119];
   const videoCovers = await unzip((await get("scenario=video-covers")).buf);
-  await check("video with an EDITED cover: untouched video + its cover image next to it; automatic poster adds nothing", async () => {
-    assert.deepEqual(videoCovers.names, ["cover.png", "slide-2.mp4", "slide-2-cover.jpg", "slide-3.mp4"]);
+  await check("mixed carousel: every slide, videos as their real files -- NO cover JPG for any video, edited or not", async () => {
+    assert.deepEqual(videoCovers.names, ["cover.png", "slide-2.mp4", "slide-3.mp4"]);
   });
   await check("both videos are the real files, byte-identical -- never modified by the cover image", async () => {
     assert.equal(sha(videoCovers.files["slide-2.mp4"]), sha(F["p/orig-v.mp4"]));
     assert.equal(sha(videoCovers.files["slide-3.mp4"]), sha(F["p/orig-w.mp4"]));
   });
-  await check("an unframed edited video cover is the saved cover, byte-for-byte, full 1080x1440", async () => {
-    assert.equal(sha(videoCovers.files["slide-2-cover.jpg"]), sha(F["p/poster-v-edit.jpg"]));
-    assert.equal(await size(videoCovers.files["slide-2-cover.jpg"]), "1080x1440 jpeg");
+  const reelEdited = await unzip((await get("scenario=reel-edited")).buf);
+  await check("standalone Reel with an EDITED cover: untouched video + ONE cover image, the saved cover byte-for-byte", async () => {
+    assert.deepEqual(reelEdited.names, ["cover.mp4", "cover-image.jpg"]);
+    assert.equal(sha(reelEdited.files["cover.mp4"]), sha(F["p/orig-v.mp4"]));
+    assert.equal(sha(reelEdited.files["cover-image.jpg"]), sha(F["p/poster-v-edit.jpg"]));
+    assert.equal(await size(reelEdited.files["cover-image.jpg"]), "1080x1440 jpeg");
   });
 
   const framedVideo = await unzip((await get("scenario=framed-video-edited")).buf);
-  await check("FRAMED edited video cover: video untouched + cover-image.jpg, measured 540x720 (zoom 2 of the 3:4 1080x1440 cover)", async () => {
-    assert.deepEqual(framedVideo.names, ["cover.mp4", "cover-image.jpg", "slide-2.png"]);
+  await check("FRAMED edited Reel cover: video untouched + cover-image.jpg, measured 540x720 (zoom 2 of the 3:4 1080x1440 cover)", async () => {
+    assert.deepEqual(framedVideo.names, ["cover.mp4", "cover-image.jpg"]);
     assert.equal(sha(framedVideo.files["cover.mp4"]), sha(F["p/orig-v.mp4"]));
     // Independent expectation: a 3:4 frame over a 3:4 image is the whole image at zoom 1; zoom 2 halves it, centred.
     const m = await sharp(framedVideo.files["cover-image.jpg"]).metadata();
@@ -425,6 +438,12 @@ async function partA() {
     assert.ok(near(await pixel(c, 440, 100), PURPLE), `top-right ${await pixel(c, 440, 100)}`);
     assert.ok(near(await pixel(c, 100, 620), TEAL), `bottom-left ${await pixel(c, 100, 620)}`);
     assert.ok(near(await pixel(c, 440, 620), PINK), `bottom-right ${await pixel(c, 440, 620)}`);
+  });
+
+  const framedCarousel = await unzip((await get("scenario=framed-video-carousel")).buf);
+  await check("the same edited + framed video as a carousel's FIRST item: no cover image at all", async () => {
+    assert.deepEqual(framedCarousel.names, ["cover.mp4", "slide-2.png"]);
+    assert.equal(sha(framedCarousel.files["cover.mp4"]), sha(F["p/orig-v.mp4"]));
   });
 
   const framedAuto = await unzip((await get("scenario=framed-video-auto")).buf);
@@ -462,6 +481,10 @@ async function partA() {
     assert.equal(sha(video.buf), sha(F["p/orig-v.mp4"]));
     const none = await get("scenario=video-covers&asset=pa-va&part=cover-image");
     assert.equal(none.res.status, 404, "an automatic, unframed poster is not offered");
+    const carouselEdited = await get("scenario=video-covers&asset=pa-ve&part=cover-image");
+    assert.equal(carouselEdited.res.status, 404, "a carousel video's edited cover is not offered");
+    const carouselFramed = await get("scenario=framed-video-carousel&asset=pa-ve&part=cover-image");
+    assert.equal(carouselFramed.res.status, 404, "a carousel's framed first-item video cover is not offered");
   });
 
   await check("internal variant=original with video covers: only the untouched files -- no cover images", async () => {
@@ -641,20 +664,14 @@ async function partC(engine, browser, video) {
       assert.deepEqual(requests, ["video-4.webm"]);
       assert.equal(name, "video-4.webm");
     });
-    await check(`${engine} desktop: per-frame Download Cover Image on a video with an EDITED cover fetches that cover image`, async () => {
-      requests.length = 0;
-      const name = await downloadOf(page, () => frameMenu(4, "Download Cover Image"));
-      assert.deepEqual(requests, ["poster-5-edit.jpg"]);
-      assert.equal(name, "poster-5-edit.jpg");
-    });
     await check(`${engine} desktop: per-frame Download on that video is still the real video file`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(4, "Download"));
       assert.deepEqual(requests, ["video-5.webm"]);
       assert.equal(name, "video-5.webm");
     });
-    await check(`${engine} desktop: no Download Cover Image on images or on a video with only its automatic poster`, async () => {
-      for (const index of [1, 2, 3]) {
+    await check(`${engine} desktop: no Download Cover Image on ANY frame of a mixed carousel -- edited video cover included`, async () => {
+      for (const index of [0, 1, 2, 3, 4]) {
         await menuButton(page).nth(index).click();
         await page.getByRole("button", { name: "Download", exact: true }).waitFor({ timeout: 5000 });
         assert.equal(await page.getByRole("button", { name: "Download Cover Image", exact: true }).count(), 0, `frame ${index}`);
@@ -664,12 +681,32 @@ async function partC(engine, browser, video) {
     await ctx.close();
   }
   {
-    const { ctx, page, requests, frameMenu } = await open({ query: "?order=video-first" });
-    await check(`${engine} desktop: a video as the FRAMED post cover offers its cover image, rendered by the export route`, async () => {
+    const { ctx, page } = await open({ query: "?order=video-first" });
+    await check(`${engine} desktop: a video as a FRAMED carousel's first item offers no cover image`, async () => {
+      await menuButton(page).nth(0).click();
+      await page.getByRole("button", { name: "Download", exact: true }).waitFor({ timeout: 5000 });
+      assert.equal(await page.getByRole("button", { name: "Download Cover Image", exact: true }).count(), 0);
+      await menuButton(page).nth(0).click();
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-auto" });
+    await check(`${engine} desktop: a FRAMED standalone Reel offers its cover image, rendered by the export route`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
       assert.deepEqual(requests, ["export?asset=pa-4&part=cover-image"]);
       assert.equal(name, "cover-image.jpg");
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-edited&framing=off" });
+    await check(`${engine} desktop: an unframed standalone Reel with an EDITED cover downloads that cover image from storage`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
+      assert.deepEqual(requests, ["poster-5-edit.jpg"]);
+      assert.equal(name, "poster-5-edit.jpg");
     });
     await ctx.close();
   }
@@ -705,9 +742,9 @@ async function partC(engine, browser, video) {
       await actions.getByRole("button", { name: "Save Media", exact: true }).tap();
       await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
       const shared = await page.evaluate(() => window.__shares[0]);
-      // the edited video cover rides along right after its video; the automatic poster does not
-      assert.deepEqual(shared.map((f) => f.name), ["cover.jpg", "orig-2.png", "edit-3-preview.jpg", "video-4.webm", "video-5.webm", "poster-5-edit.jpg"]);
-      assert.deepEqual([...requests].sort(), ["edit-3-preview.jpg", "export?asset=pa-1", "orig-2.png", "poster-5-edit.jpg", "video-4.webm", "video-5.webm"]);
+      // a mixed carousel: no cover image for either video, edited or automatic
+      assert.deepEqual(shared.map((f) => f.name), ["cover.jpg", "orig-2.png", "edit-3-preview.jpg", "video-4.webm", "video-5.webm"]);
+      assert.deepEqual([...requests].sort(), ["edit-3-preview.jpg", "export?asset=pa-1", "orig-2.png", "video-4.webm", "video-5.webm"]);
       assert.ok(shared.every((f) => f.size > 0 && /^(image|video)\//.test(f.type)), JSON.stringify(shared));
     });
     await check(`${engine} touch: no Save Originals, and no per-frame Save Original on any frame`, async () => {
@@ -722,13 +759,13 @@ async function partC(engine, browser, video) {
     await ctx.close();
   }
   {
-    const { ctx, page, requests, actions } = await open({ mobile: true, query: "?order=video-first" });
-    await check(`${engine} touch: a FRAMED video cover is shared as the video plus its route-rendered cover image`, async () => {
+    const { ctx, page, requests, actions } = await open({ mobile: true, query: "?order=reel-auto" });
+    await check(`${engine} touch: a FRAMED standalone Reel is shared as the video plus its route-rendered cover image`, async () => {
       requests.length = 0;
       await actions.getByRole("button", { name: "Save Media", exact: true }).tap();
       await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
       const shared = await page.evaluate(() => window.__shares[0]);
-      assert.deepEqual(shared.map((f) => f.name).slice(0, 2), ["video-4.webm", "cover-image.jpg"]);
+      assert.deepEqual(shared.map((f) => f.name), ["video-4.webm", "cover-image.jpg"]);
       assert.ok(requests.includes("export?asset=pa-4&part=cover-image"), String(requests));
     });
     await ctx.close();
