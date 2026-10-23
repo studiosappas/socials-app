@@ -16,9 +16,9 @@ export default async function PostPage({
   // purpose, so the primary editor doesn't wait on the whole project's
   // media library. Only the FIRST page (see getPostMediaLibraryPage's own
   // comment) -- AddFromLibrarySection's own Load More button pages through
-  // loadMorePostMediaLibrary for the rest, so this never blocks first
+  // loadPostMediaLibraryPage for the rest, so this never blocks first
   // paint on signing the whole project's media.
-  const mediaLibraryPromise = getPostMediaLibraryPage(projectId, 0, MEDIA_LIBRARY_PAGE_SIZE).then((r) => r.items);
+  const mediaLibraryPromise = getPostMediaLibraryPage(projectId, null, MEDIA_LIBRARY_PAGE_SIZE);
 
   return (
     <PostEditor

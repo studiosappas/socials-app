@@ -4,9 +4,16 @@ import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/pos
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@/lib/data/brand-moodboard";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
+import {
+  archivedIdsFromLookup,
+  collectLibraryPage,
+  decodeCursor,
+  encodeCursor,
+  type LibraryPage,
+} from "@/lib/media-library-paging";
 import { canEditContent } from "@/lib/role-permissions";
 import { mergeWorkspaceSettings, type WorkspaceSettings } from "@/lib/account-settings";
-import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
+import type { MediaType, PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
 
 export type PostCoreData = {
   post: {
@@ -218,67 +225,99 @@ export async function getPostCoreData(
 // again for every subsequent page so nothing past #24 is ever
 // unreachable.
 export const MEDIA_LIBRARY_PAGE_SIZE = 24;
-// getPostMediaLibrary (unpaginated callers below) keeps its own prior
-// larger size -- this only governs the PRIMARY "Add from library"/Replace
-// flow in post-editor.tsx, which now pages via loadMorePostMediaLibrary
-// (lib/actions/posts.ts) instead of needing everything up front.
-const MEDIA_LIBRARY_LEGACY_LIMIT = 100;
+// How many raw batches one picker page may scan when archived rows filter
+// a batch down (see collectLibraryPage). 4 x 24 rows covers any realistic
+// run of archived copy-on-write clones at the top of the list; past that,
+// the page comes back short with hasMore still true and Load More resumes
+// from the exact raw position, so nothing is ever stranded.
+const MEDIA_LIBRARY_MAX_BATCHES = 4;
 
-// One project media page, newest first. Shared by getPostMediaLibrary
+type RawMediaRow = { id: string; storage_path: string; media_type: MediaType; created_at: string };
+
+// One project media page, newest first, keyset-paged on (created_at, id)
+// -- see lib/media-library-paging.ts for why (the old OFFSET + filtered-
+// count version hid Load More and stranded older assets as soon as any
+// archived row landed in the first page). Shared by getPostMediaLibrary
 // below (first page, for callers with no pagination UI of their own) and
-// loadMorePostMediaLibrary (lib/actions/posts.ts, the client-callable
-// Server Action "Add from library"'s own Load More button invokes for
-// every page after the first). `hasMore` is a simple "did this page come
-// back full" heuristic (no separate COUNT query) -- correct as long as
-// `limit` matches what the caller actually asked for, which both callers
-// here guarantee.
+// loadPostMediaLibraryPage (lib/actions/posts.ts), the Server Action the
+// picker calls for Load More and to refresh its first page.
+//
+// `cursor` is untrusted input on that Server Action path -- decodeCursor
+// rejects anything that isn't exactly a timestamptz + uuid before it gets
+// anywhere near the PostgREST filter below. Project isolation and access
+// are unchanged: every query is still scoped by project_id under the
+// caller's own RLS session.
 export async function getPostMediaLibraryPage(
   projectId: string,
-  offset: number,
+  cursor: string | null,
   limit: number,
-): Promise<{ items: MediaLibraryItem[]; hasMore: boolean }> {
+): Promise<LibraryPage<MediaLibraryItem>> {
   const supabase = await createClient();
+  const startAfter = cursor === null ? null : decodeCursor(cursor);
+  if (cursor !== null && !startAfter) throw new Error("Invalid media library cursor.");
 
-  const [{ data: allMediaAssets }, { data: carouselPosts }] = await Promise.all([
-    // Excludes 'pdf' -- same reasoning as Grid's own Media Library query
-    // (grid/page.tsx): this is a "pick an asset for this post/carousel
-    // slot" picker, and a PDF was never a sensible post asset. Still exists
-    // in this same project-wide table via the Content page, just never
-    // offered here. .range() is Postgres/PostgREST's own OFFSET+LIMIT --
-    // an inclusive [start, end] pair, hence `offset + limit - 1`.
-    supabase
-      .from("media_assets")
-      .select("id, storage_path, media_type")
+  // Same "already used in a carousel" lookup as Grid's own media library
+  // (grid/page.tsx) -- project-wide, so fetched once per page (not per raw
+  // batch), started now so it runs alongside the batches below.
+  const usedInCarouselPromise = (async () => {
+    const { data: carouselPosts } = await supabase
+      .from("posts")
+      .select("id")
       .eq("project_id", projectId)
-      .neq("media_type", "pdf")
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1),
-    // Same "already used in a carousel" lookup as Grid's own media library
-    // (grid/page.tsx) -- kept as two plain queries rather than a joined
-    // filter, matching this file's existing isolated-lookup style.
-    supabase.from("posts").select("id").eq("project_id", projectId).eq("post_type", "carousel"),
-  ]);
+      .eq("post_type", "carousel");
+    const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
+    if (carouselPostIds.length === 0) return new Set<string>();
+    const { data: carouselAssetRows } = await supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds);
+    return new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+  })();
 
-  // Isolated from the select above -- archived is a newer column that may
-  // not exist yet on a not-yet-migrated database, and a plain .eq() filter
-  // on the main select would fail (silently returning nothing, since only
-  // `data` is read) the instant it doesn't exist, wiping out the whole
-  // library instead of just not filtering archived assets out yet.
-  const allMediaIdsForArchiveCheck = (allMediaAssets ?? []).map((a) => a.id);
-  const carouselPostIds = (carouselPosts ?? []).map((p) => p.id);
+  const { rows: mediaAssets, nextCursor, hasMore } = await collectLibraryPage<RawMediaRow>({
+    cursor: startAfter,
+    limit,
+    maxBatches: MEDIA_LIBRARY_MAX_BATCHES,
+    fetchBatch: async (after, size) => {
+      // Excludes 'pdf' -- same reasoning as Grid's own Media Library query
+      // (grid/page.tsx): this is a "pick an asset for this post/carousel
+      // slot" picker, and a PDF was never a sensible post asset. Still
+      // exists in this same project-wide table via the Content page, just
+      // never offered here. id is the tie-breaker that makes the order
+      // total, so rows sharing a created_at can't swap between requests.
+      let query = supabase
+        .from("media_assets")
+        .select("id, storage_path, media_type, created_at")
+        .eq("project_id", projectId)
+        .neq("media_type", "pdf");
+      if (after) {
+        // Keyset "strictly after (created_at, id)" in DESC order:
+        // created_at <= c AND (created_at < c OR id < i). The timestamp is
+        // double-quoted inside or() since it contains ':' / '.' / '+'.
+        query = query
+          .lte("created_at", after.createdAt)
+          .or(`created_at.lt."${after.createdAt}",id.lt.${after.id}`);
+      }
+      const { data, error } = await query
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(size);
+      if (error) throw new Error(`media library batch failed: ${error.message}`);
+      return (data ?? []) as RawMediaRow[];
+    },
+    // Isolated from the batch select above -- archived is a newer column
+    // that may not exist yet on a not-yet-migrated database, and a plain
+    // .eq() filter on the main select would fail the instant it doesn't
+    // exist, wiping out the whole library instead of just not filtering
+    // archived assets out yet. Applied per batch; the cursor only advances
+    // once this has succeeded, so archived rows can never shift or end
+    // paging. Fails closed on a transient error -- see archivedIdsFromLookup.
+    filterEligible: async (rows) => {
+      const archivedIds = archivedIdsFromLookup(
+        await supabase.from("media_assets").select("id, archived").in("id", rows.map((r) => r.id)),
+      );
+      return rows.filter((r) => !archivedIds.has(r.id));
+    },
+  });
 
-  const [{ data: archivedRows }, { data: carouselAssetRows }] = await Promise.all([
-    allMediaIdsForArchiveCheck.length
-      ? supabase.from("media_assets").select("id, archived").in("id", allMediaIdsForArchiveCheck)
-      : Promise.resolve({ data: [] }),
-    carouselPostIds.length
-      ? supabase.from("post_assets").select("media_asset_id").in("post_id", carouselPostIds)
-      : Promise.resolve({ data: [] }),
-  ]);
-
-  const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
-  const mediaAssets = (allMediaAssets ?? []).filter((a) => !archivedIds.has(a.id));
-  const usedInCarouselIds = new Set((carouselAssetRows ?? []).map((r) => r.media_asset_id));
+  const usedInCarouselIds = await usedInCarouselPromise;
 
   // poster_storage_path is fetched for VIDEO items only (see posterRows
   // below) -- it's what a video's library tile renders. The original
@@ -368,12 +407,16 @@ export async function getPostMediaLibraryPage(
   });
 
   return {
-    items,
-    // Based on the RAW page (before the archived filter above) -- whether
-    // THIS page was full, not how many of its rows survived filtering, is
-    // what actually tells us whether a next .range() call could return
-    // more rows at all.
-    hasMore: (allMediaAssets ?? []).length === limit,
+    // Each item keeps its own row's cursor key -- the picker needs it to
+    // reconcile a refreshed first page with pages it already loaded.
+    entries: items.map((item, i) => ({
+      item,
+      key: encodeCursor({ createdAt: mediaAssets[i].created_at, id: mediaAssets[i].id }),
+    })),
+    // Both come from the RAW rows (see collectLibraryPage), never from how
+    // many survived the archived filter.
+    nextCursor,
+    hasMore,
   };
 }
 
@@ -383,10 +426,15 @@ export async function getPostMediaLibraryPage(
 // getPostMediaLibraryPage: this is the one query that scales with the
 // ENTIRE project's media count, not with this one post's asset count.
 // Post Editor's own primary "Add from library"/Replace flow no longer
-// calls this -- see loadMorePostMediaLibrary (lib/actions/posts.ts) and
+// calls this -- see loadPostMediaLibraryPage (lib/actions/posts.ts) and
 // its own first-page call in page.tsx, which page through
 // getPostMediaLibraryPage directly instead of needing everything at once.
-export async function getPostMediaLibrary(projectId: string): Promise<MediaLibraryItem[]> {
-  const { items } = await getPostMediaLibraryPage(projectId, 0, MEDIA_LIBRARY_LEGACY_LIMIT);
-  return items;
+// Exactly the same first page the Grid/Calendar post routes start from
+// (page.tsx), so the picker pages identically wherever the editor opens.
+// This used to be a single 100-row batch: Tasks then only ever got
+// hasMore=true -- and so paging -- for projects with more than 100 media
+// rows, which left that path's paging unexercised on any normal-sized
+// project and signed 4x the URLs up front for no benefit.
+export async function getPostMediaLibrary(projectId: string): Promise<LibraryPage<MediaLibraryItem>> {
+  return getPostMediaLibraryPage(projectId, null, MEDIA_LIBRARY_PAGE_SIZE);
 }

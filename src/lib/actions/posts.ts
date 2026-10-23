@@ -16,11 +16,12 @@ import {
 import { syncPostType } from "@/lib/post-type";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
+import type { LibraryPage } from "@/lib/media-library-paging";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 
 export type UpdatePostState = { message?: string } | undefined;
 
-export type PostForModalData = PostCoreData & { mediaLibrary: MediaLibraryItem[] };
+export type PostForModalData = PostCoreData & { mediaLibrary: LibraryPage<MediaLibraryItem> };
 
 // Lets the Tasks page (src/app/tasks/*) open a post in a client-side popup
 // instead of navigating away -- it lives outside /projects/[projectId]/...
@@ -45,19 +46,19 @@ export async function fetchPostForModal(projectId: string, postId: string): Prom
 }
 
 // Client-callable counterpart to page.tsx's own first-page
-// getPostMediaLibraryPage call -- "Add from library"'s own Load More
-// button (post-editor.tsx's AddFromLibrarySection) invokes this directly
-// for every page after the first, so the whole project library stays
-// reachable without ever needing it all signed/loaded up front. `offset`
-// is always the number of items already loaded client-side (0-indexed,
-// exclusive), never a page number, so it stays correct even if items were
-// filtered out of what's actually rendered (already-used-in-carousel
-// items, for instance) on an earlier page.
-export async function loadMorePostMediaLibrary(
+// getPostMediaLibraryPage call -- "Add from library" (post-editor.tsx's
+// AddFromLibrarySection) calls this with the previous page's nextCursor for
+// Load More, and with null to re-fetch the first page when the tab regains
+// focus, so the whole project library stays reachable (and new uploads
+// show up) without ever needing it all signed/loaded up front. `cursor` is
+// the opaque (created_at, id) of the last RAW row already consumed -- never
+// a count of visible items, which archived rows used to throw off. An
+// invalid cursor is rejected, never interpolated (see decodeCursor).
+export async function loadPostMediaLibraryPage(
   projectId: string,
-  offset: number,
-): Promise<{ items: MediaLibraryItem[]; hasMore: boolean }> {
-  return getPostMediaLibraryPage(projectId, offset, MEDIA_LIBRARY_PAGE_SIZE);
+  cursor: string | null,
+): Promise<LibraryPage<MediaLibraryItem>> {
+  return getPostMediaLibraryPage(projectId, cursor, MEDIA_LIBRARY_PAGE_SIZE);
 }
 
 // Not revalidating /grid or /calendar -- deletePost has two callers (Grid's
