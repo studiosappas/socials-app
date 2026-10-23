@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Modal } from "@/app/projects/[projectId]/modal";
 import { PostEditor } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
 import { StoryEditor } from "@/app/projects/[projectId]/stories/[storyId]/story-editor";
@@ -52,11 +52,21 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
     };
   }, [target, result]);
 
+  // ONE promise per loaded result, not a fresh Promise.resolve() per render:
+  // PostEditor's library section reads it through use(), and a new, untracked
+  // promise on every re-render made it suspend again each time -- briefly
+  // hiding the picker and resetting its scroll position, which the
+  // scroll-driven paging depends on.
+  const mediaLibraryPromise = useMemo(
+    () => (result?.kind === "post" ? Promise.resolve(result.data.mediaLibrary) : null),
+    [result],
+  );
+
   return (
     <Modal onClose={onClose}>
       {result === null && <p className="text-sm text-muted">Loading…</p>}
       {result?.kind === "missing" && <p className="text-sm text-muted">This content couldn&apos;t be found.</p>}
-      {result?.kind === "post" && (
+      {result?.kind === "post" && mediaLibraryPromise && (
         <PostEditor
           projectId={target.projectId}
           post={result.data.post}
@@ -66,7 +76,7 @@ export function LinkedContentModal({ target, onClose }: { target: LinkedContentT
           // fetchPostForModal's own comment on why this entry point can't
           // stream it in separately) -- wrapped in Promise.resolve() just
           // to satisfy PostEditor's prop type, not to defer anything.
-          mediaLibraryPromise={Promise.resolve(result.data.mediaLibrary)}
+          mediaLibraryPromise={mediaLibraryPromise}
           canManage={result.data.canManage}
           role={result.data.role}
           currentUserId={result.data.currentUserId}

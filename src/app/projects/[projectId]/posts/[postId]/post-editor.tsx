@@ -49,7 +49,7 @@ import { ItemComments } from "@/components/ui/item-comments";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import { useUndoStack, useUndoRedoShortcuts } from "@/lib/hooks/use-undo-stack";
 import { useToast } from "@/lib/hooks/use-toast";
-import { appendLibraryPage, reconcileFirstPage, type LibraryPage } from "@/lib/media-library-paging";
+import { appendLibraryPage, pageMadeProgress, reconcileFirstPage, type LibraryPage } from "@/lib/media-library-paging";
 import { BrandWriterField } from "@/components/ai/brand-writer";
 import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { ScheduleTimeField } from "@/components/ui/schedule-time-field";
@@ -732,28 +732,85 @@ function AddFromLibrarySection({
     setLibrary(reconcileFirstPage(library, initialPage));
   }
   const [loadingMore, setLoadingMore] = useState(false);
-  const { showError } = useToast();
+  // Set when the last automatic fetch failed (or made no progress) --
+  // automatic paging stops until the user taps Retry, so a persistent
+  // failure can't turn into an endless request loop.
+  const [loadFailed, setLoadFailed] = useState(false);
   const mediaLibrary = library.entries.map((e) => e.item);
   const hasMoreMedia = library.hasMore;
   const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
 
-  async function handleLoadMore() {
-    if (loadingMore || !library.hasMore) return;
-    const requestedCursor = library.nextCursor;
+  // Read by loadMore (called from an IntersectionObserver callback, which
+  // would otherwise close over a stale page state) -- synced after every
+  // render, same pattern as GridCropOverlay's own latest-value refs.
+  const libraryRef = useRef(library);
+  useEffect(() => {
+    libraryRef.current = library;
+  });
+  // Synchronous in-flight guard: the observer can fire again (scroll,
+  // re-observe) before the `loadingMore` state from the first call has
+  // rendered, and two overlapping requests from the same cursor would race.
+  const loadingRef = useRef(false);
+
+  const loadMore = useCallback(async () => {
+    const current = libraryRef.current;
+    if (loadingRef.current || !current.hasMore) return;
+    const requestedCursor = current.nextCursor;
+    loadingRef.current = true;
     setLoadingMore(true);
+    setLoadFailed(false);
     try {
       const page = await loadPostMediaLibraryPage(projectId, requestedCursor);
+      if (!pageMadeProgress(requestedCursor, page)) {
+        setLoadFailed(true);
+        return;
+      }
       // Applied only if nothing moved the cursor in the meantime (a
       // first-page refresh landing mid-request) -- otherwise this page was
-      // fetched from a stale position; the button stays for another try.
-      setLibrary((current) => (current.nextCursor === requestedCursor ? appendLibraryPage(current, page) : current));
+      // fetched from a stale position and the observer simply asks again
+      // from the new one.
+      setLibrary((latest) => (latest.nextCursor === requestedCursor ? appendLibraryPage(latest, page) : latest));
     } catch (error) {
       console.error("Failed to load more media:", error);
-      showError("Couldn't load more media. Please try again.");
+      setLoadFailed(true);
     } finally {
+      loadingRef.current = false;
       setLoadingMore(false);
     }
-  }
+  }, [projectId]);
+
+  // Infinite scroll: the LAST visible tile is the trigger, observed against
+  // this section's own scrolling grid (not the page), with a margin so the
+  // next page starts loading a little before the end is reached. Observing
+  // a real tile -- rather than adding a sentinel cell -- keeps the grid's
+  // explicit row-height layout exactly as it was (a sentinel grid item
+  // would occupy a full tile-height row). With no visible tiles at all
+  // (everything loaded so far is already in this post, or archived-only
+  // pages), the status row below the grid is observed against the viewport
+  // instead, so paging still continues.
+  //
+  // Re-created whenever the cursor moves: observe() always delivers one
+  // initial callback, so a page that added nothing visible, or a grid that
+  // still isn't full, immediately asks for the next page -- every request
+  // must advance the cursor (pageMadeProgress), and hasMore=false or a
+  // failure stops it, so this can't loop. Disconnected on unmount, which
+  // covers the editor closing; a project change remounts this section
+  // (keyed on projectId at its call site).
+  const [lastTile, setLastTile] = useState<HTMLElement | null>(null);
+  const [statusRow, setStatusRow] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined" || !library.hasMore || loadFailed) return;
+    const target = lastTile ?? statusRow;
+    if (!target) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+      },
+      { root: lastTile ? desktopGridRef.current : null, rootMargin: "0px 0px 240px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [lastTile, statusRow, library.hasMore, library.nextCursor, loadFailed, loadMore]);
 
   // Uploads made elsewhere while this editor stays open (the Library in
   // another tab, another team member) -- re-fetch just the first page when
@@ -884,9 +941,12 @@ function AddFromLibrarySection({
         }`}
         style={desktopTileRowH !== null ? { ["--tile-row-h" as string]: `${desktopTileRowH}px` } : undefined}
       >
-        {availableMedia.map((item) => (
+        {availableMedia.map((item, index) => (
           <button
             key={item.id}
+            // The last tile is the infinite-scroll trigger (see the
+            // IntersectionObserver effect above).
+            ref={index === availableMedia.length - 1 ? setLastTile : undefined}
             type="button"
             onClick={() => onAdd(item)}
             className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
@@ -943,14 +1003,23 @@ function AddFromLibrarySection({
         ))}
       </div>
       {hasMoreMedia && (
-        <button
-          type="button"
-          onClick={handleLoadMore}
-          disabled={loadingMore}
-          className="self-center px-3 py-1.5 text-xs tracking-wide text-muted uppercase transition-colors duration-150 hover:text-foreground disabled:opacity-50"
-        >
-          {loadingMore ? "Loading…" : "Load more"}
-        </button>
+        // Status row, not a Load More button: pages arrive by scrolling (see
+        // the observer effect). It only shows a subtle loading line, or a
+        // manual Retry after a failure -- automatic paging never retries on
+        // its own. Also the observer's fallback target when no tile exists.
+        <div ref={setStatusRow} className="flex min-h-7 items-center justify-center" aria-live="polite">
+          {loadingMore ? (
+            <span className="text-xs tracking-wide text-muted uppercase">Loading…</span>
+          ) : loadFailed ? (
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              className="px-3 py-1.5 text-xs tracking-wide text-muted uppercase transition-colors duration-150 hover:text-foreground"
+            >
+              Couldn&apos;t load more · Retry
+            </button>
+          ) : null}
+        </div>
       )}
     </section>
   );

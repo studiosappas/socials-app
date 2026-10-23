@@ -154,7 +154,43 @@ export async function collectLibraryPage<Row extends RawLibraryRow>({
   return { rows, nextCursor: after ? encodeCursor(after) : null, hasMore };
 }
 
+// The separate `archived` lookup (lib/data/posts.ts) -- decides which ids
+// are hidden, and FAILS CLOSED: a transient error (network, timeout, a
+// PostgREST hiccup) throws, which collectLibraryPage turns into "this page
+// stops here, retry from the same cursor" -- never into "nothing is
+// archived", which would briefly show archived copy-on-write clones. The
+// one exception is a database that genuinely has no `archived` column
+// (Postgres 42703 undefined_column, or PostgREST's schema-cache PGRST204):
+// there nothing CAN be archived yet, so hiding nothing is correct -- the
+// compatibility the isolated lookup exists for.
+export type ArchivedLookupResult = {
+  data: { id: string; archived?: boolean | null }[] | null;
+  error: { code?: string; message?: string } | null;
+};
+
+const MISSING_COLUMN_CODES = new Set(["42703", "PGRST204"]);
+
+export function archivedIdsFromLookup(result: ArchivedLookupResult): Set<string> {
+  if (result.error) {
+    if (result.error.code && MISSING_COLUMN_CODES.has(result.error.code)) return new Set();
+    throw new Error(`archived lookup failed: ${result.error.message ?? result.error.code ?? "unknown error"}`);
+  }
+  if (!result.data) throw new Error("archived lookup returned no data");
+  return new Set(result.data.filter((r) => r.archived).map((r) => r.id));
+}
+
 // --- client side -----------------------------------------------------------
+
+// Whether a fetched page moved paging forward. A page can legitimately add
+// no visible rows (a run of archived rows) -- that's still progress as
+// long as the cursor moved. A page that neither added rows nor moved the
+// cursor (a server-side batch failure on its very first batch returns the
+// SAME cursor with hasMore still true) must be treated as a failure by an
+// automatic loader, or it would refetch the same position forever.
+export function pageMadeProgress<T>(requestedCursor: string | null, page: LibraryPage<T>): boolean {
+  if (!page.hasMore) return true;
+  return page.entries.length > 0 || (page.nextCursor !== null && page.nextCursor !== requestedCursor);
+}
 
 // Appends a Load More page, never duplicating a row already shown (by id)
 // -- guards the React keys even if a row were somehow returned twice.

@@ -16,7 +16,9 @@
 import assert from "node:assert/strict";
 import {
   appendLibraryPage,
+  archivedIdsFromLookup,
   collectLibraryPage,
+  pageMadeProgress,
   decodeCursor,
   encodeCursor,
   isAfterInOrder,
@@ -375,12 +377,18 @@ await test("a refresh whose fetch failed outright keeps the loaded list instead 
   assert.equal(after, state, "unchanged");
 });
 
-await test("Tasks' single-batch call (maxBatches 1, limit 100) is exactly the newest 100 raw rows minus archived", async () => {
-  const rows = randomLibrary(960, { size: 180, archivedRate: 0.3 });
+await test("Tasks QA root cause: a ~40-asset library never paged under the old 100-row Tasks batch; the shared first page does", async () => {
+  const rows = randomLibrary(960, { size: 42, archivedRate: 0 });
   const table = makeTable(rows);
-  const res = await collectLibraryPage<Row>({ cursor: null, limit: 100, maxBatches: 1, fetchBatch: table.fetchBatch("p1"), filterEligible: (b) => table.filterEligible(b) });
-  const expected = rows.filter((x) => x.project_id === "p1").sort(oracleCompare).slice(0, 100).filter((x) => !x.archived);
-  assert.deepEqual(res.rows.map((x) => x.id), expected.map((x) => x.id));
+  const oldTasks = await collectLibraryPage<Row>({ cursor: null, limit: 100, maxBatches: 1, fetchBatch: table.fetchBatch("p1"), filterEligible: (b) => table.filterEligible(b) });
+  assert.equal(oldTasks.hasMore, false, "old Tasks first page: everything at once, so no paging to exercise");
+  // Tasks (getPostMediaLibrary) and the post routes (page.tsx) now both
+  // request exactly this first page.
+  const shared = await serverPage(table, "p1", null);
+  assert.equal(shared.hasMore, true, "shared first page: paging engages at 24");
+  const { state } = await loadAll(table, "p1");
+  assert.deepEqual(ids(state), table.eligible("p1").map((x) => x.id), "same complete library either way");
+  assert.deepEqual(new Set(ids(state)), new Set(oldTasks.rows.map((r) => r.id)));
 });
 
 await test("append dedupes by id and never touches item objects (selection/Replace/carousel badge data intact)", () => {
@@ -447,6 +455,137 @@ await test("known limit: a row inserted with a timestamp OLDER than rows already
   assert.ok(!ids(refreshed).includes(late.id), "documented: not discovered by a first-page refresh");
   const reopened = await loadAll(table, "p1");
   assert.deepEqual(ids(reopened.state), table.eligible("p1").map((x) => x.id), "reopen finds it");
+});
+
+await test("archived lookup fails CLOSED on transient errors, open only when the column genuinely doesn't exist", () => {
+  assert.deepEqual(archivedIdsFromLookup({ data: [{ id: "a", archived: true }, { id: "b", archived: false }, { id: "c", archived: null }], error: null }), new Set(["a"]));
+  assert.deepEqual(archivedIdsFromLookup({ data: null, error: { code: "42703", message: "column media_assets.archived does not exist" } }), new Set());
+  assert.deepEqual(archivedIdsFromLookup({ data: null, error: { code: "PGRST204", message: "Could not find the 'archived' column" } }), new Set());
+  for (const error of [{ code: "57014", message: "canceling statement due to statement timeout" }, { code: "", message: "TypeError: fetch failed" }, { message: "network" }]) {
+    assert.throws(() => archivedIdsFromLookup({ data: null, error }), /archived lookup failed/);
+  }
+  assert.throws(() => archivedIdsFromLookup({ data: null, error: null }), /no data/);
+});
+
+await test("a transient archived-lookup error never shows archived media: the page stops and resumes cleanly", async () => {
+  const rows = randomLibrary(1300, { size: 120, archivedRate: 0.4 });
+  const table = makeTable(rows);
+  let calls = 0;
+  const res = await collectLibraryPage<Row>({
+    cursor: null,
+    limit: LIMIT,
+    maxBatches: 4,
+    fetchBatch: table.fetchBatch("p1"),
+    // Same shape as lib/data/posts.ts: the lookup result goes through archivedIdsFromLookup.
+    filterEligible: async (batch) => {
+      calls++;
+      const result = calls === 2 ? { data: null, error: { code: "57014", message: "timeout" } } : { data: batch.map((b) => ({ id: b.id, archived: b.archived })), error: null };
+      const archived = archivedIdsFromLookup(result);
+      return batch.filter((b) => !archived.has(b.id));
+    },
+  });
+  assert.ok(res.rows.every((r) => !r.archived), "no archived row leaked into the page");
+  assert.equal(res.hasMore, true);
+  let state = appendLibraryPage(
+    { entries: [], nextCursor: null, hasMore: false },
+    { entries: res.rows.map((x) => ({ item: { id: x.id, usedInCarousel: false }, key: encodeCursor({ createdAt: x.created_at, id: x.id }) })), nextCursor: res.nextCursor, hasMore: res.hasMore },
+  );
+  while (state.hasMore) state = appendLibraryPage(state, await serverPage(table, "p1", state.nextCursor));
+  assert.deepEqual(ids(state), table.eligible("p1").map((x) => x.id));
+});
+
+await test("pageMadeProgress: archived-only pages count as progress; a same-cursor empty page does not", () => {
+  const c1 = encodeCursor({ createdAt: "2026-10-22T10:00:00+00:00", id: "00000000-0000-4000-a000-000000000001" });
+  const c2 = encodeCursor({ createdAt: "2026-10-22T09:00:00+00:00", id: "00000000-0000-4000-a000-000000000002" });
+  const item = { item: { id: "x", usedInCarousel: false }, key: c2 };
+  assert.equal(pageMadeProgress(c1, { entries: [], nextCursor: c2, hasMore: true }), true, "archived-only page, cursor moved");
+  assert.equal(pageMadeProgress(c1, { entries: [item], nextCursor: c2, hasMore: true }), true);
+  assert.equal(pageMadeProgress(c1, { entries: [], nextCursor: c1, hasMore: true }), false, "server batch failed: same cursor");
+  assert.equal(pageMadeProgress(null, { entries: [], nextCursor: null, hasMore: true }), false, "first page failed outright");
+  assert.equal(pageMadeProgress(c1, { entries: [], nextCursor: c1, hasMore: false }), true, "end of library is a valid outcome");
+});
+
+// Mirrors AddFromLibrarySection's automatic loader: every "observer fire"
+// calls loadMore, which is a no-op while a request is in flight; a page
+// that made no progress, or a thrown error, sets `failed` and stops
+// automatic paging until a manual retry.
+function makeAutoPager(fetchPage: (cursor: string | null) => Promise<LibraryPage<Item>>, first: LibraryPage<Item>) {
+  const pager = { state: appendLibraryPage({ entries: [], nextCursor: null, hasMore: false }, first), loading: false, failed: false, requests: 0 };
+  async function loadMore() {
+    if (pager.loading || !pager.state.hasMore) return;
+    const requested = pager.state.nextCursor;
+    pager.loading = true;
+    pager.failed = false;
+    pager.requests++;
+    try {
+      const page = await fetchPage(requested);
+      if (!pageMadeProgress(requested, page)) {
+        pager.failed = true;
+        return;
+      }
+      if (pager.state.nextCursor === requested) pager.state = appendLibraryPage(pager.state, page);
+    } catch {
+      pager.failed = true;
+    } finally {
+      pager.loading = false;
+    }
+  }
+  // The observer re-fires after every cursor move while the trigger is
+  // still visible; `visible` models a grid that isn't full yet.
+  async function scrollToEnd(maxFires = 1000) {
+    let fires = 0;
+    while (pager.state.hasMore && !pager.failed) {
+      if (fires++ > maxFires) throw new Error("observer loop did not terminate");
+      await loadMore();
+    }
+  }
+  return { pager, loadMore, scrollToEnd };
+}
+
+await test("auto-pager: scrolls through archived-only pages to the end, no duplicate requests, no skipped rows", async () => {
+  for (let seed = 1400; seed < 1480; seed++) {
+    const table = makeTable(randomLibrary(seed, { size: 30 + (seed % 170), archivedRate: (seed % 9) / 10 }));
+    const { pager, loadMore, scrollToEnd } = makeAutoPager((c) => serverPage(table, "p1", c), await serverPage(table, "p1", null));
+    // Two observer callbacks landing at once must produce ONE request.
+    const before = pager.requests;
+    await Promise.all([loadMore(), loadMore(), loadMore()]);
+    assert.ok(pager.requests - before <= 1, `seed ${seed}: concurrent triggers deduplicated`);
+    await scrollToEnd();
+    assert.equal(pager.failed, false);
+    assert.deepEqual(ids(pager.state), table.eligible("p1").map((x) => x.id), `seed ${seed}`);
+    assertNoDuplicates(pager.state);
+  }
+});
+
+await test("auto-pager: a failing server stops after ONE request (no endless retries); manual retry resumes exactly", async () => {
+  const table = makeTable(randomLibrary(1500, { size: 140, archivedRate: 0.3 }));
+  let down = true;
+  let requestsWhileDown = 0;
+  const fetchPage = async (c: string | null) => {
+    if (down) {
+      requestsWhileDown++;
+      // Either failure shape: a thrown error, or the server's own "first
+      // batch failed" page (same cursor, hasMore true, no rows).
+      if (requestsWhileDown % 2) throw new Error("offline");
+      return { entries: [], nextCursor: c, hasMore: true } as LibraryPage<Item>;
+    }
+    return serverPage(table, "p1", c);
+  };
+  const { pager, loadMore, scrollToEnd } = makeAutoPager(fetchPage, await serverPage(table, "p1", null));
+  await scrollToEnd();
+  assert.equal(pager.failed, true);
+  assert.equal(requestsWhileDown, 1, "stopped after the first failure");
+  const loadedBefore = ids(pager.state);
+  // Retry while still down: the other failure shape, still exactly one request.
+  await loadMore();
+  assert.equal(pager.failed, true);
+  assert.equal(requestsWhileDown, 2);
+  assert.deepEqual(ids(pager.state), loadedBefore, "already-loaded media preserved");
+  down = false;
+  await loadMore(); // manual Retry
+  await scrollToEnd();
+  assert.equal(pager.failed, false);
+  assert.deepEqual(ids(pager.state), table.eligible("p1").map((x) => x.id));
 });
 
 await test("decodeCursor accepts real Postgres timestamps and rejects anything that could reach the filter", () => {

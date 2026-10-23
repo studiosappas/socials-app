@@ -4,7 +4,13 @@ import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/pos
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
 import { getBrandMoodboard, deriveCustomFontFaces, type CustomFontFace } from "@/lib/data/brand-moodboard";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
-import { collectLibraryPage, decodeCursor, encodeCursor, type LibraryPage } from "@/lib/media-library-paging";
+import {
+  archivedIdsFromLookup,
+  collectLibraryPage,
+  decodeCursor,
+  encodeCursor,
+  type LibraryPage,
+} from "@/lib/media-library-paging";
 import { canEditContent } from "@/lib/role-permissions";
 import { mergeWorkspaceSettings, type WorkspaceSettings } from "@/lib/account-settings";
 import type { MediaType, PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/database";
@@ -219,11 +225,6 @@ export async function getPostCoreData(
 // again for every subsequent page so nothing past #24 is ever
 // unreachable.
 export const MEDIA_LIBRARY_PAGE_SIZE = 24;
-// getPostMediaLibrary (unpaginated callers below) keeps its own prior
-// larger size -- this only governs the PRIMARY "Add from library"/Replace
-// flow in post-editor.tsx, which now pages via loadPostMediaLibraryPage
-// (lib/actions/posts.ts) instead of needing everything up front.
-const MEDIA_LIBRARY_LEGACY_LIMIT = 100;
 // How many raw batches one picker page may scan when archived rows filter
 // a batch down (see collectLibraryPage). 4 x 24 rows covers any realistic
 // run of archived copy-on-write clones at the top of the list; past that,
@@ -250,7 +251,6 @@ export async function getPostMediaLibraryPage(
   projectId: string,
   cursor: string | null,
   limit: number,
-  { maxBatches = MEDIA_LIBRARY_MAX_BATCHES }: { maxBatches?: number } = {},
 ): Promise<LibraryPage<MediaLibraryItem>> {
   const supabase = await createClient();
   const startAfter = cursor === null ? null : decodeCursor(cursor);
@@ -274,7 +274,7 @@ export async function getPostMediaLibraryPage(
   const { rows: mediaAssets, nextCursor, hasMore } = await collectLibraryPage<RawMediaRow>({
     cursor: startAfter,
     limit,
-    maxBatches,
+    maxBatches: MEDIA_LIBRARY_MAX_BATCHES,
     fetchBatch: async (after, size) => {
       // Excludes 'pdf' -- same reasoning as Grid's own Media Library query
       // (grid/page.tsx): this is a "pick an asset for this post/carousel
@@ -304,17 +304,15 @@ export async function getPostMediaLibraryPage(
     },
     // Isolated from the batch select above -- archived is a newer column
     // that may not exist yet on a not-yet-migrated database, and a plain
-    // .eq() filter on the main select would fail (silently returning
-    // nothing) the instant it doesn't exist, wiping out the whole library
-    // instead of just not filtering archived assets out yet. Applied per
-    // batch, AFTER the cursor has already advanced past every raw row, so
-    // archived rows can never shift or end paging.
+    // .eq() filter on the main select would fail the instant it doesn't
+    // exist, wiping out the whole library instead of just not filtering
+    // archived assets out yet. Applied per batch; the cursor only advances
+    // once this has succeeded, so archived rows can never shift or end
+    // paging. Fails closed on a transient error -- see archivedIdsFromLookup.
     filterEligible: async (rows) => {
-      const { data: archivedRows } = await supabase
-        .from("media_assets")
-        .select("id, archived")
-        .in("id", rows.map((r) => r.id));
-      const archivedIds = new Set((archivedRows ?? []).filter((r) => r.archived).map((r) => r.id));
+      const archivedIds = archivedIdsFromLookup(
+        await supabase.from("media_assets").select("id, archived").in("id", rows.map((r) => r.id)),
+      );
       return rows.filter((r) => !archivedIds.has(r.id));
     },
   });
@@ -431,10 +429,12 @@ export async function getPostMediaLibraryPage(
 // calls this -- see loadPostMediaLibraryPage (lib/actions/posts.ts) and
 // its own first-page call in page.tsx, which page through
 // getPostMediaLibraryPage directly instead of needing everything at once.
-// maxBatches: 1 keeps this caller's first page exactly what it was: the
-// newest 100 raw rows, minus archived ones. Returned as a real page (cursor
-// keys, nextCursor, hasMore) rather than a bare list so the same picker
-// state -- Load More and first-page refresh -- also works correctly there.
+// Exactly the same first page the Grid/Calendar post routes start from
+// (page.tsx), so the picker pages identically wherever the editor opens.
+// This used to be a single 100-row batch: Tasks then only ever got
+// hasMore=true -- and so paging -- for projects with more than 100 media
+// rows, which left that path's paging unexercised on any normal-sized
+// project and signed 4x the URLs up front for no benefit.
 export async function getPostMediaLibrary(projectId: string): Promise<LibraryPage<MediaLibraryItem>> {
-  return getPostMediaLibraryPage(projectId, null, MEDIA_LIBRARY_LEGACY_LIMIT, { maxBatches: 1 });
+  return getPostMediaLibraryPage(projectId, null, MEDIA_LIBRARY_PAGE_SIZE);
 }
