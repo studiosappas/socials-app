@@ -41,6 +41,7 @@ import {
   type DownloadSource,
 } from "@/lib/post-export-plan";
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
+import { newEditAspect } from "@/lib/media-aspect";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
@@ -66,15 +67,6 @@ import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/da
 import { canSubmitClientReview } from "@/lib/role-permissions";
 import { submitClientPostReview } from "@/lib/actions/posts";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
-
-// Module-level constants (not object literals inline in JSX) so the same
-// reference is passed on every render regardless of which asset is being
-// edited -- 1080x1440 cover (3:4), 1080x1350 carousel slide (4:5). Mirrors
-// grid-constants.ts's GRID_COVER_ASPECT_RATIO / POST_BODY_ASPECT_RATIO;
-// kept as plain {w,h} objects here (not imported) since AnnotationEditor's
-// targetAspect prop wants that shape, not a single ratio number.
-const COVER_ASPECT = { w: 3, h: 4 };
-const SLIDE_ASPECT = { w: 4, h: 5 };
 
 export type PostAssetItem = {
   postAssetId: string;
@@ -102,10 +94,13 @@ type EditingImage = {
   imageUrl: string;
   annotationJson: object | null;
   mediaType: "image" | "video";
-  // Position 0 in the post's own asset order is its cover; every other
-  // position is a carousel slide -- the two get different export targets
-  // (3:4 cover vs 4:5 slide), see targetAspect below.
+  // Position 0 in the post's own asset order is its cover -- saving it
+  // resets the cover's Grid framing (see handleAnnotationSaved).
   isCover: boolean;
+  // The frame a NEW edit is built at (lib/media-aspect.ts): 4:5 for feed
+  // posts and every carousel item, 9:16 for a standalone Reel's cover. A
+  // SAVED edit reopens at its own saved frame regardless (AnnotationEditor).
+  targetAspect: { w: number; h: number };
 };
 
 type PostRecord = {
@@ -574,6 +569,7 @@ export function PostEditor({
                       annotationJson: asset.annotationJson,
                       mediaType: asset.mediaType,
                       isCover: index === 0,
+                      targetAspect: newEditAspect(asset.mediaType, orderedAssets.length),
                     })
                   }
                 />
@@ -670,7 +666,7 @@ export function PostEditor({
         imageUrl={editingImage?.imageUrl ?? null}
         initialAnnotationJson={editingImage?.annotationJson ?? null}
         mediaType={editingImage?.mediaType}
-        targetAspect={editingImage ? (editingImage.isCover ? COVER_ASPECT : SLIDE_ASPECT) : undefined}
+        targetAspect={editingImage?.targetAspect}
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
         saveAction={editingImage?.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}

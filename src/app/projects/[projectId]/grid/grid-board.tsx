@@ -86,7 +86,8 @@ import {
 import { gridInteractionReducer, initialGridInteractionState } from "./grid-interaction";
 import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
-import { GRID_COVER_ASPECT_CLASS, GRID_COVER_RATIO_W, GRID_COVER_RATIO_H } from "./grid-constants";
+import { GRID_COVER_ASPECT_CLASS } from "./grid-constants";
+import { newEditAspect } from "@/lib/media-aspect";
 import { useMediaTiming } from "@/lib/media-diagnostics";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
@@ -108,11 +109,15 @@ export type { GridBoardRow, GridBoardSlot, GridCoverTransform };
 // genuine single click feel laggy.
 const DOUBLE_CLICK_WINDOW_MS = 400;
 
-// The aspect every Grid cover is edited/exported at (see grid-constants.ts)
-// -- Paste Style's headless engine (annotation-engine.ts) needs this same
-// ratio to build/read a target's canvas, exactly like manually opening
-// "Edit Image" on a cover does (post-editor.tsx's own COVER_ASPECT).
-const PASTE_TARGET_ASPECT = { w: GRID_COVER_RATIO_W, h: GRID_COVER_RATIO_H };
+// The frame Paste Style's headless engine (annotation-engine.ts) builds a
+// target's canvas at -- the same rule as opening Edit Image / Edit Cover in
+// Post Editor (lib/media-aspect.ts): 4:5 feed/carousel, 9:16 for a
+// standalone Reel's cover. Only a NEVER-edited target actually uses it: a
+// target with a saved edit is rebuilt in its own saved frame (legacy 3:4
+// covers stay 3:4). The Grid tile's 3:4 is only the preview of that edit.
+function pasteTargetAspect(slot: GridBoardSlot): { w: number; h: number } {
+  return newEditAspect(slot.coverMediaType ?? "image", slot.assetCount);
+}
 
 // Resizable Library sidebar (desktop only -- the sidebar itself is already
 // `hidden lg:block`, mobile is untouched). Bounded by the project page's own
@@ -2181,8 +2186,9 @@ const GridSlot = memo(function GridSlot({
       imageUrl: string,
       mediaAssetId: string,
       saveAction: AnnotationSaveAction,
+      targetAspect: { w: number; h: number },
     ): Promise<{ previewUrl: string } | { error: string }> => {
-      const built = await buildAnnotationCanvas({ imageUrl, annotationJson, targetAspect: PASTE_TARGET_ASPECT });
+      const built = await buildAnnotationCanvas({ imageUrl, annotationJson, targetAspect });
       try {
         return await exportAndSaveAnnotation({
           canvas: built.canvas,
@@ -2339,7 +2345,7 @@ const GridSlot = memo(function GridSlot({
           const built = await buildAnnotationCanvas({
             imageUrl,
             annotationJson: current.annotationJson,
-            targetAspect: PASTE_TARGET_ASPECT,
+            targetAspect: pasteTargetAspect(targetSlot),
             opId,
           });
           canvas = built.canvas;
@@ -2434,6 +2440,7 @@ const GridSlot = memo(function GridSlot({
                     imageUrl,
                     mediaAssetId,
                     saveAction,
+                    pasteTargetAspect(targetSlot),
                   );
                   let cropUndoOk = true;
                   if (wantsCrop && cropOk) {
@@ -2454,6 +2461,7 @@ const GridSlot = memo(function GridSlot({
                     imageUrl,
                     mediaAssetId,
                     saveAction,
+                    pasteTargetAspect(targetSlot),
                   );
                   let cropRedoOk = true;
                   if (wantsCrop && cropOk) {
