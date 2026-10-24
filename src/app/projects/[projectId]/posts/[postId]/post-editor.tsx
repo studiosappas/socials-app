@@ -44,6 +44,7 @@ import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { newEditAspect } from "@/lib/media-aspect";
 import { effectivePostType } from "@/lib/post-type";
 import { exportCoverFraming, markGridPreviewFraming, sameFraming } from "@/lib/cover-framing";
+import { currentDeviceIsPhoneOrTablet } from "@/lib/native-share-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
@@ -488,7 +489,11 @@ export function PostEditor({
       const shareable = sources
         .filter((s): s is DownloadSource => s !== null)
         .map((s) => ({ url: s.url, filename: s.filename ?? filenameFromUrl(s.url, "asset") }));
-      if (shareable.length === sources.length && (await shareAssetFiles(shareable, isTouchDevice))) return;
+      // Phone/tablet OSes only: a Windows touch device also matches
+      // isTouchDevice, but must get the zip, never the Windows Share dialog
+      // (lib/native-share-device.ts).
+      const useShareSheet = isTouchDevice && currentDeviceIsPhoneOrTablet();
+      if (shareable.length === sources.length && (await shareAssetFiles(shareable, useShareSheet))) return;
 
       // Desktop, and the fallback whenever native file sharing isn't
       // available: the same edited media as one zip from the export route.

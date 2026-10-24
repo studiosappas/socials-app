@@ -723,6 +723,8 @@ async function partB(browser) {
   await ctx.close();
 }
 
+const IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 async function partC(engine, browser, video) {
   console.log(`\n### C. Post Editor UI -- ${engine} ${browser.version()}${engine === "webkit" ? " (Playwright build -- not Safari on macOS)" : ""}`);
   const tinyZip = await new JSZip().file("cover.jpg", "x").generateAsync({ type: "nodebuffer" });
@@ -738,15 +740,24 @@ async function partC(engine, browser, video) {
     "poster-5-edit.jpg": await img("#ff8000"),
     "video-5.webm": video,
   };
-  async function open({ mobile = false, query = "", exportFails = false } = {}) {
+  // windowsTouch: a Windows touch laptop / 2-in-1 -- coarse pointer (so the
+  // button reads "Save Media") and a working share API, but a desktop OS.
+  async function open({ mobile = false, windowsTouch = false, query = "", exportFails = false } = {}) {
     const ctx = await browser.newContext({
       viewport: mobile ? { width: 390, height: 844 } : { width: 1400, height: 900 },
-      hasTouch: mobile,
+      hasTouch: mobile || windowsTouch,
       isMobile: mobile,
       acceptDownloads: true,
+      userAgent: mobile ? IPHONE_UA : windowsTouch ? WINDOWS_UA : undefined,
     });
     const page = await ctx.newPage();
-    if (mobile) {
+    if (windowsTouch) {
+      await page.addInitScript(() => {
+        const mm = window.matchMedia.bind(window);
+        window.matchMedia = (q) => (q === "(pointer: coarse)" ? { ...mm(q), matches: true, media: q, addEventListener() {}, removeEventListener() {} } : mm(q));
+      });
+    }
+    if (mobile || windowsTouch) {
       await page.addInitScript(() => {
         window.__shares = [];
         navigator.canShare = () => true;
@@ -892,6 +903,20 @@ async function partC(engine, browser, video) {
       const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
       assert.deepEqual(requests, ["poster-4.jpg"]);
       assert.equal(name, "poster-4.jpg");
+    });
+    await ctx.close();
+  }
+  {
+    // Regression (Staging QA A2): on a Windows touch device Save Media opened the Windows Share dialog.
+    const { ctx, page, requests, actions } = await open({ windowsTouch: true });
+    await check(`${engine} Windows touch: the button reads Save Media, and clicking it DOWNLOADS the zip -- no share dialog`, async () => {
+      const button = actions.getByRole("button", { name: "Save Media", exact: true });
+      assert.equal(await button.count(), 1);
+      requests.length = 0;
+      const name = await downloadOf(page, () => button.click());
+      assert.equal(name, `post-${POST}-export.zip`);
+      assert.deepEqual(requests, ["export"], "one export-route zip request, no per-file fetches for a share");
+      assert.equal(await page.evaluate(() => window.__shares.length), 0, "navigator.share was never called");
     });
     await ctx.close();
   }
