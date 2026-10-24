@@ -19,7 +19,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
+import sharp from "sharp";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESS_DIR = path.join(ROOT, "src", "app", "preview-viewer-harness-check");
@@ -38,8 +39,17 @@ const assets = [a("1", "https://media.test/img-1.svg", "image"), a("2", "https:/
 // Module-level and in the paged LibraryPage shape (Issue 6) -- an inline
 // Promise.resolve per render re-suspends use(), and [] has no .entries.
 const LIBRARY = Promise.resolve({ entries: [], nextCursor: null, hasMore: false });
+// ?reel=none|legacy|marked: a STANDALONE Reel (the video alone, position 0) whose
+// cover was saved through Edit Cover, with no / a legacy / a marked Grid framing
+const REEL = [{ ...a("r", "https://media.test/video-2.webm", "video", "https://media.test/reel-cover.jpg"), annotationJson: { objects: [] }, coverEdited: true }];
+const REEL_FRAMING = {
+  none: null,
+  legacy: { scale: 1.4, x: 0.05, y: 0, rotation: 0 },
+  marked: { scale: 1.4, x: 0.05, y: 0, rotation: 0, scope: "grid-preview", scopeVersion: 1 },
+} as const;
 export default function Harness() {
   const params = useSearchParams();
+  const reel = params.get("reel") as keyof typeof REEL_FRAMING | null;
   const viewerOn = params.get("viewer") !== "off";
   // ?stored=reel: an older mixed carousel saved as "reel" by the old type rule (D1)
   const storedType = params.get("stored") === "reel" ? "reel" : "carousel";
@@ -49,8 +59,8 @@ export default function Harness() {
       {closes === 0 && (
         <Modal onClose={() => setCloses((c) => c + 1)}>
           <PostEditor projectId="00000000-0000-0000-0000-000000000000"
-            post={{ id: "00000000-0000-0000-0000-000000000001", post_type: storedType, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
-            assets={assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
+            post={{ id: "00000000-0000-0000-0000-000000000001", post_type: reel ? "reel" : storedType, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: reel ? REEL_FRAMING[reel] : { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
+            assets={reel ? REEL : assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
             currentUserId="00000000-0000-0000-0000-000000000002" members={[]} dateFormat="DD/MM/YYYY" hideBackLink enableMediaViewer={viewerOn} />
         </Modal>
       )}
@@ -73,6 +83,46 @@ async function check(name, fn) {
     failed++;
     console.log(`FAIL - ${name}\n   ${String(e.message).split("\n").slice(0, 6).join("\n   ")}`);
   }
+}
+
+// VISUAL check that a video's cover is really what the player shows --
+// layout, hit-testing and pixels, not DOM attributes (the cover <img> once
+// had the right src but sat BELOW the player, out of view). Probes 20% in
+// from the top-left: away from the centred Play icon and the Show cover pill.
+async function coverPainted(page, player, rgb) {
+  const g = await player.evaluate((root) => {
+    const img = root.querySelector("img");
+    if (!img) return { error: "no cover <img> in the player" };
+    let layer = img;
+    while (layer.parentElement !== root) layer = layer.parentElement;
+    const r = root.getBoundingClientRect();
+    const l = layer.getBoundingClientRect();
+    const x = r.x + r.width * 0.2;
+    const y = r.y + r.height * 0.2;
+    // the transparent full-box Play button sits on top by design; what's under it is what's seen
+    const seen = document.elementsFromPoint(x, y).find((e) => !e.closest("button"));
+    return { r: [r.x, r.y, r.width, r.height], l: [l.x, l.y, l.width, l.height], x, y, seenIsCover: !!seen && (seen === layer || layer.contains(seen)), seen: seen?.tagName ?? null };
+  });
+  assert.ok(!g.error, g.error);
+  const [rx, ry, rw, rh] = g.r;
+  const [lx, ly, lw, lh] = g.l;
+  assert.ok(lx >= rx - 1 && ly >= ry - 1 && lx + lw <= rx + rw + 1 && ly + lh <= ry + rh + 1, `cover layer ${g.l.map(Math.round)} outside player ${g.r.map(Math.round)}`);
+  assert.ok(g.seenIsCover, `the visible element at the probe is ${g.seen}, not the cover`);
+  const png = await page.screenshot({ clip: { x: Math.round(g.x) - 2, y: Math.round(g.y) - 2, width: 4, height: 4 } });
+  const { data } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const px = [data[0], data[1], data[2]];
+  assert.ok(px.every((v, i) => Math.abs(v - rgb[i]) <= 24), `painted rgb(${px}) is not the cover's rgb(${rgb})`);
+}
+// After Play: the cover is gone and the video itself is what's seen.
+async function videoShown(player) {
+  const g = await player.evaluate((root) => {
+    const r = root.getBoundingClientRect();
+    const seen = document.elementsFromPoint(r.x + r.width * 0.2, r.y + r.height * 0.6).find((e) => !e.closest("button"));
+    return { mode: root.getAttribute("data-video-player"), img: !!root.querySelector("img"), seen: seen?.tagName ?? null };
+  });
+  assert.equal(g.mode, "playing");
+  assert.equal(g.img, false, "cover hidden while playing");
+  assert.equal(g.seen, "VIDEO");
 }
 
 async function waitForServer(url, ms) {
@@ -498,6 +548,79 @@ async function run(browser, video) {
   }
 }
 
+// Cover-first, VISUALLY, in the Post Editor's large viewer -- Chromium and
+// WebKit. The cover is a solid magenta JPEG no video frame matches.
+async function runCoverVisual(engine, browser, video) {
+  console.log(`\n### cover-first, visual -- ${engine} ${browser.version()}${engine === "webkit" ? " (Playwright build -- not Safari)" : ""}`);
+  const MEDIA = {
+    "reel-cover.jpg": [await sharp({ create: { width: 1080, height: 1920, channels: 3, background: "#ff00ff" } }).jpeg().toBuffer(), "image/jpeg"],
+    "poster-2.svg": [svg("2", 720, 900, "#d4ac0d"), "image/svg+xml"],
+    "img-1.svg": [svg("1", 1600, 900, "#c0392b"), "image/svg+xml"],
+    "img-3.svg": [svg("3", 900, 1600, "#2471a3"), "image/svg+xml"],
+    "img-4.svg": [svg("4", 1000, 1000, "#1e8449"), "image/svg+xml"],
+    "video-2.webm": [video, "video/webm"],
+  };
+  const MAGENTA = [255, 0, 255];
+  const YELLOW = [0xd4, 0xac, 0x0d];
+  const open = async (query, tileIndex) => {
+    const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+    const page = await ctx.newPage();
+    await page.route("https://media.test/**", (r) => {
+      const m = MEDIA[new URL(r.request().url()).pathname.slice(1)];
+      return m ? r.fulfill({ body: m[0], contentType: m[1] }) : r.fulfill({ status: 404 });
+    });
+    await page.goto(BASE + query, { waitUntil: "networkidle" });
+    await page.waitForSelector("text=Close X", { timeout: 60000 });
+    await page.waitForTimeout(500);
+    await page.locator("[data-post-media-preview]").nth(tileIndex).click();
+    await page.waitForSelector("[data-post-media-viewer] [data-video-player]", { state: "attached", timeout: 8000 });
+    const player = page.locator("[data-post-media-viewer] [data-video-player]");
+    // loaded, and -- for a framed cover -- past the plain object-cover first render
+    await player.locator("img").first().evaluate((img) =>
+      new Promise((resolve) => {
+        const end = Date.now() + 8000;
+        (function poll() {
+          if ((img.complete && img.naturalWidth > 0) || Date.now() > end) resolve();
+          else requestAnimationFrame(poll);
+        })();
+      }),
+    ).catch(() => {});
+    await page.waitForTimeout(600);
+    return { ctx, page, player };
+  };
+  for (const framing of ["none", "legacy", "marked"]) {
+    const { ctx, page, player } = await open(`?reel=${framing}`, 0);
+    await check(`${engine}: standalone Reel (position 0), ${framing} framing -- the selected cover is PAINTED in the large viewer, before Play`, async () => {
+      assert.equal(await player.getAttribute("data-video-player"), "cover");
+      assert.equal(await page.evaluate(() => document.querySelector("[data-post-media-viewer] video").paused), true, "no autoplay");
+      await coverPainted(page, player, MAGENTA);
+    });
+    await check(`${engine}: standalone Reel, ${framing} framing -- Play shows the video; Show cover paints the selected cover again`, async () => {
+      await player.getByRole("button", { name: "Play video" }).click();
+      await page.waitForTimeout(400);
+      await videoShown(player);
+      await player.getByRole("button", { name: "Show cover" }).click();
+      await page.waitForTimeout(400);
+      assert.equal(await player.getAttribute("data-video-player"), "cover");
+      await coverPainted(page, player, MAGENTA);
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, player } = await open("", 1);
+    await check(`${engine}: a video inside a carousel -- its cover is PAINTED in the large viewer, and comes back after Play / Show cover`, async () => {
+      await coverPainted(page, player, YELLOW);
+      await player.getByRole("button", { name: "Play video" }).click();
+      await page.waitForTimeout(400);
+      await videoShown(player);
+      await player.getByRole("button", { name: "Show cover" }).click();
+      await page.waitForTimeout(400);
+      await coverPainted(page, player, YELLOW);
+    });
+    await ctx.close();
+  }
+}
+
 if (fs.existsSync(HARNESS_DIR)) {
   console.error(`Refusing to run: ${HARNESS_DIR} already exists.`);
   process.exit(1);
@@ -510,7 +633,15 @@ try {
   server = spawn(`npx next dev --port ${PORT}`, { cwd: ROOT, shell: true, stdio: "ignore" });
   await waitForServer(BASE, 180000);
   browser = await chromium.launch({ channel: "msedge" }).catch(() => chromium.launch({ channel: "chrome" }));
-  await run(browser, await recordTestVideo(browser));
+  const video = await recordTestVideo(browser);
+  await run(browser, video);
+  await runCoverVisual("chromium", browser, video);
+  const wk = await webkit.launch();
+  try {
+    await runCoverVisual("webkit", wk, video);
+  } finally {
+    await wk.close().catch(() => {});
+  }
 } finally {
   await browser?.close().catch(() => {});
   if (server?.pid) {

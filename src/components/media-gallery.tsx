@@ -238,7 +238,12 @@ export function VideoCoverPlayer({
         className="h-full w-full object-contain"
       />
       {!playing && posterUrl && (
-        <CroppedCoverImage src={posterUrl} transform={coverTransform} className="absolute inset-0 h-full w-full select-none" />
+        // The overlay's own wrapper: CroppedCoverImage's root is always
+        // `relative`, which beat an `absolute` passed in its className and
+        // laid the cover out BELOW the video, out of view.
+        <div className="absolute inset-0">
+          <CroppedCoverImage src={posterUrl} transform={coverTransform} className="h-full w-full select-none" />
+        </div>
       )}
       {!playing && (
         <button

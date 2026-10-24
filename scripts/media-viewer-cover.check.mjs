@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { chromium, webkit } from "playwright";
+import sharp from "sharp";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESS_DIR = path.join(ROOT, "src", "app", "preview-viewer-cover-harness-check");
@@ -67,6 +68,46 @@ async function check(name, fn) {
     failed++;
     console.log(`FAIL - ${name}\n   ${String(e.message).split("\n").slice(0, 6).join("\n   ")}`);
   }
+}
+
+// VISUAL check that a video's cover is really what the player shows --
+// layout, hit-testing and pixels, not DOM attributes (the cover <img> once
+// had the right src but sat BELOW the player, out of view). Probes 20% in
+// from the top-left: away from the centred Play icon and the Show cover pill.
+async function coverPainted(page, player, rgb) {
+  const g = await player.evaluate((root) => {
+    const img = root.querySelector("img");
+    if (!img) return { error: "no cover <img> in the player" };
+    let layer = img;
+    while (layer.parentElement !== root) layer = layer.parentElement;
+    const r = root.getBoundingClientRect();
+    const l = layer.getBoundingClientRect();
+    const x = r.x + r.width * 0.2;
+    const y = r.y + r.height * 0.2;
+    // the transparent full-box Play button sits on top by design; what's under it is what's seen
+    const seen = document.elementsFromPoint(x, y).find((e) => !e.closest("button"));
+    return { r: [r.x, r.y, r.width, r.height], l: [l.x, l.y, l.width, l.height], x, y, seenIsCover: !!seen && (seen === layer || layer.contains(seen)), seen: seen?.tagName ?? null };
+  });
+  assert.ok(!g.error, g.error);
+  const [rx, ry, rw, rh] = g.r;
+  const [lx, ly, lw, lh] = g.l;
+  assert.ok(lx >= rx - 1 && ly >= ry - 1 && lx + lw <= rx + rw + 1 && ly + lh <= ry + rh + 1, `cover layer ${g.l.map(Math.round)} outside player ${g.r.map(Math.round)}`);
+  assert.ok(g.seenIsCover, `the visible element at the probe is ${g.seen}, not the cover`);
+  const png = await page.screenshot({ clip: { x: Math.round(g.x) - 2, y: Math.round(g.y) - 2, width: 4, height: 4 } });
+  const { data } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const px = [data[0], data[1], data[2]];
+  assert.ok(px.every((v, i) => Math.abs(v - rgb[i]) <= 24), `painted rgb(${px}) is not the cover's rgb(${rgb})`);
+}
+// After Play: the cover is gone and the video itself is what's seen.
+async function videoShown(player) {
+  const g = await player.evaluate((root) => {
+    const r = root.getBoundingClientRect();
+    const seen = document.elementsFromPoint(r.x + r.width * 0.2, r.y + r.height * 0.6).find((e) => !e.closest("button"));
+    return { mode: root.getAttribute("data-video-player"), img: !!root.querySelector("img"), seen: seen?.tagName ?? null };
+  });
+  assert.equal(g.mode, "playing");
+  assert.equal(g.img, false, "cover hidden while playing");
+  assert.equal(g.seen, "VIDEO");
 }
 
 async function waitForServer(url, ms) {
@@ -214,6 +255,10 @@ async function run(engine, browser, media) {
       assert.equal(a0.controls, false);
       assert.equal(await a.getByRole("button", { name: "Play video" }).count(), 1);
     });
+    // its framed (zoom 2) top-left quadrant is orange
+    await check(`${tag}: VISUAL -- the standalone Reel's edited, framed cover is PAINTED in its player (inside the box, over the video)`, async () => {
+      await coverPainted(page, a, [0xff, 0x80, 0x00]);
+    });
     await tap(a.getByRole("button", { name: "Play video" }));
     await page.waitForTimeout(300);
     await playbackCheck(`${tag}: Play plays the ORIGINAL landscape video, whole (object-contain), with controls -- same box, no jump`, async () => {
@@ -227,8 +272,14 @@ async function run(engine, browser, media) {
       const { a: t0, b: t1 } = await waitAdvance(a);
       assert.ok(t1 - t0 > 0.4, `advanced ${t0} -> ${t1}`);
     });
+    await check(`${tag}: VISUAL -- after Play the video replaces the cover`, async () => {
+      await videoShown(a);
+    });
     await tap(a.getByRole("button", { name: "Show cover" }));
     await page.waitForTimeout(200);
+    await check(`${tag}: VISUAL -- Show cover paints the selected cover again`, async () => {
+      await coverPainted(page, a, [0xff, 0x80, 0x00]);
+    });
     await check(`${tag}: Show cover returns to the cover and pauses`, async () => {
       const s = await state(a);
       assert.equal(s.mode, "cover");
@@ -284,6 +335,9 @@ async function run(engine, browser, media) {
       assert.match(s.img ?? "", /poster-auto\.svg$/);
       assert.equal(s.paused, true);
       assert.equal(s.t, 0);
+    });
+    await check(`${tag}: VISUAL -- in the large viewer the carousel video's cover is PAINTED (inside the box, over the video)`, async () => {
+      await coverPainted(page, lb, [0x77, 0x77, 0x77]);
     });
     await tap(lb.getByRole("button", { name: "Play video" }));
     await page.waitForTimeout(300);
