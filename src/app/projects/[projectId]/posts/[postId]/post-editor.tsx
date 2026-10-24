@@ -1201,7 +1201,10 @@ function SortableAsset({
       return;
     }
     setDownloading(kind);
-    shareOrDownloadAsset(source.url, source.filename ?? filenameFromUrl(source.url, "asset"), isTouchDevice)
+    // Share sheet on phone/tablet OSes only -- same gate as Save Media; a
+    // Windows touch device downloads the file (lib/native-share-device.ts).
+    const useShareSheet = isTouchDevice && currentDeviceIsPhoneOrTablet();
+    shareOrDownloadAsset(source.url, source.filename ?? filenameFromUrl(source.url, "asset"), useShareSheet)
       .then((delivered) => {
         if (!delivered) showError("Couldn't download that file. Please try again.");
       })

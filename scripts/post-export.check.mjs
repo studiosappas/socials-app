@@ -908,7 +908,7 @@ async function partC(engine, browser, video) {
   }
   {
     // Regression (Staging QA A2): on a Windows touch device Save Media opened the Windows Share dialog.
-    const { ctx, page, requests, actions } = await open({ windowsTouch: true });
+    const { ctx, page, requests, actions, frameMenu } = await open({ windowsTouch: true });
     await check(`${engine} Windows touch: the button reads Save Media, and clicking it DOWNLOADS the zip -- no share dialog`, async () => {
       const button = actions.getByRole("button", { name: "Save Media", exact: true });
       assert.equal(await button.count(), 1);
@@ -917,6 +917,34 @@ async function partC(engine, browser, video) {
       assert.equal(name, `post-${POST}-export.zip`);
       assert.deepEqual(requests, ["export"], "one export-route zip request, no per-file fetches for a share");
       assert.equal(await page.evaluate(() => window.__shares.length), 0, "navigator.share was never called");
+    });
+    await check(`${engine} Windows touch: per-frame Save (⋮) DOWNLOADS that file -- no share dialog`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(2, "Save"));
+      assert.equal(name, "edit-3-preview.jpg");
+      assert.deepEqual(requests, ["edit-3-preview.jpg"]);
+      assert.equal(await page.evaluate(() => window.__shares.length), 0, "navigator.share was never called");
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, frameMenu } = await open({ windowsTouch: true, query: "?order=reel-auto&framing=off" });
+    await check(`${engine} Windows touch: per-frame Save Cover Image (⋮) DOWNLOADS the cover -- no share dialog`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(0, "Save Cover Image"));
+      assert.equal(name, "poster-4.jpg");
+      assert.deepEqual(requests, ["poster-4.jpg"]);
+      assert.equal(await page.evaluate(() => window.__shares.length), 0, "navigator.share was never called");
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, frameMenu } = await open({ mobile: true });
+    await check(`${engine} phone: per-frame Save (⋮) still uses the native share sheet with that one file`, async () => {
+      await frameMenu(2, "Save");
+      await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
+      const shared = await page.evaluate(() => window.__shares[0]);
+      assert.deepEqual(shared.map((f) => f.name), ["edit-3-preview.jpg"]);
     });
     await ctx.close();
   }
