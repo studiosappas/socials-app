@@ -24,7 +24,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESS_DIR = path.join(ROOT, "src", "app", "preview-annotation-crop-harness-check");
@@ -37,7 +37,7 @@ import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { AnnotationEditor } from "@/components/annotation-editor";
 declare global {
-  interface Window { __saves: { json: string; previewUrl: string }[] }
+  interface Window { __saves: { json: string; previewUrl: string }[]; __editorCloses?: number }
 }
 const ASPECTS: Record<string, { w: number; h: number }> = { "34": { w: 3, h: 4 }, "45": { w: 4, h: 5 }, "916": { w: 9, h: 16 } };
 async function saveAction(_projectId: string, _id: string, formData: FormData) {
@@ -55,7 +55,7 @@ function Editor() {
   return (
     <AnnotationEditor projectId="p" attachmentId="a" postId="q" open imageUrl="https://media.test/photo.png"
       initialAnnotationJson={initial} mediaType="image" targetAspect={aspect}
-      onClose={() => {}} onSaved={() => {}} saveAction={saveAction} />
+      onClose={() => { window.__editorCloses = (window.__editorCloses ?? 0) + 1; }} onSaved={() => {}} saveAction={saveAction} />
   );
 }
 export default function Harness() {
@@ -402,6 +402,104 @@ async function run(browser, photo) {
     assert.equal(await saveCount(blocked.page), 0);
   });
   await blocked.ctx.close();
+  return clean34.json;
+}
+
+// --- F: Escape closes ONLY the topmost layer -------------------------------
+// The editor on its own, the way Brief hosts it. A document- and a
+// window-level Escape listener stand in for whatever is underneath (the Post
+// Editor's Modal listens on document; Brief's own previews on window): one
+// Escape must never reach them while the editor is open.
+async function runEscape(engine, browser, photo, legacy34Json) {
+  console.log(`\n### F. Escape, topmost layer only -- ${engine} ${browser.version()}${engine === "webkit" ? " (Playwright build -- not Safari)" : ""}`);
+  async function open(query) {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await ctx.newPage();
+    await page.addInitScript(() => {
+      window.__hostEscapes = 0;
+      document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.__hostEscapes++; });
+      window.addEventListener("keydown", (e) => { if (e.key === "Escape") window.__hostEscapes++; });
+    });
+    await page.route("https://media.test/**", (r) => r.fulfill({ body: photo, contentType: "image/png" }));
+    await page.goto(BASE + query, { waitUntil: "networkidle" });
+    await page.locator(".canvas-container").waitFor({ timeout: 30000 });
+    await page.waitForFunction(() => {
+      const el = [...document.querySelectorAll("p")].find((p) => p.textContent === "Loading image…");
+      return el && getComputedStyle(el.parentElement).display === "none";
+    }, null, { timeout: 30000 });
+    await page.waitForTimeout(300);
+    return { ctx, page };
+  }
+  const shot = (page) => page.locator(".canvas-container").screenshot();
+  const state = (page) => page.evaluate(() => ({
+    editorCloses: window.__editorCloses ?? 0,
+    hostEscapes: window.__hostEscapes,
+    saves: (window.__saves ?? []).length,
+    cropTool: [...document.querySelectorAll("button")].some((b) => b.textContent.trim() === "Apply crop"),
+    reframeDialog: !!document.querySelector("[data-reframe-dialog]"),
+  }));
+  const enterCrop = async (page) => {
+    await page.locator("button[title='Crop Image']").first().click();
+    await page.getByRole("button", { name: "Apply crop" }).waitFor();
+    await page.waitForTimeout(250);
+  };
+  const dragInCrop = async (page) => {
+    const f = await page.locator("div.absolute.z-10.bg-background").boundingBox();
+    await page.mouse.move(f.x + f.width / 2, f.y + f.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(f.x + f.width / 2 + 60, f.y + f.height / 2 + 30, { steps: 6 });
+    await page.mouse.up();
+  };
+
+  for (const [how, leave] of [
+    ["Escape", (page) => page.keyboard.press("Escape")],
+    ["Cancel crop", (page) => page.getByRole("button", { name: "Cancel crop" }).click()],
+  ]) {
+    const { ctx, page } = await open("?aspect=45");
+    const before = await shot(page);
+    await enterCrop(page);
+    await dragInCrop(page); // an unapplied crop adjustment
+    await leave(page);
+    await page.waitForTimeout(400);
+    await check(`F. ${engine}: Crop Image -> ${how}: ONLY the crop tool closes; editor open; nothing applied or saved; nothing underneath saw Escape`, async () => {
+      const s = await state(page);
+      assert.equal(s.cropTool, false, "crop tool closed");
+      assert.equal(s.editorCloses, 0, "the editor itself stays open");
+      assert.equal(s.hostEscapes, 0, "Escape never reached the layer underneath");
+      assert.equal(s.saves, 0, "nothing saved");
+      const d = await meanDiff(before, await shot(page));
+      assert.ok(d < 1.5, `canvas changed: mean diff ${d.toFixed(2)}`);
+    });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page } = await open(`?aspect=45&restore=${encodeURIComponent(Buffer.from(legacy34Json).toString("base64"))}`);
+    const before = await shot(page);
+    await page.getByRole("button", { name: "Re-frame to 4:5" }).click();
+    await page.locator("[data-reframe-dialog]").waitFor();
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(400);
+    await check(`F. ${engine}: Re-frame -> Escape: ONLY the Re-frame dialog closes; the 3:4 edit is untouched; nothing underneath saw Escape`, async () => {
+      const s = await state(page);
+      assert.equal(s.reframeDialog, false, "dialog closed");
+      assert.equal(s.editorCloses, 0, "the editor itself stays open");
+      assert.equal(s.hostEscapes, 0);
+      assert.equal(s.saves, 0);
+      assert.equal(await page.getByRole("button", { name: "Re-frame to 4:5" }).count(), 1, "still offered: nothing was re-framed");
+      const d = await meanDiff(before, await shot(page));
+      assert.ok(d < 1.5, `canvas changed: mean diff ${d.toFixed(2)}`);
+    });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    await check(`F. ${engine}: ...then Escape with no tool/dialog open closes the editor exactly once -- and still not what's underneath`, async () => {
+      const s = await state(page);
+      assert.equal(s.editorCloses, 1);
+      assert.equal(s.hostEscapes, 0);
+      assert.equal(s.saves, 0);
+    });
+    await ctx.close();
+  }
 }
 
 let server;
@@ -414,7 +512,14 @@ try {
   const browser = await chromium.launch();
   try {
     console.log(`### AnnotationEditor crop/restore -- chromium ${browser.version()}`);
-    await run(browser, photo);
+    const legacy34Json = await run(browser, photo);
+    await runEscape("chromium", browser, photo, legacy34Json);
+    const wk = await webkit.launch();
+    try {
+      await runEscape("webkit", wk, photo, legacy34Json);
+    } finally {
+      await wk.close();
+    }
   } finally {
     await browser.close();
   }

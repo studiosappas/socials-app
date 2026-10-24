@@ -57,7 +57,8 @@ export default function Harness() {
   return (
     <div data-modal-closes={closes}>
       {closes === 0 && (
-        <Modal onClose={() => setCloses((c) => c + 1)}>
+        // ?modal=router: the Modal's REAL default close (router.back()), as on the intercepted route
+        <Modal onClose={params.get("modal") === "router" ? undefined : () => setCloses((c) => c + 1)}>
           <PostEditor projectId="00000000-0000-0000-0000-000000000000"
             post={{ id: "00000000-0000-0000-0000-000000000001", post_type: reel ? "reel" : storedType, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: reel ? REEL_FRAMING[reel] : { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
             assets={reel ? REEL : assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
@@ -621,6 +622,147 @@ async function runCoverVisual(engine, browser, video) {
   }
 }
 
+// Escape closes ONLY the topmost layer, with the REAL Post Editor Modal and
+// the REAL annotation editor (Edit Image) together: once with the harness's
+// close counter, once with the Modal's real router.back() (history.back is
+// recorded, not followed). Server Actions are recorded and aborted -- none
+// may be sent by any of this.
+async function runEditImageEscape(engine, browser) {
+  console.log(`\n### Escape, topmost layer only -- ${engine} ${browser.version()}${engine === "webkit" ? " (Playwright build -- not Safari)" : ""}`);
+  const photo = await sharp({ create: { width: 1200, height: 1600, channels: 3, background: "#2471a3" } })
+    .composite([{ input: await sharp({ create: { width: 600, height: 800, channels: 3, background: "#d4ac0d" } }).png().toBuffer(), left: 300, top: 400 }])
+    .png()
+    .toBuffer();
+  const open = async (query) => {
+    const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+    const page = await ctx.newPage();
+    await page.addInitScript(() => {
+      window.__backs = 0;
+      history.back = () => void window.__backs++;
+    });
+    await page.route("https://media.test/**", (r) => r.fulfill({ body: photo, contentType: "image/png", headers: { "access-control-allow-origin": "*" } }));
+    const actions = [];
+    await page.route(`http://localhost:${PORT}/**`, (r) => {
+      if (r.request().method() === "POST" && r.request().headers()["next-action"]) {
+        actions.push(r.request().postData() ?? "");
+        return r.abort();
+      }
+      return r.fallback();
+    });
+    await page.goto(BASE + query, { waitUntil: "networkidle" });
+    await page.waitForSelector("text=Close X", { timeout: 60000 });
+    await page.waitForTimeout(500);
+    return { ctx, page, actions };
+  };
+  const frameMenu = async (page, item) => {
+    for (const end = Date.now() + 60000; ; ) {
+      await page.locator("button[title='Frame options']").first().click();
+      if (await page.getByRole("button", { name: item, exact: true }).count()) break;
+      if (Date.now() > end) throw new Error(`menu item ${item} never appeared`);
+      await page.waitForTimeout(300);
+    }
+    await page.getByRole("button", { name: item, exact: true }).click();
+  };
+  const openEditImage = async (page) => {
+    await frameMenu(page, "Edit Image");
+    await page.locator("button[title='Crop Image']").first().waitFor({ timeout: 30000 });
+    await page.waitForFunction(() => {
+      const el = [...document.querySelectorAll("p")].find((p) => p.textContent === "Loading image…");
+      return el && getComputedStyle(el.parentElement).display === "none";
+    }, null, { timeout: 30000 });
+    await page.waitForTimeout(400);
+  };
+  // closes of the Post Editor, whichever close the Modal uses
+  const editorCloses = (page) => page.evaluate(() => Number(document.querySelector("[data-modal-closes]").getAttribute("data-modal-closes")) + window.__backs);
+  const layers = (page) => page.evaluate(() => ({
+    editImage: !!document.querySelector("button[title='Crop Image']"),
+    cropTool: [...document.querySelectorAll("button")].some((b) => b.textContent.trim() === "Apply crop"),
+    gridCropOverlay: !!document.querySelector("div.fixed[class~='z-[101]']"),
+  }));
+  const canvasShot = async (page) => sharp(await page.locator(".canvas-container").screenshot()).removeAlpha().resize(48, 60, { fit: "fill" }).raw().toBuffer();
+  const diff = (a, b) => {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+    return s / a.length;
+  };
+
+  for (const mode of ["counter", "router"]) {
+    const q = mode === "router" ? "?modal=router" : "";
+    const tag = `${engine} [${mode === "router" ? "real router.back() close" : "close counter"}]`;
+    for (const [how, leave] of [
+      ["Escape", (page) => page.keyboard.press("Escape")],
+      ["Cancel crop", (page) => page.getByRole("button", { name: "Cancel crop" }).click()],
+    ]) {
+      const { ctx, page, actions } = await open(q);
+      await openEditImage(page);
+      const before = await canvasShot(page);
+      const sent = actions.length;
+      await page.locator("button[title='Crop Image']").first().click();
+      await page.getByRole("button", { name: "Apply crop" }).waitFor();
+      await page.waitForTimeout(250);
+      const f = await page.locator("div.absolute.z-10.bg-background").boundingBox();
+      await page.mouse.move(f.x + f.width / 2, f.y + f.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(f.x + f.width / 2 + 60, f.y + f.height / 2 + 30, { steps: 6 }); // unapplied
+      await page.mouse.up();
+      await leave(page);
+      await page.waitForTimeout(500);
+      await check(`${tag}: Edit Image -> Crop Image -> ${how}: ONLY the crop tool closes; Edit Image and the Post Editor stay open; nothing applied or saved`, async () => {
+        const l = await layers(page);
+        assert.equal(l.cropTool, false, "crop tool closed");
+        assert.equal(l.editImage, true, "Edit Image still open");
+        assert.equal(await editorCloses(page), 0, "Post Editor not closed");
+        assert.deepEqual(actions.slice(sent), [], "no save sent");
+        const d = diff(before, await canvasShot(page));
+        assert.ok(d < 1.5, `canvas changed: mean diff ${d.toFixed(2)}`);
+      });
+      if (how === "Escape") {
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(500);
+        await check(`${tag}: Edit Image -> Escape: ONLY Edit Image closes; the Post Editor stays open`, async () => {
+          assert.equal((await layers(page)).editImage, false, "Edit Image closed");
+          assert.equal(await editorCloses(page), 0, "Post Editor not closed");
+          assert.deepEqual(actions.slice(sent), [], "no save sent");
+        });
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(400);
+        await check(`${tag}: Escape with only the Post Editor open closes it -- exactly once`, async () => {
+          assert.equal(await editorCloses(page), 1);
+        });
+      }
+      await ctx.close();
+    }
+    {
+      // the Post Editor's own enlarged Crop overlay (cover menu -> Crop): unchanged
+      const { ctx, page, actions } = await open(q);
+      const sent = actions.length;
+      for (const how of ["Escape", "Cancel"]) {
+        await frameMenu(page, "Crop");
+        await page.waitForTimeout(400);
+        const f = await page.locator("div.fixed[class~='z-[101]'] > div").first().boundingBox();
+        await page.mouse.move(f.x + f.width / 2, f.y + f.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(f.x + f.width / 2 + 40, f.y + f.height / 2, { steps: 5 }); // unapplied
+        await page.mouse.up();
+        if (how === "Escape") await page.keyboard.press("Escape");
+        else await page.locator("div.fixed[class~='z-[101]']").getByRole("button", { name: "Cancel", exact: true }).click();
+        await page.waitForTimeout(400);
+        await check(`${tag}: Post Editor Crop overlay -> ${how}: only the overlay closes; nothing saved`, async () => {
+          assert.equal((await layers(page)).gridCropOverlay, false);
+          assert.equal(await editorCloses(page), 0);
+          assert.deepEqual(actions.slice(sent).filter((b) => /"scale"/.test(b)), [], "no crop write");
+        });
+      }
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(400);
+      await check(`${tag}: ...then Escape closes the Post Editor exactly once`, async () => {
+        assert.equal(await editorCloses(page), 1);
+      });
+      await ctx.close();
+    }
+  }
+}
+
 if (fs.existsSync(HARNESS_DIR)) {
   console.error(`Refusing to run: ${HARNESS_DIR} already exists.`);
   process.exit(1);
@@ -636,9 +778,11 @@ try {
   const video = await recordTestVideo(browser);
   await run(browser, video);
   await runCoverVisual("chromium", browser, video);
+  await runEditImageEscape("chromium", browser);
   const wk = await webkit.launch();
   try {
     await runCoverVisual("webkit", wk, video);
+    await runEditImageEscape("webkit", wk);
   } finally {
     await wk.close().catch(() => {});
   }

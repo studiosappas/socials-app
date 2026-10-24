@@ -1800,13 +1800,46 @@ export function AnnotationEditor({
     });
   }
 
+  // Escape belongs to the TOPMOST layer only, one layer per press: the
+  // Re-frame dialog, else the Crop tool (exactly "Cancel crop" -- nothing
+  // applied), else this editor. Claimed on window in the capture phase and
+  // stopped there, so it never also reaches what's underneath -- the Post
+  // Editor's Modal closes itself on a document-level Escape, which used to
+  // fire on the same key press and close both. The handler reads the
+  // current state through a ref (the listener itself is attached once).
+  const escapeRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    escapeRef.current = () => {
+      if (reframe) {
+        // Same as its Cancel button, which is disabled while applying.
+        if (!reframeBusy) {
+          setReframe(null);
+          setReframeError(undefined);
+        }
+        return;
+      }
+      if (tool === "crop") {
+        // Same as the "Cancel crop" button, which is disabled while applying.
+        if (!applyingCrop) activateTool("select");
+        return;
+      }
+      onClose();
+    };
+  });
+  useEffect(() => {
+    if (!open) return;
+    function handleEscapeCapture(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      escapeRef.current();
+    }
+    window.addEventListener("keydown", handleEscapeCapture, true);
+    return () => window.removeEventListener("keydown", handleEscapeCapture, true);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        onClose();
-        return;
-      }
       if (e.key === "Delete" || e.key === "Backspace") {
         // Don't hijack normal text editing -- a DOM input/textarea focused
         // elsewhere in this editor (e.g. the hex color field), or an IText
