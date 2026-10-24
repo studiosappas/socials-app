@@ -39,7 +39,9 @@
 // crop saved before rotation existed has no `rotation` key at all, and
 // must keep loading identically. No migration: posts.cover_transform is
 // already a JSONB blob, so a new optional key needs no schema change.
-export type GridCoverTransform = { scale: number; x: number; y: number; rotation?: number };
+// scope/scopeVersion: the Grid-preview-only marker on framings saved by a new
+// Crop -- see lib/cover-framing.ts. Absent on legacy framings.
+export type GridCoverTransform = { scale: number; x: number; y: number; rotation?: number; scope?: string; scopeVersion?: number };
 
 export type GridBoardSlot = {
   id: string;

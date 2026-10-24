@@ -55,6 +55,8 @@ import sharp from "sharp";
 import JSZip from "jszip";
 import { parseExportPart, parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
 import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib/post-export";
+// The real route passes posts.cover_transform through this before planning.
+import { exportCoverFraming, markGridPreviewFraming } from "@/lib/cover-framing";
 // The export plan exactly as it is in Production (78042ae), written next to this
 // route by the check script -- for the legacy before/after comparison (part D).
 import { planPostExport as planPostExportBefore } from "./plan-before";
@@ -114,7 +116,9 @@ const FRAME = { scale: 1.6, x: 0.08, y: -0.05, rotation: 0 };
 // Part D: posts as they exist in Production today -- legacy 3:4 edits, Grid
 // framings, older video covers -- plus new-style ones, each exported by the
 // Production plan (before) and the current plan (after), same renderer.
-const LEGACY: Record<string, { assets: PostExportAsset[]; transform: typeof FRAME | null }> = {
+type Framing = { scale: number; x: number; y: number; rotation?: number; [k: string]: unknown };
+const MARKED = markGridPreviewFraming(FRAME);
+const LEGACY: Record<string, { assets: PostExportAsset[]; transform: Framing | null }> = {
   "framed original image": { assets: [B], transform: FRAME },
   "framed legacy 3:4 edit": { assets: [L], transform: FRAME },
   "unframed legacy 3:4 edit": { assets: [L], transform: null },
@@ -126,6 +130,24 @@ const LEGACY: Record<string, { assets: PostExportAsset[]; transform: typeof FRAM
   "Reel, automatic poster, framed": { assets: [VA], transform: FRAME },
   "Reel, automatic poster, unframed": { assets: [VA], transform: null },
   "mixed carousel, framed": { assets: [L, VE, VA], transform: FRAME },
+  // after a reorder the stored framing applies to whatever is at position 0
+  // now -- Production's behaviour, unchanged for unmarked framings
+  "reordered: 4:5 edit moved into the framed legacy cover position": { assets: [A, L], transform: FRAME },
+  "reordered: legacy 3:4 edit moved to slide 2 (framed)": { assets: [B, L], transform: FRAME },
+  // malformed / unknown markers: must export exactly like the plain legacy framing
+  "malformed marker (no version), legacy 3:4 edit": { assets: [L], transform: { ...FRAME, scope: "grid-preview" } },
+  "unknown marker version 2, legacy 3:4 edit": { assets: [L], transform: { ...FRAME, scope: "grid-preview", scopeVersion: 2 } },
+  "string marker version, Reel edited cover": { assets: [VE], transform: { ...FRAME, scope: "grid-preview", scopeVersion: "1" } },
+  "unknown scope, framed original image": { assets: [B], transform: { ...FRAME, scope: "export", scopeVersion: 1 } },
+  // NEW Grid crops (marked): Grid preview only -- must export exactly like the same post unframed
+  "MARKED framed original image": { assets: [B], transform: MARKED },
+  "MARKED framed 4:5 edit": { assets: [A], transform: MARKED },
+  "MARKED framed legacy 3:4 edit": { assets: [L], transform: MARKED },
+  "MARKED image carousel": { assets: [A, B, C], transform: MARKED },
+  "MARKED Reel, edited cover": { assets: [VE], transform: MARKED },
+  "MARKED Reel, automatic poster": { assets: [VA], transform: MARKED },
+  "MARKED mixed carousel": { assets: [B, VE, VA], transform: MARKED },
+  "MARKED, then reordered: legacy 3:4 edit moved into cover": { assets: [L, A], transform: MARKED },
 };
 const SCENARIOS: Record<string, { assets: PostExportAsset[]; transform: { scale: number; x: number; y: number; rotation?: number } | null }> = {
   // a standalone Reel with only its automatic poster, unframed
@@ -151,6 +173,9 @@ const SCENARIOS: Record<string, { assets: PostExportAsset[]; transform: { scale:
   "framed-video-auto": { assets: [VA], transform: { scale: 2, x: 0, y: 0 } },
   // the same edited video cover, framed with a 90-degree rotation
   "framed-video-rotated": { assets: [VE], transform: { scale: 1, x: 0, y: 0, rotation: 90 } },
+  // the "carousel" post above, its framing saved by a NEW Grid crop (marked)
+  "carousel-marked": { assets: [A, B, C, V], transform: markGridPreviewFraming({ scale: 2, x: 0, y: 0 }) },
+  "reel-edited-marked": { assets: [VE], transform: markGridPreviewFraming({ scale: 2, x: 0, y: 0 }) },
 };
 
 export async function GET(request: Request) {
@@ -170,9 +195,14 @@ export async function GET(request: Request) {
     const out = [];
     for (const [name, s] of Object.entries(LEGACY)) {
       const download = async (p: string) => files.get(p) ?? null;
+      // Production never knew the marker: it framed with whatever was stored.
       const before = await describe(await renderPostExport(planPostExportBefore(s.assets, s.transform, "edited"), s.transform, download));
-      const after = await describe(await renderPostExport(planPostExport(s.assets, s.transform, "edited"), s.transform, download));
-      out.push({ name, before, after });
+      const t = exportCoverFraming(s.transform);
+      const after = await describe(await renderPostExport(planPostExport(s.assets, t, "edited"), t, download));
+      // the same post with no framing at all, both plans
+      const beforeUnframed = await describe(await renderPostExport(planPostExportBefore(s.assets, null, "edited"), null, download));
+      const afterUnframed = await describe(await renderPostExport(planPostExport(s.assets, null, "edited"), null, download));
+      out.push({ name, before, after, beforeUnframed, afterUnframed });
     }
     return Response.json(out);
   }
@@ -181,14 +211,15 @@ export async function GET(request: Request) {
   const variant = parseExportVariant(url.searchParams.get("variant"));
   const only = url.searchParams.get("asset");
   const part = parseExportPart(url.searchParams.get("part"));
-  let plan = planPostExport(scenario.assets, scenario.transform, variant);
+  const transform = exportCoverFraming(scenario.transform);
+  let plan = planPostExport(scenario.assets, transform, variant);
   if (only) {
     plan = plan.filter((i) => i.postAssetId === only && i.part === part);
     if (plan.length === 0) return Response.json({ message: "no such item" }, { status: 404 });
   }
   let rendered;
   try {
-    rendered = await renderPostExport(plan, scenario.transform, async (p) => files.get(p) ?? null);
+    rendered = await renderPostExport(plan, transform, async (p) => files.get(p) ?? null);
   } catch (error) {
     if (error instanceof PostExportError) return Response.json({ message: error.userMessage }, { status: 502 });
     throw error;
@@ -270,15 +301,18 @@ const NO_MEMBERS: never[] = [];
 const LIBRARY = Promise.resolve({ entries: [], nextCursor: null, hasMore: false });
 const FRAMED = { id: "${POST}", post_type: "carousel" as const, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft" as const, review_status: "pending" as const, coverTransform: { scale: 2, x: 0, y: 0, rotation: 0 } };
 const UNFRAMED = { ...FRAMED, coverTransform: null };
+// ?framing=marked: the same framing, saved by a NEW Grid crop (Grid preview only)
+const MARKED_FRAMING = { ...FRAMED, coverTransform: { scale: 2, x: 0, y: 0, rotation: 0, scope: "grid-preview", scopeVersion: 1 } };
 export default function Harness() {
   const params = useSearchParams();
-  const framed = params.get("framing") !== "off";
+  const framing = params.get("framing");
+  const post = framing === "off" ? UNFRAMED : framing === "marked" ? MARKED_FRAMING : FRAMED;
   const order = params.get("order");
   const assets =
     order === "video-first" ? VIDEO_FIRST : order === "reel-auto" ? REEL_AUTO : order === "reel-edited" ? REEL_EDITED : ASSETS;
   return (
     <Modal onClose={() => {}}>
-      <PostEditor projectId="${PROJECT}" post={framed ? FRAMED : UNFRAMED} assets={assets} links={NO_LINKS} mediaLibraryPromise={LIBRARY}
+      <PostEditor projectId="${PROJECT}" post={post} assets={assets} links={NO_LINKS} mediaLibraryPromise={LIBRARY}
         canManage role="owner" currentUserId="00000000-0000-0000-0000-000000000002" members={NO_MEMBERS} dateFormat="DD/MM/YYYY" hideBackLink />
     </Modal>
   );
@@ -549,12 +583,14 @@ async function partA() {
     "Reel, automatic poster, unframed": "adds the automatic poster as the Reel's one cover image (D2, approved)",
     "mixed carousel, framed": "drops the carousel video's separate cover JPG (approved in the previous cycle)",
   };
+  const isMarked = (row) => row.name.startsWith("MARKED");
   for (const row of legacy) {
     const fmt = (files) => files.map((f) => `${f.name} ${f.size}`).join(", ");
     console.log(`   ${row.name}\n     before: ${fmt(row.before)}\n     after:  ${fmt(row.after)}`);
+    if (isMarked(row)) console.log(`     Production, same post unframed: ${fmt(row.beforeUnframed)}`);
   }
   await check("D. every legacy framed/edited post exports the SAME files, dimensions and bytes as Production -- except the two approved changes", async () => {
-    for (const row of legacy) {
+    for (const row of legacy.filter((r) => !isMarked(r))) {
       const same = JSON.stringify(row.before) === JSON.stringify(row.after);
       if (EXPECTED_CHANGES[row.name]) assert.equal(same, false, `${row.name}: expected a change`);
       else assert.ok(same, `${row.name} changed:\n before ${JSON.stringify(row.before)}\n after  ${JSON.stringify(row.after)}`);
@@ -575,6 +611,62 @@ async function partA() {
     }
     assert.equal(pick("unframed legacy 3:4 edit", "cover.jpg"), "1080x1440");
     assert.equal(pick("unframed 4:5 edit", "cover.jpg"), "1600x2000");
+  });
+  await check("D. malformed / unknown markers export byte-identically to Production's framed export (treated as legacy)", async () => {
+    for (const row of legacy.filter((r) => /marker|unknown scope/.test(r.name))) {
+      assert.deepEqual(row.after, row.before, row.name);
+      assert.notDeepEqual(row.after, row.afterUnframed, `${row.name}: the framing must still crop`);
+    }
+  });
+  await check("D. reorder: an unmarked framing keeps applying to position 0 exactly as in Production", async () => {
+    for (const name of ["reordered: 4:5 edit moved into the framed legacy cover position", "reordered: legacy 3:4 edit moved to slide 2 (framed)"]) {
+      const row = legacy.find((r) => r.name === name);
+      assert.deepEqual(row.after, row.before, name);
+    }
+  });
+  await check("D. MARKED (new Grid crop): every export is byte-identical to the same post exported UNFRAMED -- the Grid crop is ignored", async () => {
+    for (const row of legacy.filter(isMarked)) {
+      assert.deepEqual(row.after, row.afterUnframed, row.name);
+      assert.notDeepEqual(row.after, row.before, `${row.name}: Production would have cropped this`);
+    }
+  });
+  await check("D. MARKED: same as Production's unframed export, except the two approved changes (auto Reel poster; no carousel video cover)", async () => {
+    for (const row of legacy.filter(isMarked)) {
+      if (row.name === "MARKED Reel, automatic poster") {
+        assert.deepEqual(row.after, [...row.beforeUnframed, ...row.after.filter((f) => f.name === "cover-image.jpg")]);
+        assert.deepEqual(row.after.filter((f) => f.name === "cover-image.jpg").map((f) => f.size), ["720x1280"]);
+      } else {
+        // the approved earlier change: carousel videos no longer get a separate cover JPG
+        assert.deepEqual(row.after, row.beforeUnframed.filter((f) => !/^slide-\d+-cover\./.test(f.name)), row.name);
+      }
+    }
+  });
+  await check("D. MARKED: media keeps its own saved framing (4:5 edit 1600x2000, legacy 3:4 edit stays 1080x1440, original untouched)", async () => {
+    const pick = (name, file) => legacy.find((r) => r.name === name).after.find((f) => f.name === file);
+    assert.equal(pick("MARKED framed 4:5 edit", "cover.jpg").size, "1600x2000");
+    assert.equal(pick("MARKED framed legacy 3:4 edit", "cover.jpg").size, "1080x1440");
+    assert.equal(pick("MARKED, then reordered: legacy 3:4 edit moved into cover", "cover.jpg").size, "1080x1440");
+    assert.equal(pick("MARKED framed original image", "cover.png").sha, sha(F["p/orig-b.png"]).slice(0, 12));
+    assert.equal(pick("MARKED Reel, edited cover", "cover-image.jpg").sha, sha(F["p/poster-v-edit.jpg"]).slice(0, 12));
+  });
+  await check("D. no duplicate files: unique names, at most one cover image, none for carousel videos", async () => {
+    for (const row of legacy) {
+      const names = row.after.map((f) => f.name);
+      assert.equal(new Set(names).size, names.length, row.name);
+      assert.ok(names.filter((n) => n === "cover-image.jpg").length <= 1, row.name);
+      assert.equal(names.filter((n) => /^slide-\d+-cover\./.test(n)).length, 0, row.name);
+    }
+  });
+  await check("D. MARKED through the route path: zip == the unframed zip byte-for-byte; single-asset cover == the saved edit", async () => {
+    for (const [marked, plain] of [["carousel-marked", "carousel-unframed"], ["reel-edited-marked", "reel-edited"]]) {
+      const a = await unzip((await get(`scenario=${marked}`)).buf);
+      const b = await unzip((await get(`scenario=${plain}`)).buf);
+      assert.deepEqual(a.names, b.names, marked);
+      for (const n of a.names) assert.equal(sha(a.files[n]), sha(b.files[n]), `${marked}/${n}`);
+    }
+    const one = await get("scenario=carousel-marked&asset=pa-a");
+    const plainOne = await get("scenario=carousel-unframed&asset=pa-a");
+    assert.equal(sha(one.buf), sha(plainOne.buf));
   });
 
   await check("exporting is read-only: every fixture is byte-identical after all of the above", async () => {
@@ -800,6 +892,45 @@ async function partC(engine, browser, video) {
       const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
       assert.deepEqual(requests, ["poster-4.jpg"]);
       assert.equal(name, "poster-4.jpg");
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, frameMenu } = await open({ query: "?framing=marked" });
+    await check(`${engine} desktop: a cover with a NEW (marked) Grid crop downloads its saved edit directly -- the Grid crop is not applied`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(0, "Download"));
+      assert.deepEqual(requests, ["edit-1-preview.jpg"]);
+      assert.equal(name, "edit-1-preview.jpg");
+    });
+    await check(`${engine} desktop: the marked cover tile still shows the Grid crop (zoom 2) in the editor`, async () => {
+      const t = await page.waitForFunction(() => {
+        const img = [...document.querySelectorAll("img")].find((i) => i.src.includes("edit-1-preview.jpg") && i.style.transform);
+        return img ? getComputedStyle(img).transform : null;
+      }, null, { timeout: 15000 }).then((h) => h.jsonValue());
+      assert.ok(t && t !== "none" && /matrix\(2, 0, 0, 2/.test(t), String(t));
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-auto&framing=marked" });
+    await check(`${engine} desktop: a standalone Reel with a marked Grid crop offers its automatic poster unframed, from storage`, async () => {
+      requests.length = 0;
+      const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
+      assert.deepEqual(requests, ["poster-4.jpg"]);
+      assert.equal(name, "poster-4.jpg");
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, requests, actions } = await open({ mobile: true, query: "?framing=marked" });
+    await check(`${engine} touch: Save Media with a marked Grid crop shares the saved edit itself -- no route render`, async () => {
+      requests.length = 0;
+      await actions.getByRole("button", { name: "Save Media", exact: true }).tap();
+      await page.waitForFunction(() => window.__shares.length === 1, null, { timeout: 8000 });
+      const shared = await page.evaluate(() => window.__shares[0]);
+      assert.deepEqual(shared.map((f) => f.name), ["edit-1-preview.jpg", "orig-2.png", "edit-3-preview.jpg", "video-4.webm", "video-5.webm"]);
+      assert.ok(!requests.some((r) => r.startsWith("export")), JSON.stringify(requests));
     });
     await ctx.close();
   }

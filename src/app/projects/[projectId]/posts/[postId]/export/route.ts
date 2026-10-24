@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { CoverTransform } from "@/lib/image-crop";
 import { parseExportPart, parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
 import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib/post-export";
+import { exportCoverFraming } from "@/lib/cover-framing";
 
 // Server-side per-post export -- "Download Media" in the Post Editor.
 //
@@ -75,7 +76,9 @@ export async function GET(
   // column isolation in this codebase -- a missing cover_transform column
   // just means the cover exports unframed, not that the whole export fails.
   const { data: postRow } = await supabase.from("posts").select("cover_transform").eq("id", postId).maybeSingle();
-  const coverTransform = (postRow?.cover_transform as CoverTransform | null) ?? null;
+  // Only a legacy (unmarked) framing crops the export; a framing saved by a
+  // new Crop is a Grid preview only (lib/cover-framing.ts).
+  const coverTransform = exportCoverFraming((postRow?.cover_transform as CoverTransform | null) ?? null);
 
   const { data: postAssets, error: postAssetsError } = await supabase
     .from("post_assets")

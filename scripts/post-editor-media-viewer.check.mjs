@@ -430,6 +430,72 @@ async function run(browser, video) {
     });
     await picked.ctx.close();
   }
+
+  // --- D2: only an explicit, real NEW crop writes the Grid-preview marker ---
+  {
+    const s = await setup({ width: 1400, height: 900 });
+    const bodies = [];
+    await s.page.route("**/*", (route) => {
+      const req = route.request();
+      if (req.method() === "POST" && req.headers()["next-action"]) {
+        bodies.push(req.postData() ?? "");
+        // let the optimistic crop stand: answer instead of aborting
+        return route.fulfill({ status: 200, contentType: "text/x-component", body: '0:{"a":"$@1","f":"","b":"dev"}\n1:null\n' });
+      }
+      return route.fallback();
+    });
+    const openCrop = async () => {
+      await s.page.locator("button[title='Frame options']").nth(0).click();
+      await s.page.waitForTimeout(200);
+      await s.page.getByRole("button", { name: "Crop", exact: true }).click();
+      await s.page.waitForTimeout(500);
+    };
+    const save = () => s.page.locator("div.fixed[class~='z-[101]']").getByRole("button", { name: "Save", exact: true }).click();
+    const cropWrites = () => bodies.filter((b) => /"scale"/.test(b));
+    const tileTransform = () => s.page.evaluate(() => getComputedStyle(document.querySelector("[data-post-media-preview] img")).transform);
+    const legacyTile = await tileTransform();
+    await check("D2: opening Crop and saving WITHOUT changing it writes nothing (an old framing is never marked)", async () => {
+      await openCrop();
+      await save();
+      await s.page.waitForTimeout(800);
+      assert.deepEqual(cropWrites(), []);
+    });
+    await check("D2: a real new crop is written WITH { scope: 'grid-preview', scopeVersion: 1 } and the framing", async () => {
+      await openCrop();
+      const f = await s.page.locator("div.fixed[class~='z-[101]'] > div").first().boundingBox();
+      await s.page.mouse.move(f.x + f.width / 2, f.y + f.height / 2);
+      await s.page.mouse.down();
+      await s.page.mouse.move(f.x + f.width / 2 + 40, f.y + f.height / 2, { steps: 5 });
+      await s.page.mouse.up();
+      await save();
+      await s.page.waitForTimeout(1000);
+      const w = cropWrites();
+      assert.equal(w.length, 1, w.join(" | "));
+      const arg = JSON.parse(w[0]).find((a) => a && typeof a === "object" && "scale" in a);
+      assert.equal(arg.scope, "grid-preview");
+      assert.equal(arg.scopeVersion, 1);
+      assert.ok(typeof arg.scale === "number" && typeof arg.x === "number" && typeof arg.y === "number", JSON.stringify(arg));
+    });
+    await check("D2: the cover tile shows the NEW crop (Grid preview kept)", async () => {
+      const t = await tileTransform();
+      assert.ok(t && t !== "none", String(t));
+      assert.notEqual(t, legacyTile, "the tile moved to the new framing");
+    });
+    await check("D2: reopening and saving the marked crop unchanged, then Save Changes on the caption, never rewrites the framing", async () => {
+      const before = cropWrites().length;
+      await openCrop();
+      await save();
+      await s.page.waitForTimeout(600);
+      await s.page.locator("textarea").first().fill("caption after crop");
+      await s.page.getByRole("button", { name: "Save Changes" }).click();
+      await s.page.waitForTimeout(1000);
+      assert.equal(cropWrites().length, before, "no new crop write");
+      const saveBody = bodies.find((b) => b.includes("caption after crop"));
+      assert.ok(saveBody, "the caption save was sent");
+      assert.ok(!/grid-preview|cover_transform|scopeVersion/.test(saveBody), "Save Changes doesn't touch the framing");
+    });
+    await s.ctx.close();
+  }
 }
 
 if (fs.existsSync(HARNESS_DIR)) {

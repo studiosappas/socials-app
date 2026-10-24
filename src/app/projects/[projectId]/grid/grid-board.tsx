@@ -88,6 +88,7 @@ import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { GRID_COVER_ASPECT_CLASS } from "./grid-constants";
 import { newEditAspect } from "@/lib/media-aspect";
+import { markGridPreviewFraming, sameFraming } from "@/lib/cover-framing";
 import { useMediaTiming } from "@/lib/media-diagnostics";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
@@ -2044,10 +2045,20 @@ const GridSlot = memo(function GridSlot({
   // on GridSlotBody itself) would defeat that memo for every slot on the
   // board on every pointer-move frame during any drag, not just this one.
   const handleSaveCrop = useCallback(
-    (next: GridCoverTransform) => {
+    (edited: GridCoverTransform) => {
       if (!slot.postId) return;
       const postId = slot.postId;
       const previousTransform = slot.coverTransform;
+      // The overlay "saves" on any outside click: an untouched framing is
+      // not rewritten (merely opening and closing Crop must never mark an
+      // existing legacy framing). A real change is a NEW crop: a Grid
+      // preview only, never cropping exports (lib/cover-framing.ts). Undo
+      // restores the previous value verbatim, marker or not.
+      if (sameFraming(edited, previousTransform)) {
+        requestCloseCrop();
+        return;
+      }
+      const next = markGridPreviewFraming(edited);
       // Exits the editor immediately, synchronously, regardless of what
       // happens next -- Confirm must never leave the UI locked waiting on
       // the server (see mutateSlot's own async call below, which this does
@@ -2278,7 +2289,9 @@ const GridSlot = memo(function GridSlot({
     const targetSlotId = slot.id;
     const targetSlot = slot;
     const previousTransform = slot.coverTransform;
-    const nextTransform = copiedStyle.crop ?? null;
+    // A pasted crop is a NEW framing on this post -- Grid preview only,
+    // whatever the source's own framing was (lib/cover-framing.ts).
+    const nextTransform = copiedStyle.crop ? markGridPreviewFraming(copiedStyle.crop) : null;
 
     if (wantsAssetPaste && slot.coverMediaAssetId && slot.coverOriginalUrl) {
       const mediaAssetId = slot.coverMediaAssetId;

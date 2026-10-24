@@ -649,7 +649,9 @@ export async function updatePostCoverTransform(
   postId: string,
   // rotation optional, defaults to 0 -- no migration: cover_transform is
   // already a JSONB column, a new optional key is stored as-is.
-  transform: { scale: number; x: number; y: number; rotation?: number } | null,
+  // scope/scopeVersion: the Grid-preview marker (lib/cover-framing.ts), stored
+  // as-is in the same JSONB value; absent on undo of a legacy framing.
+  transform: { scale: number; x: number; y: number; rotation?: number; scope?: string; scopeVersion?: number } | null,
 ) {
   const supabase = await createClient();
 

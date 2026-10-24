@@ -45,6 +45,7 @@
     "src/lib/post-type.test.ts",
     "src/lib/annotation-frame.test.ts",
     "src/lib/media-aspect.test.ts",
+    "src/lib/cover-framing.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }

@@ -43,6 +43,7 @@ import {
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { newEditAspect } from "@/lib/media-aspect";
 import { effectivePostType } from "@/lib/post-type";
+import { exportCoverFraming, markGridPreviewFraming, sameFraming } from "@/lib/cover-framing";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
 import { Button } from "@/components/ui/button";
@@ -477,7 +478,9 @@ export function PostEditor({
       // A standalone Reel whose cover was explicitly changed contributes its
       // cover image as a second file, same rule as the export route's zip.
       const sources: (DownloadSource | null)[] = orderedAssets.flatMap((a, index) => {
-        const transform = liveCoverTransformRef.current;
+        // Only a legacy (unmarked) framing crops a download; a Grid-preview
+        // framing is ignored, same rule as the export route.
+        const transform = exportCoverFraming(liveCoverTransformRef.current);
         const media = editedDownloadSource(a, index === 0, transform, projectId, post.id);
         const cover = videoCoverDownloadSource(a, index === 0, transform, orderedAssets.length, projectId, post.id);
         return cover ? [media, cover] : [media];
@@ -1180,12 +1183,14 @@ function SortableAsset({
   // "Download Cover Image": a standalone Reel's explicitly changed cover, as
   // an image (the menu entry only appears when videoCoverSource exists --
   // never for a video inside a carousel).
-  const videoCoverSource = videoCoverDownloadSource(asset, isCover, effectiveTransform, itemCount, projectId, postId);
+  // Downloads use only a legacy (unmarked) framing -- see lib/cover-framing.ts.
+  const exportTransform = exportCoverFraming(effectiveTransform);
+  const videoCoverSource = videoCoverDownloadSource(asset, isCover, exportTransform, itemCount, projectId, postId);
   function handleDownload(kind: "edited" | "cover") {
     setMenuOpen(false);
     if (downloading) return;
     const source =
-      kind === "cover" ? videoCoverSource : editedDownloadSource(asset, isCover, effectiveTransform, projectId, postId);
+      kind === "cover" ? videoCoverSource : editedDownloadSource(asset, isCover, exportTransform, projectId, postId);
     if (!source) {
       showError("This file isn't available to download right now. Refresh the page and try again.");
       return;
@@ -1199,9 +1204,15 @@ function SortableAsset({
       .finally(() => setDownloading(null));
   }
 
-  async function handleSaveCrop(next: GridCoverTransform) {
-    setOverrideTransform(next);
+  async function handleSaveCrop(edited: GridCoverTransform) {
     setCropMode(false);
+    // The overlay "saves" on any outside click: an untouched framing is not
+    // rewritten (an existing legacy framing must not get marked by merely
+    // opening and closing Crop). A real change is a NEW crop -> Grid preview
+    // only (lib/cover-framing.ts).
+    if (sameFraming(edited, effectiveTransform)) return;
+    const next = markGridPreviewFraming(edited);
+    setOverrideTransform(next);
     try {
       await updatePostCoverTransform(projectId, postId, next);
     } catch (error) {

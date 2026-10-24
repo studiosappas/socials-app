@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 import { effectivePostType } from "@/lib/post-type";
+import { exportCoverFraming } from "@/lib/cover-framing";
 import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
 
 const PAGE_W = 612; // US Letter, points
@@ -101,8 +102,10 @@ export async function GET(
   // for a post's cover (position 0), same value Grid's own on-screen tiles
   // and its PNG export already apply; this is what was missing here.
   const { data: transformRows } = await supabase.from("posts").select("id, cover_transform").in("id", orderedPostIds);
+  // Only a legacy (unmarked) framing crops the export; a framing saved by a
+  // new Crop is a Grid preview only (lib/cover-framing.ts).
   const coverTransformByPostId = new Map(
-    (transformRows ?? []).map((r) => [r.id, (r as { cover_transform: CoverTransform | null }).cover_transform]),
+    (transformRows ?? []).map((r) => [r.id, exportCoverFraming((r as { cover_transform: CoverTransform | null }).cover_transform)]),
   );
 
   // All of every post's assets, in carousel order -- a single-image/reel
