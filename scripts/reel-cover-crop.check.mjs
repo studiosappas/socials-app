@@ -720,6 +720,10 @@ async function partE() {
     assert.ok(Math.abs(w / h - 0.8) < 0.01 && w <= 768, `${w}x${h}`);
     await assertFraming(z.files["cover.jpg"], "img-768x480.jpg", (u, v) => sourceAt("img-768x480.jpg", t, { w, h }, u, v), { w, h }, "4:5 framed");
   });
+  await check("E. Post, 16:9 and 5:4: exact ratios at native resolution, never upscaled (768x432, 600x480)", async () => {
+    assert.deepEqual(await dims((await zipOf("assets=post&poster=img-768x480.jpg&aspect=16:9")).files["cover.jpg"]), [768, 432]);
+    assert.deepEqual(await dims((await zipOf("assets=post&poster=img-768x480.jpg&aspect=5:4")).files["cover.jpg"]), [600, 480]);
+  });
   await check("E. a wider-than-1080 source is capped at 1080 wide (1280x720 Original -> 1080x608)", async () => {
     const z = await zipOf("assets=post&poster=auto-landscape.jpg&aspect=original");
     assert.deepEqual(await dims(z.files["cover.jpg"]), [1080, 608]);
@@ -781,9 +785,9 @@ async function partF(browser, media) {
   {
     const s = await newPage(browser, media, { cfg: { t: null, kind: "post", poster: "img-768x480.jpg", annotation: null } });
     await ready(s.page);
-    await check("F. a Post offers Original / 1:1 / 4:5 (no 9:16); nothing is chosen or written until clicked", async () => {
+    await check("F. a Post offers Original / 1:1 / 4:5 / 5:4 / 16:9 / 9:16; nothing is chosen or written until clicked", async () => {
       const labels = await s.page.locator("[data-aspect-selector] button").allInnerTexts();
-      assert.deepEqual(labels.map((l) => l.trim()), ["Original", "1:1", "4:5"]);
+      assert.deepEqual(labels.map((l) => l.trim()), ["Original", "1:1", "4:5", "5:4", "16:9", "9:16"]);
       assert.deepEqual(aspectWrites(s.actions), []);
     });
     await pill(s.page, "1:1").click();
@@ -818,6 +822,17 @@ async function partF(browser, media) {
     await pill(s.page, "Original").click();
     await s.page.waitForTimeout(800);
     await check("F. switching to Original gives the source's own 1.6 ratio", async () => assert.equal(await tileRatio(), 1.6));
+    await pill(s.page, "16:9").click();
+    await s.page.waitForTimeout(800);
+    await check("F. 16:9 gives a 16:9 tile, no warning; 9:16 on a feed post warns and keeps the choice", async () => {
+      assert.equal(await tileRatio(), 1.78);
+      assert.equal(await s.page.getByText(/outside what Instagram/).count(), 0);
+      await pill(s.page, "9:16").click();
+      await s.page.waitForTimeout(800);
+      assert.equal(await s.page.getByText(/9:16 is outside what Instagram/).count(), 1);
+      assert.equal(await pill(s.page, "9:16").getAttribute("aria-pressed"), "true");
+      assert.equal(await tileRatio(), 0.56);
+    });
     await s.ctx.close();
   }
   {

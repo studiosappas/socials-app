@@ -327,7 +327,7 @@ export interface Database {
           status: PostStatus;
           review_status: ReviewStatus;
           cover_transform: object | null;
-          // "original" | "1:1" | "4:5" | "9:16"; null = legacy (lib/aspect-ratio.ts)
+          // AspectChoice ("original" | "1:1" | "4:5" | "5:4" | "16:9" | "9:16"); null = legacy (lib/aspect-ratio.ts)
           aspect_ratio: string | null;
           created_at: string;
         };

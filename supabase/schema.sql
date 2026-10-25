@@ -321,7 +321,7 @@ create table public.posts (
   cover_transform jsonb,
   -- Chosen export ratio (see add_post_aspect_ratio_and_frame_transform.sql);
   -- null = legacy behaviour.
-  aspect_ratio text check (aspect_ratio in ('original', '1:1', '4:5', '9:16')),
+  aspect_ratio text check (aspect_ratio in ('original', '1:1', '4:5', '5:4', '16:9', '9:16')),
   created_at timestamptz not null default now()
 );
 

@@ -9,11 +9,12 @@
 // unchanged (lib/media-aspect.ts, lib/cover-framing.ts). The Grid is always
 // 3:4 regardless -- it shows the export frame's centred 3:4 window.
 
-export type AspectChoice = "original" | "1:1" | "4:5" | "9:16";
+export type AspectChoice = "original" | "1:1" | "4:5" | "5:4" | "16:9" | "9:16";
 
-export const ASPECT_CHOICES: readonly AspectChoice[] = ["original", "1:1", "4:5", "9:16"];
+// Must match the posts_aspect_ratio_check constraint.
+export const ASPECT_CHOICES: readonly AspectChoice[] = ["original", "1:1", "4:5", "5:4", "16:9", "9:16"];
 
-const FIXED: Record<Exclude<AspectChoice, "original">, number> = { "1:1": 1, "4:5": 4 / 5, "9:16": 9 / 16 };
+const FIXED: Record<Exclude<AspectChoice, "original">, number> = { "1:1": 1, "4:5": 4 / 5, "5:4": 5 / 4, "16:9": 16 / 9, "9:16": 9 / 16 };
 
 export function parseAspectChoice(value: unknown): AspectChoice | null {
   return typeof value === "string" && (ASPECT_CHOICES as readonly string[]).includes(value) ? (value as AspectChoice) : null;
@@ -21,10 +22,10 @@ export function parseAspectChoice(value: unknown): AspectChoice | null {
 
 export type AspectPostKind = "reel" | "feed";
 
-// Which ratios a post offers. Instagram's feed doesn't take 9:16 images, so
-// only a standalone Reel's cover offers it -- and recommends it.
+// Which ratios a post offers -- all of them; a Reel cover recommends 9:16,
+// and one outside what Instagram takes gets a warning (aspectWarning).
 export function aspectOptions(kind: AspectPostKind): AspectChoice[] {
-  return kind === "reel" ? ["9:16", "4:5", "1:1", "original"] : ["original", "1:1", "4:5"];
+  return kind === "reel" ? ["9:16", "4:5", "1:1", "5:4", "16:9", "original"] : ["original", "1:1", "4:5", "5:4", "16:9", "9:16"];
 }
 
 // The ratio the editor works in when none is stored yet: a Reel cover
@@ -48,8 +49,8 @@ export function aspectWarning(kind: AspectPostKind, choice: AspectChoice, aspect
   if (kind === "reel") {
     return choice === "9:16" ? null : "Instagram shows Reel covers at 9:16 -- this cover may be cropped there.";
   }
-  if (choice === "original" && aspect && (aspect < FEED_MIN_ASPECT - 1e-3 || aspect > FEED_MAX_ASPECT + 1e-3)) {
-    return "This original ratio is outside what Instagram's feed accepts (1.91:1 to 4:5) -- Instagram may crop it.";
+  if (aspect && (aspect < FEED_MIN_ASPECT - 1e-3 || aspect > FEED_MAX_ASPECT + 1e-3)) {
+    return `${choice === "original" ? "This original ratio" : choice} is outside what Instagram's feed accepts (1.91:1 to 4:5) -- Instagram may crop it.`;
   }
   return null;
 }

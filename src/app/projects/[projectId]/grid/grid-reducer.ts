@@ -59,7 +59,7 @@ export type GridBoardSlot = {
   // The post's chosen export aspect ratio (lib/aspect-ratio.ts; null/absent =
   // legacy). With one, coverTransform above is the derived export framing,
   // and Grid's Crop edits the cover item's own frame (coverFrameTransform).
-  aspectRatio?: "original" | "1:1" | "4:5" | "9:16" | null;
+  aspectRatio?: import("@/lib/aspect-ratio").AspectChoice | null;
   coverPostAssetId?: string | null;
   coverFrameTransform?: GridCoverTransform | null;
 };
