@@ -54,6 +54,7 @@ const POSTERS = {
   "auto-portrait.jpg": [720, 1280], // automatic poster, portrait video
   "auto-landscape.jpg": [1280, 720], // automatic poster, landscape video
   "auto-square.jpg": [1000, 1000], // automatic poster, square video
+  "auto-45.jpg": [1080, 1350], // automatic poster, 4:5 (feed-style) video
   "legacy-34.jpg": [1080, 1440], // an older 3:4 Reel cover
 };
 
@@ -118,7 +119,7 @@ export async function GET(request: Request) {
   let plan = planPostExport(assets, coverTransform, "edited");
   const only = url.searchParams.get("asset");
   if (only) plan = plan.filter((i) => i.postAssetId === only && i.part === (url.searchParams.get("part") ?? "media"));
-  const rendered = await renderPostExport(plan, coverTransform, async (p) => files.get(p) ?? null);
+  const rendered = await renderPostExport(plan, coverTransform, async (p) => files.get(p) ?? null, { reelCover: coverIsReel });
   if (only) return new Response(new Uint8Array(rendered[0].data), { headers: { "X-Filename": rendered[0].item.filename } });
   const zip = new JSZip();
   for (const { item, data } of rendered) zip.file(item.filename, data);
@@ -300,6 +301,19 @@ async function partA() {
     const zip = await unzip((await route(`poster=reel-edited.jpg${tq({ ...T1, scope: "grid-preview", scopeVersion: 1 })}`)).buf);
     assert.equal(sha(zip.files["cover-image.jpg"]), sha((await route("fixture=p/reel-edited.jpg")).buf));
   });
+  await check("A. an UNCROPPED 4:5 automatic poster on a standalone Reel still exports a 1080x1920 cover (default centred 9:16 framing)", async () => {
+    const zip = await unzip((await route("poster=auto-45.jpg")).buf);
+    assert.deepEqual(zip.names, ["cover.mp4", "cover-image.jpg"]);
+    const meta = await sharp(zip.files["cover-image.jpg"]).metadata();
+    assert.equal(`${meta.width}x${meta.height}`, "1080x1920");
+    await assertFraming(zip.files["cover-image.jpg"], "auto-45.jpg", (u, v) => sourceAt("auto-45.jpg", { scale: 1, x: 0, y: 0 }, { w: 1080, h: 1920 }, u, v), { w: 1080, h: 1920 }, "auto-45 default");
+  });
+  await check("A. an uncropped 9:16 cover still ships byte-for-byte; an uncropped older 3:4 one stays 3:4", async () => {
+    const z916 = await unzip((await route("poster=auto-portrait.jpg")).buf);
+    assert.equal(sha(z916.files["cover-image.jpg"]), sha((await route("fixture=p/auto-portrait.jpg")).buf));
+    const z34 = await unzip((await route("poster=legacy-34.jpg")).buf);
+    assert.equal(sha(z34.files["cover-image.jpg"]), sha((await route("fixture=p/legacy-34.jpg")).buf));
+  });
   await check("A. an older 3:4 Reel cover with its (unmarked) crop still exports a 3:4 cover image, as before", async () => {
     const zip = await unzip((await route(`poster=legacy-34.jpg${tq(T1)}`)).buf);
     const meta = await sharp(zip.files["cover-image.jpg"]).metadata();
@@ -442,6 +456,24 @@ async function partB(engine, browser, media) {
       });
     }
     await r.ctx.close();
+  }
+
+  {
+    // a 4:5 automatic poster fills the 9:16 height: Apply WITHOUT moving it must still save the 9:16 framing
+    const s = await newPage(browser, media, { cfg: { t: null, kind: "reel", poster: "auto-45.jpg", annotation: { objects: [] } } });
+    await ready(s.page);
+    await openCrop(s.page);
+    await check(`B. ${engine} 4:5 automatic poster: the 9:16 editor with the band; Apply without moving saves ONE default reel-cover crop`, async () => {
+      const f = await crop(s.page).boundingBox();
+      assert.ok(Math.abs(f.width / f.height - 9 / 16) < 0.01, `frame ${f.width}x${f.height}`);
+      assert.equal(await s.page.locator("[data-grid-band]").count(), 1);
+      await save(s.page);
+      await s.page.waitForTimeout(1200);
+      const w = writes(s.actions);
+      assert.equal(w.length, 1, JSON.stringify(w));
+      assert.equal(w[0].scope, "reel-cover");
+    });
+    await s.ctx.close();
   }
 
   for (const [label, cfg, want] of [

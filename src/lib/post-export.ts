@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 import { GRID_COVER_EXPORT_WIDTH, GRID_COVER_EXPORT_HEIGHT } from "@/app/projects/[projectId]/grid/grid-constants";
 import type { PostExportItem } from "@/lib/post-export-plan";
@@ -5,6 +6,7 @@ import { isReelCoverFraming } from "@/lib/cover-framing";
 
 const REEL_COVER_EXPORT_WIDTH = 1080;
 const REEL_COVER_EXPORT_HEIGHT = 1920;
+const DEFAULT_REEL_COVER_FRAMING = { scale: 1, x: 0, y: 0, rotation: 0, scope: "reel-cover", scopeVersion: 1 };
 
 // Server-side half of a post export: turns planned items (post-export-plan.ts)
 // into real bytes. Kept separate from the route so the storage access is
@@ -28,6 +30,8 @@ export async function renderPostExportItem(
   item: PostExportItem,
   coverTransform: CoverTransform | null,
   download: ExportDownload,
+  // The post is a standalone Reel: its cover image is always exported 9:16.
+  options?: { reelCover?: boolean },
 ): Promise<Buffer> {
   let source: Buffer | null;
   try {
@@ -36,6 +40,24 @@ export async function renderPostExportItem(
     throw new PostExportError(item, error);
   }
   if (!source || source.length === 0) throw new PostExportError(item);
+
+  // A standalone Reel's uncropped cover image that isn't 9:16 (an automatic
+  // poster of a 4:5 / square / landscape video): exported as the default
+  // centred 9:16 framing, at 1080x1920. A 9:16 one ships as is, and an older
+  // 3:4 Reel cover keeps its 3:4 export.
+  if (options?.reelCover && item.part === "cover-image" && item.operation === "verbatim") {
+    const { width, height } = await sharp(source).metadata();
+    const aspect = width && height ? width / height : 0;
+    const near = (a: number) => Math.abs(aspect / a - 1) <= 0.01;
+    if (aspect && !near(9 / 16) && !near(3 / 4)) {
+      try {
+        const pipeline = await applyCoverTransform(source, DEFAULT_REEL_COVER_FRAMING, REEL_COVER_EXPORT_WIDTH, REEL_COVER_EXPORT_HEIGHT);
+        return await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+      } catch (error) {
+        throw new PostExportError(item, error);
+      }
+    }
+  }
 
   if (item.operation === "verbatim") return source;
 
@@ -69,10 +91,11 @@ export async function renderPostExport(
   items: PostExportItem[],
   coverTransform: CoverTransform | null,
   download: ExportDownload,
+  options?: { reelCover?: boolean },
 ): Promise<{ item: PostExportItem; data: Buffer }[]> {
   const out: { item: PostExportItem; data: Buffer }[] = [];
   for (const item of items) {
-    out.push({ item, data: await renderPostExportItem(item, coverTransform, download) });
+    out.push({ item, data: await renderPostExportItem(item, coverTransform, download, options) });
   }
   return out;
 }

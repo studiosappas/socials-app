@@ -1254,7 +1254,11 @@ function SortableAsset({
     // rewritten (an existing legacy framing must not get marked by merely
     // opening and closing Crop). A real change is a NEW crop, marked for
     // this cover's kind (lib/cover-framing.ts).
-    if (sameFraming(edited, effectiveTransform)) return;
+    // Exception: Apply in a standalone Reel's 9:16 editor on a cover with no crop
+    // yet saves that framing even untouched -- a wider cover (4:5 automatic
+    // poster) fills the 9:16 height and can't be moved without zooming, and
+    // Apply must still give it its 9:16 cover / centred Grid band.
+    if (sameFraming(edited, effectiveTransform) && !(framingKind === "reel" && !effectiveTransform)) return;
     const next = markCoverFraming(edited, framingKind);
     setOverrideTransform(next);
     try {

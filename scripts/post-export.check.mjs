@@ -888,21 +888,21 @@ async function partC(engine, browser, video) {
   }
   {
     const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-edited&framing=off" });
-    await check(`${engine} desktop: an unframed standalone Reel with an EDITED cover downloads that cover image from storage`, async () => {
+    await check(`${engine} desktop: an unframed standalone Reel's EDITED cover image comes from the export route (always 9:16 for a Reel)`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
-      assert.deepEqual(requests, ["poster-5-edit.jpg"]);
-      assert.equal(name, "poster-5-edit.jpg");
+      assert.deepEqual(requests, ["export?asset=pa-5&part=cover-image"]);
+      assert.equal(name, "cover-image.jpg");
     });
     await ctx.close();
   }
   {
     const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-auto&framing=off" });
-    await check(`${engine} desktop: an unframed standalone Reel with only its AUTOMATIC poster offers that poster as its cover image`, async () => {
+    await check(`${engine} desktop: an unframed standalone Reel's AUTOMATIC poster is offered as its cover image, via the export route`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
-      assert.deepEqual(requests, ["poster-4.jpg"]);
-      assert.equal(name, "poster-4.jpg");
+      assert.deepEqual(requests, ["export?asset=pa-4&part=cover-image"]);
+      assert.equal(name, "cover-image.jpg");
     });
     await ctx.close();
   }
@@ -932,8 +932,8 @@ async function partC(engine, browser, video) {
     await check(`${engine} Windows touch: per-frame Save Cover Image (⋮) DOWNLOADS the cover -- no share dialog`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(0, "Save Cover Image"));
-      assert.equal(name, "poster-4.jpg");
-      assert.deepEqual(requests, ["poster-4.jpg"]);
+      assert.equal(name, "cover-image.jpg");
+      assert.deepEqual(requests, ["export?asset=pa-4&part=cover-image"]);
       assert.equal(await page.evaluate(() => window.__shares.length), 0, "navigator.share was never called");
     });
     await ctx.close();
@@ -967,11 +967,11 @@ async function partC(engine, browser, video) {
   }
   {
     const { ctx, page, requests, frameMenu } = await open({ query: "?order=reel-auto&framing=marked" });
-    await check(`${engine} desktop: a standalone Reel with a marked Grid crop offers its automatic poster unframed, from storage`, async () => {
+    await check(`${engine} desktop: a standalone Reel with a marked Grid crop gets its cover image from the export route`, async () => {
       requests.length = 0;
       const name = await downloadOf(page, () => frameMenu(0, "Download Cover Image"));
-      assert.deepEqual(requests, ["poster-4.jpg"]);
-      assert.equal(name, "poster-4.jpg");
+      assert.deepEqual(requests, ["export?asset=pa-4&part=cover-image"]);
+      assert.equal(name, "cover-image.jpg");
     });
     await ctx.close();
   }

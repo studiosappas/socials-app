@@ -166,11 +166,16 @@ export async function GET(
 
   let rendered;
   try {
-    rendered = await renderPostExport(plan, coverTransform, async (storagePath) => {
-      const { data, error } = await supabase.storage.from("project-media").download(storagePath);
-      if (error || !data) throw error ?? new Error("empty storage response");
-      return Buffer.from(await data.arrayBuffer());
-    });
+    rendered = await renderPostExport(
+      plan,
+      coverTransform,
+      async (storagePath) => {
+        const { data, error } = await supabase.storage.from("project-media").download(storagePath);
+        if (error || !data) throw error ?? new Error("empty storage response");
+        return Buffer.from(await data.arrayBuffer());
+      },
+      { reelCover: coverIsReel },
+    );
   } catch (error) {
     if (error instanceof PostExportError) {
       console.error("[post-export] item failed", { postId, variant, message: error.message, cause: String(error.cause ?? "") });

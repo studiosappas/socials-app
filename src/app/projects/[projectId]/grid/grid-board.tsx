@@ -2067,7 +2067,9 @@ const GridSlot = memo(function GridSlot({
       // existing legacy framing). A real change is a NEW crop, marked for
       // this cover's kind (lib/cover-framing.ts). Undo restores the
       // previous value verbatim, marker or not.
-      if (sameFraming(edited, previousTransform)) {
+      // Same exception as the Post Editor: Apply on an uncropped Reel cover
+      // saves its default 9:16 framing.
+      if (sameFraming(edited, previousTransform) && !(framingKind === "reel" && !previousTransform)) {
         requestCloseCrop();
         return;
       }

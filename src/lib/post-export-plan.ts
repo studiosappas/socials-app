@@ -222,7 +222,9 @@ export function videoCoverDownloadSource(
 ): DownloadSource | null {
   if (asset.mediaType !== "video" || !asset.posterUrl) return null;
   if (!includesVideoCover(true, itemCount)) return null;
-  if (isCover && coverTransform) {
+  // A standalone Reel's cover image always comes from the export route, which
+  // renders it at 9:16 when the saved one isn't (post-export.ts).
+  if (isCover && (coverTransform || itemCount === 1)) {
     return {
       url: postExportUrl(projectId, postId, { postAssetId: asset.postAssetId, part: "cover-image" }),
       viaServer: true,
