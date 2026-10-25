@@ -527,6 +527,19 @@ export function GridCropOverlay({
             </div>
             {canPlaceHandleAbove && <div className="h-4 w-px bg-foreground/30" />}
           </div>
+          {presentation === "enlarged" && (
+            <ZoomControl
+              zoom={zoom}
+              minZoom={minZoomForCoverage(frame.width, frame.height, natural.w, natural.h, rotation)}
+              // A cover wider than the frame fills its height: up/down only
+              // opens up once zoomed in (never an empty edge).
+              canMoveVertically={imgH * zoom - frame.height > 1}
+              onZoom={(next) => {
+                setZoom(next);
+                setOffset((o) => clampStoredOffset(o, rotation, next));
+              }}
+            />
+          )}
           <div
             className="absolute inset-x-0 bottom-2 z-10 flex items-center justify-center gap-2"
             onPointerDown={(e) => e.stopPropagation()}
@@ -559,6 +572,54 @@ export function GridCropOverlay({
   );
 }
 
+// Enlarged editor only: an obvious zoom control (the corner handles also
+// zoom, but aren't discoverable). Never below the frame's coverage minimum.
+const MAX_CROP_ZOOM = 4;
+function ZoomControl({
+  zoom,
+  minZoom,
+  canMoveVertically,
+  onZoom,
+}: {
+  zoom: number;
+  minZoom: number;
+  canMoveVertically: boolean;
+  onZoom: (zoom: number) => void;
+}) {
+  const clamp = (z: number) => Math.min(MAX_CROP_ZOOM, Math.max(minZoom, z));
+  const button =
+    "flex h-7 w-7 items-center justify-center rounded-full bg-background/90 text-sm text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)] disabled:opacity-40";
+  return (
+    <div
+      className="absolute inset-x-0 bottom-12 z-10 flex flex-col items-center gap-1"
+      onPointerDown={(e) => e.stopPropagation()}
+      data-crop-zoom=""
+    >
+      {!canMoveVertically && (
+        <span className="rounded-full bg-black/60 px-2 py-0.5 text-[11px] text-white">Zoom in to move up or down</span>
+      )}
+      <div className="flex items-center gap-2">
+        <button type="button" aria-label="Zoom out" className={button} disabled={zoom <= minZoom + 1e-3} onClick={() => onZoom(clamp(zoom - 0.1))}>
+          −
+        </button>
+        <input
+          type="range"
+          aria-label="Zoom"
+          min={minZoom}
+          max={MAX_CROP_ZOOM}
+          step={0.01}
+          value={clamp(zoom)}
+          onChange={(e) => onZoom(clamp(Number(e.target.value)))}
+          className="w-32 accent-foreground sm:w-40"
+        />
+        <button type="button" aria-label="Zoom in" className={button} disabled={zoom >= MAX_CROP_ZOOM - 1e-3} onClick={() => onZoom(clamp(zoom + 0.1))}>
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // The Grid's 3:4 window inside a Reel's 9:16 cover frame: full width,
 // centred, fixed. Outside it is lightly dimmed -- still part of the exported
 // cover, just not shown in the Grid. Never intercepts the pointer.
@@ -567,10 +628,10 @@ function GridBandGuide({ frameWidth, frameHeight, bandAspect }: { frameWidth: nu
   const strip = (frameHeight - bandH) / 2;
   return (
     <div className="pointer-events-none absolute inset-0" data-grid-band-guide="">
-      <div className="absolute inset-x-0 top-0 bg-black/30" style={{ height: strip }} />
-      <div className="absolute inset-x-0 bottom-0 bg-black/30" style={{ height: strip }} />
+      <div className="absolute inset-x-0 top-0 bg-black/50" style={{ height: strip }} />
+      <div className="absolute inset-x-0 bottom-0 bg-black/50" style={{ height: strip }} />
       <div
-        className="absolute inset-x-0 border-y-2 border-dashed border-white/90"
+        className="absolute inset-x-0 border-y-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
         style={{ top: strip, height: bandH }}
         data-grid-band=""
       >

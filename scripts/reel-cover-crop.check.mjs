@@ -467,11 +467,39 @@ async function partB(engine, browser, media) {
       const f = await crop(s.page).boundingBox();
       assert.ok(Math.abs(f.width / f.height - 9 / 16) < 0.01, `frame ${f.width}x${f.height}`);
       assert.equal(await s.page.locator("[data-grid-band]").count(), 1);
+      assert.ok(await s.page.getByText("Shown in Grid").isVisible());
       await save(s.page);
       await s.page.waitForTimeout(1200);
       const w = writes(s.actions);
       assert.equal(w.length, 1, JSON.stringify(w));
       assert.equal(w[0].scope, "reel-cover");
+    });
+    await s.ctx.close();
+  }
+  {
+    // ...and moving it up/down: at minimum zoom a 4:5 cover fills the 9:16 height (a real limit),
+    // so the editor says so; the Zoom control opens up vertical room, and the drag then moves it.
+    const s = await newPage(browser, media, { cfg: { t: null, kind: "reel", poster: "auto-45.jpg", annotation: { objects: [] } } });
+    await ready(s.page);
+    await openCrop(s.page);
+    if (process.env.SHOT_DIR) await s.page.screenshot({ path: path.join(process.env.SHOT_DIR, `reel-crop-45-${engine}.png`) });
+    await check(`B. ${engine} 4:5 cover: "Zoom in to move up or down" at minimum zoom; Zoom in, drag down, Apply -> saved zoom > 1 with a vertical offset`, async () => {
+      assert.ok(await s.page.getByText("Zoom in to move up or down").isVisible());
+      for (let i = 0; i < 4; i++) await s.page.getByRole("button", { name: "Zoom in", exact: true }).click();
+      await s.page.waitForTimeout(200);
+      assert.equal(await s.page.getByText("Zoom in to move up or down").count(), 0, "hint gone once there is vertical room");
+      const f = await crop(s.page).boundingBox();
+      await s.page.mouse.move(f.x + f.width / 2, f.y + f.height * 0.35);
+      await s.page.mouse.down();
+      await s.page.mouse.move(f.x + f.width / 2, f.y + f.height * 0.35 + 90, { steps: 8 });
+      await s.page.mouse.up();
+      await save(s.page);
+      await s.page.waitForTimeout(1200);
+      const w = writes(s.actions);
+      assert.equal(w.length, 1, JSON.stringify(w));
+      assert.equal(w[0].scope, "reel-cover");
+      assert.ok(w[0].scale > 1.3, `zoom ${w[0].scale}`);
+      assert.ok(w[0].y > 0.01, `moved down: y ${w[0].y}`);
     });
     await s.ctx.close();
   }
