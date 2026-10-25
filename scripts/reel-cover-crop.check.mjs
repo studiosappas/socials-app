@@ -776,6 +776,32 @@ async function partF(browser, media) {
     await s.ctx.close();
   }
   {
+    // the tile itself takes the chosen ratio, immediately; Crop uses the same frame
+    const s = await newPage(browser, media, { cfg: { t: null, kind: "post", poster: "img-768x480.jpg", annotation: null, aspect: "4:5" } });
+    await ready(s.page);
+    const tileRatio = async () => {
+      const b = await s.page.locator("[data-post-media-preview]").first().locator("..").boundingBox(); // the tile, border included
+      return +(b.width / b.height).toFixed(2);
+    };
+    await check("F. a stored 4:5 shows a 4:5 tile in the Post Editor", async () => assert.equal(await tileRatio(), 0.8));
+    await pill(s.page, "1:1").click();
+    await s.page.waitForTimeout(800);
+    await check("F. switching 4:5 -> 1:1 makes the tile square right away", async () => assert.equal(await tileRatio(), 1));
+    await s.page.locator("button[title='Frame options']").first().click();
+    await s.page.getByRole("button", { name: "Crop", exact: true }).click();
+    await s.page.waitForTimeout(700);
+    await check("F. ...and Crop works in that same square frame", async () => {
+      const f = await crop(s.page).boundingBox();
+      assert.ok(Math.abs(f.width / f.height - 1) < 0.01, `frame ${f.width}x${f.height}`);
+    });
+    await s.page.keyboard.press("Escape");
+    await s.page.waitForTimeout(500);
+    await pill(s.page, "Original").click();
+    await s.page.waitForTimeout(800);
+    await check("F. switching to Original gives the source's own 1.6 ratio", async () => assert.equal(await tileRatio(), 1.6));
+    await s.ctx.close();
+  }
+  {
     const s = await newPage(browser, media, { cfg: { t: null, kind: "post", poster: "auto-portrait.jpg", annotation: null, aspect: "original" } });
     await ready(s.page);
     await check("F. Original outside Instagram's feed range warns (a 9:16 photo) -- and nothing is cropped automatically", async () => {

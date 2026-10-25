@@ -1460,13 +1460,16 @@ function SortableAsset({
       : isCover
         ? effectiveTransform
         : null;
+  // With a ratio stored, the tile itself takes that shape (the Grid stays 3:4);
+  // self-start, or the flex row's stretch overrides aspect-ratio.
+  const tileAspect = exportFrame?.preview != null ? exportFrame.editorAspect : null;
 
   return (
     <div
       ref={combinedTileRef}
-      style={style}
+      style={tileAspect ? { ...style, aspectRatio: tileAspect } : style}
       {...(canManage ? { ...attributes, ...listeners } : {})}
-      className={`relative aspect-[3/4] w-24 shrink-0 touch-none rounded-none border border-border transition-opacity duration-150 ${
+      className={`relative ${tileAspect ? "self-start" : "aspect-[3/4]"} w-24 shrink-0 touch-none rounded-none border border-border transition-opacity duration-150 ${
         canManage ? "cursor-grab" : ""
       } ${isDragging ? "opacity-30" : ""}`}
     >
