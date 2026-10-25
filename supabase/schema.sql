@@ -319,6 +319,9 @@ create table public.posts (
   -- crop. (grid_slots.cover_transform below is the old, cell-keyed location
   -- this replaced; left in place, unused, rather than dropped.)
   cover_transform jsonb,
+  -- Chosen export ratio (see add_post_aspect_ratio_and_frame_transform.sql);
+  -- null = legacy behaviour.
+  aspect_ratio text check (aspect_ratio in ('original', '1:1', '4:5', '9:16')),
   created_at timestamptz not null default now()
 );
 
@@ -344,7 +347,9 @@ create table public.post_assets (
   id uuid primary key default gen_random_uuid(),
   post_id uuid not null references public.posts (id) on delete cascade,
   media_asset_id uuid not null references public.media_assets (id) on delete cascade,
-  position integer not null default 0
+  position integer not null default 0,
+  -- This item's own export framing inside posts.aspect_ratio.
+  frame_transform jsonb
 );
 
 create table public.post_links (
@@ -1079,6 +1084,8 @@ begin
         -- cover_transform concept there) and for a post that's never been
         -- cropped.
         'coverTransform', (select p.cover_transform from posts p where p.id = sli.post_id),
+        -- The post's chosen ratio and (per item below) its framing.
+        'aspectRatio', (select p.aspect_ratio from posts p where p.id = sli.post_id),
         'media', case
           when sli.post_id is not null then (
             select coalesce(jsonb_agg(jsonb_build_object(
@@ -1086,7 +1093,8 @@ begin
               'storagePath', ma.storage_path,
               'previewStoragePath', ma.preview_storage_path,
               'posterStoragePath', ma.poster_storage_path,
-              'mediaType', ma.media_type
+              'mediaType', ma.media_type,
+              'frameTransform', pa.frame_transform
             ) order by pa.position), '[]'::jsonb)
             from post_assets pa
             join media_assets ma on ma.id = pa.media_asset_id
