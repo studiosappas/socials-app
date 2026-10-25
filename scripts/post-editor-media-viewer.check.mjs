@@ -29,7 +29,7 @@ const BASE = `http://localhost:${PORT}/preview-viewer-harness-check`;
 
 const HARNESS = `"use client";
 // TEMPORARY -- created and deleted by scripts/post-editor-media-viewer.check.mjs. Never commit.
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Modal } from "../projects/[projectId]/modal";
 import { PostEditor, type PostAssetItem } from "../projects/[projectId]/posts/[postId]/post-editor";
@@ -54,13 +54,18 @@ export default function Harness() {
   // ?stored=reel: an older mixed carousel saved as "reel" by the old type rule (D1)
   const storedType = params.get("stored") === "reel" ? "reel" : "carousel";
   const [closes, setCloses] = useState(0);
+  // Stable across re-renders, like real server data: a router.refresh()
+  // (the Post Editor refreshes after a crop save) must not hand the editor a
+  // brand-new post object carrying the ORIGINAL crop -- a real server would
+  // return the saved one.
+  const post = useMemo(() => ({ id: "00000000-0000-0000-0000-000000000001", post_type: reel ? "reel" : storedType, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: reel ? REEL_FRAMING[reel] : { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }) as const, [reel, storedType]);
   return (
     <div data-modal-closes={closes}>
       {closes === 0 && (
         // ?modal=router: the Modal's REAL default close (router.back()), as on the intercepted route
         <Modal onClose={params.get("modal") === "router" ? undefined : () => setCloses((c) => c + 1)}>
           <PostEditor projectId="00000000-0000-0000-0000-000000000000"
-            post={{ id: "00000000-0000-0000-0000-000000000001", post_type: reel ? "reel" : storedType, caption: "", notes: "", scheduled_date: null, scheduled_time: null, status: "draft", review_status: "pending", coverTransform: reel ? REEL_FRAMING[reel] : { scale: 1.4, x: 0.05, y: 0, rotation: 0 } }}
+            post={post}
             assets={reel ? REEL : assets} links={[]} mediaLibraryPromise={LIBRARY} canManage role="owner"
             currentUserId="00000000-0000-0000-0000-000000000002" members={[]} dateFormat="DD/MM/YYYY" hideBackLink enableMediaViewer={viewerOn} />
         </Modal>

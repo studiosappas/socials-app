@@ -102,10 +102,8 @@ export async function GET(
   // for a post's cover (position 0), same value Grid's own on-screen tiles
   // and its PNG export already apply; this is what was missing here.
   const { data: transformRows } = await supabase.from("posts").select("id, cover_transform").in("id", orderedPostIds);
-  // Only a legacy (unmarked) framing crops the export; a framing saved by a
-  // new Crop is a Grid preview only (lib/cover-framing.ts).
-  const coverTransformByPostId = new Map(
-    (transformRows ?? []).map((r) => [r.id, exportCoverFraming((r as { cover_transform: CoverTransform | null }).cover_transform)]),
+  const storedCoverTransformByPostId = new Map(
+    (transformRows ?? []).map((r) => [r.id, (r as { cover_transform: CoverTransform | null }).cover_transform]),
   );
 
   // All of every post's assets, in carousel order -- a single-image/reel
@@ -117,6 +115,24 @@ export async function GET(
     .select("post_id, position, media_assets(id, storage_path, media_type)")
     .in("post_id", orderedPostIds)
     .order("position");
+
+  // The PDF shows each post's Grid tile, so its cover gets the Grid framing:
+  // a legacy framing, or a standalone Reel's cover framing (its centred 3:4
+  // band, see lib/image-crop.ts) -- never a Grid-preview-only image crop
+  // (lib/cover-framing.ts).
+  const assetsPerPost = new Map<string, { count: number; firstType: string | null }>();
+  for (const pa of postAssets ?? []) {
+    const entry = assetsPerPost.get(pa.post_id) ?? { count: 0, firstType: null };
+    if (entry.count === 0) entry.firstType = (pa.media_assets as { media_type: string } | null)?.media_type ?? null;
+    entry.count += 1;
+    assetsPerPost.set(pa.post_id, entry);
+  }
+  const coverTransformByPostId = new Map(
+    orderedPostIds.map((id) => {
+      const a = assetsPerPost.get(id);
+      return [id, exportCoverFraming(storedCoverTransformByPostId.get(id) ?? null, a?.count === 1 && a.firstType === "video")];
+    }),
+  );
 
   const mediaAssetIds = (postAssets ?? [])
     .map((pa) => (pa.media_assets as { id: string } | null)?.id)

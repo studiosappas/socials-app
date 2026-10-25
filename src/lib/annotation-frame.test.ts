@@ -14,6 +14,7 @@ import {
   recoverSavedFrame,
   reframeBlockers,
   rescaleAnnotationJson,
+  sameBaseFraming,
 } from "./annotation-frame.ts";
 import { annotationCropStateFromWindow } from "./crop-geometry.ts";
 
@@ -230,6 +231,52 @@ test("an uncropped (cover-fit) 3:4 edit proposes the 4:5 view of the same centre
   const state = annotationCropStateFromWindow(proposal.frame, natural, proposal.photo, 4);
   const w = windowFor({ w: 4, h: 5 }, natural, state.zoom, state.offset);
   assert.ok(close(w.cropH, 3000) && close(w.cropX + w.cropW / 2, 2000), JSON.stringify(w));
+});
+
+// --- Edit Cover keeps a valid cover crop (sameBaseFraming) ------------------
+
+const frame916 = frameOf(ASPECTS.reel916);
+const frameData = "data:image/jpeg;base64,FRAMEONE";
+const reelSave = (photo: object, ...rest: object[]) => ({ objects: [{ ...photo, src: frameData }, ...rest] });
+
+test("Edit Cover: an annotation-only save (text added/moved, adjustments) keeps the cover framing", () => {
+  const before = reelSave(croppedPhoto(frame916, { w: 1080, h: 1920 }, 700));
+  const after = reelSave({ ...croppedPhoto(frame916, { w: 1080, h: 1920 }, 700), filters: [{ type: "Brightness", brightness: 0.2 }] }, text(40, 60));
+  assert.equal(sameBaseFraming(before, after), true);
+});
+
+test("Edit Cover: reopened in a different window size (every object rescaled) is still the same framing", () => {
+  const before = reelSave(croppedPhoto(frame916, { w: 1080, h: 1920 }, 700), text(40, 60));
+  assert.equal(sameBaseFraming(before, rescaleAnnotationJson(before, 0.73)), true);
+  assert.equal(sameBaseFraming(before, rescaleAnnotationJson(before, 1.4)), true);
+});
+
+test("Edit Cover: a new frame, a Crop Image change, rotate/flip or another aspect changes the framing (crop reset)", () => {
+  const photo = croppedPhoto(frame916, { w: 1080, h: 1920 }, 700);
+  const before = reelSave(photo);
+  assert.equal(sameBaseFraming(before, { objects: [{ ...photo, src: "data:image/jpeg;base64,FRAMETWO" }] }), false, "another picked frame");
+  assert.equal(sameBaseFraming(before, reelSave(croppedPhoto(frame916, { w: 1080, h: 1920 }, 600))), false, "Crop Image changed");
+  assert.equal(sameBaseFraming(before, reelSave({ ...photo, angle: 90 })), false, "rotated");
+  assert.equal(sameBaseFraming(before, reelSave({ ...photo, flipX: true })), false, "flipped");
+  assert.equal(sameBaseFraming(before, reelSave({ ...photo, left: 12 })), false, "photo moved");
+  const frame34 = frameOf(ASPECTS.cover34);
+  assert.equal(sameBaseFraming(before, reelSave(croppedPhoto(frame34, { w: 1080, h: 1920 }, 700))), false, "another aspect");
+});
+
+test("Edit Cover: no previous edit (first edit of an automatic poster) or unreadable framing -> reset, never guessed", () => {
+  const after = reelSave(croppedPhoto(frame916, { w: 1080, h: 1920 }, 700));
+  assert.equal(sameBaseFraming(null, after), false);
+  assert.equal(sameBaseFraming({ objects: [] }, after), false);
+  assert.equal(sameBaseFraming(after, { objects: [text(1, 1)] }), false);
+});
+
+test("Edit Image (signed storage URL): only the object path counts, not the expiring token", () => {
+  const photo = { ...coverFitPhoto(frameOf(ASPECTS.feed45), { w: 4000, h: 3000 }) };
+  const a = { objects: [{ ...photo, src: "https://x.supabase.co/storage/v1/object/sign/project-media/p/a.png?token=one" }] };
+  const b = { objects: [{ ...photo, src: "https://x.supabase.co/storage/v1/object/sign/project-media/p/a.png?token=two" }] };
+  const c = { objects: [{ ...photo, src: "https://x.supabase.co/storage/v1/object/sign/project-media/p/other.png?token=one" }] };
+  assert.equal(sameBaseFraming(a, b), true);
+  assert.equal(sameBaseFraming(a, c), false);
 });
 
 console.log(`\n${passed} tests passed`);

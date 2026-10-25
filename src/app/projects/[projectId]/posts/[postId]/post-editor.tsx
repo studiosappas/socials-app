@@ -43,7 +43,14 @@ import {
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { newEditAspect } from "@/lib/media-aspect";
 import { effectivePostType } from "@/lib/post-type";
-import { exportCoverFraming, markGridPreviewFraming, sameFraming } from "@/lib/cover-framing";
+import {
+  GRID_BAND_ASPECT,
+  REEL_COVER_ASPECT,
+  coverFramingKind,
+  exportCoverFraming,
+  markCoverFraming,
+  sameFraming,
+} from "@/lib/cover-framing";
 import { currentDeviceIsPhoneOrTablet } from "@/lib/native-share-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
@@ -58,7 +65,7 @@ import { BrandWriterField } from "@/components/ai/brand-writer";
 import { ScheduleDateField } from "@/components/ui/schedule-date-field";
 import { ScheduleTimeField } from "@/components/ui/schedule-time-field";
 import { UndoIcon, type GridCoverTransform, type MediaLibraryItem } from "../../grid/grid-board";
-import { CroppedCoverImage, GridCropOverlay } from "../../grid/grid-crop-overlay";
+import { CroppedCoverImage, GridCropOverlay, useNaturalSize } from "../../grid/grid-crop-overlay";
 import type { FlatMedia } from "@/components/media-gallery";
 import { PostMediaViewer } from "./post-media-viewer";
 import { buildPostViewerMedia, isClickRightAfterDrag, viewerIndexFor } from "./post-media-viewer-model";
@@ -380,7 +387,11 @@ export function PostEditor({
     handleAddFromLibrary(item);
   }
 
-  function handleAnnotationSaved(previewUrl: string, newMediaAssetId?: string) {
+  function handleAnnotationSaved(
+    previewUrl: string,
+    newMediaAssetId?: string,
+    saved?: { annotationJson: object; coverFramingKept?: boolean },
+  ) {
     const target = editingImage;
     setOrderedAssets((current) =>
       current.map((asset) =>
@@ -388,6 +399,9 @@ export function PostEditor({
           ? {
               ...asset,
               ...(target.mediaType === "video" ? { posterUrl: previewUrl, coverEdited: true } : { url: previewUrl }),
+              // The edit just saved -- reopening the editor in this session
+              // restores it, instead of the one the popup was opened with.
+              ...(saved ? { annotationJson: saved.annotationJson } : {}),
               // Set only when saveMediaAssetAnnotation actually cloned (this
               // asset was ALSO another post's active cover) -- this post's
               // local state must follow the clone it now actually owns, so
@@ -399,7 +413,19 @@ export function PostEditor({
           : asset,
       ),
     );
-    if (target?.isCover) setOverrideCoverTransform(null);
+    if (target?.isCover) {
+      // Mirrors the server (saveMediaAssetPosterAnnotation /
+      // saveMediaAssetAnnotation): an Edit Cover save that left the cover's
+      // underlying framing alone keeps its crop; any other cover save clears
+      // it -- and for a video cover with a crop, says so.
+      const kept = target.mediaType === "video" && saved?.coverFramingKept === true;
+      if (!kept) {
+        if (target.mediaType === "video" && liveCoverTransformRef.current) {
+          showError("The cover's crop was reset because the cover image changed. Use Crop to frame it again.");
+        }
+        setOverrideCoverTransform(null);
+      }
+    }
     setEditingImage(null);
   }
 
@@ -481,7 +507,10 @@ export function PostEditor({
       const sources: (DownloadSource | null)[] = orderedAssets.flatMap((a, index) => {
         // Only a legacy (unmarked) framing crops a download; a Grid-preview
         // framing is ignored, same rule as the export route.
-        const transform = exportCoverFraming(liveCoverTransformRef.current);
+        const transform = exportCoverFraming(
+          liveCoverTransformRef.current,
+          orderedAssets.length === 1 && orderedAssets[0].mediaType === "video",
+        );
         const media = editedDownloadSource(a, index === 0, transform, projectId, post.id);
         const cover = videoCoverDownloadSource(a, index === 0, transform, orderedAssets.length, projectId, post.id);
         return cover ? [media, cover] : [media];
@@ -1188,8 +1217,15 @@ function SortableAsset({
   // "Download Cover Image": a standalone Reel's explicitly changed cover, as
   // an image (the menu entry only appears when videoCoverSource exists --
   // never for a video inside a carousel).
-  // Downloads use only a legacy (unmarked) framing -- see lib/cover-framing.ts.
-  const exportTransform = exportCoverFraming(effectiveTransform);
+  // Which crop this cover gets (lib/cover-framing.ts): a standalone Reel's
+  // 9:16 cover framing (the editor shows the Grid's 3:4 band inside it), an
+  // older 3:4 Reel cover's 3:4 crop, or the Grid-preview crop.
+  const coverNatural = useNaturalSize(isCover && asset.mediaType === "video" && asset.posterUrl ? asset.posterUrl : "");
+  const framingKind = isCover
+    ? coverFramingKind({ mediaType: asset.mediaType, itemCount, coverAspect: coverNatural ? coverNatural.w / coverNatural.h : null })
+    : "preview";
+  // Downloads apply the framing an export does -- see exportCoverFraming.
+  const exportTransform = exportCoverFraming(effectiveTransform, isCover && asset.mediaType === "video" && itemCount === 1);
   const videoCoverSource = videoCoverDownloadSource(asset, isCover, exportTransform, itemCount, projectId, postId);
   function handleDownload(kind: "edited" | "cover") {
     setMenuOpen(false);
@@ -1216,13 +1252,17 @@ function SortableAsset({
     setCropMode(false);
     // The overlay "saves" on any outside click: an untouched framing is not
     // rewritten (an existing legacy framing must not get marked by merely
-    // opening and closing Crop). A real change is a NEW crop -> Grid preview
-    // only (lib/cover-framing.ts).
+    // opening and closing Crop). A real change is a NEW crop, marked for
+    // this cover's kind (lib/cover-framing.ts).
     if (sameFraming(edited, effectiveTransform)) return;
-    const next = markGridPreviewFraming(edited);
+    const next = markCoverFraming(edited, framingKind);
     setOverrideTransform(next);
     try {
       await updatePostCoverTransform(projectId, postId, next);
+      // updatePostCoverTransform deliberately doesn't revalidate; the Grid
+      // underneath this popup only learns about the crop from fresh server
+      // data, which it otherwise wouldn't get until a reload.
+      router.refresh();
     } catch (error) {
       console.error("Failed to save crop:", error);
       setOverrideTransform(undefined);
@@ -1355,7 +1395,11 @@ function SortableAsset({
           anchorRef={tileRef}
           // The 96x128 tile is too small to crop on -- same 3:4 frame,
           // enlarged and centred; the saved crop is identical either way.
+          // A standalone Reel's cover is framed in 9:16 instead, with the
+          // Grid's 3:4 band drawn inside it.
           presentation="enlarged"
+          frameAspect={framingKind === "reel" ? REEL_COVER_ASPECT : undefined}
+          guideAspect={framingKind === "reel" ? GRID_BAND_ASPECT : undefined}
         />
       )}
       {replaceOpen && (

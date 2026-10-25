@@ -7,6 +7,7 @@ import {
   minZoomForCoverage,
   normalizeRotationDeg,
 } from "./crop-geometry";
+import { coverLayoutFrame, isReelCoverFraming } from "./cover-framing";
 
 // rotation: an arbitrary degree value (freeform, not quantized) -- see
 // grid-crop-overlay.tsx for the client-side editor this mirrors. Optional,
@@ -55,6 +56,28 @@ export async function applyCoverTransform(
 ): Promise<Sharp> {
   if (!transform) {
     return sharp(buffer).resize(targetW, targetH, { fit: "cover", position: "centre" });
+  }
+
+  // A Reel's 9:16 cover framing (lib/cover-framing.ts): laid out in a 9:16
+  // frame as wide as this target, sharing its centre -- so a 3:4 target (a
+  // Grid cell, a PDF thumb) gets exactly that frame's centred band, and a
+  // 9:16 target the whole frame. Rendered as the full frame, then the band
+  // cut out of it.
+  if (isReelCoverFraming(transform)) {
+    const frame = coverLayoutFrame(transform, { w: targetW, h: targetH });
+    if (Math.abs(frame.h - targetH) > 0.5) {
+      const { scale, x, y, rotation } = transform;
+      const full = await (await applyCoverTransform(buffer, { scale, x, y, rotation }, targetW, Math.round(frame.h), options))
+        .png()
+        .toBuffer({ resolveWithObject: true });
+      const bandH = Math.min(full.info.height, Math.round((full.info.width * targetH) / targetW));
+      return sharp(full.data).extract({
+        left: 0,
+        top: Math.round((full.info.height - bandH) / 2),
+        width: full.info.width,
+        height: bandH,
+      });
+    }
   }
 
   const { width: naturalW, height: naturalH } = await sharp(buffer).metadata();

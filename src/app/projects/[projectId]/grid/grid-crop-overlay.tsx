@@ -14,6 +14,7 @@ import {
 } from "@/lib/crop-geometry";
 import { useRecoverableSrc } from "@/components/recoverable-img";
 import { UNCLAMPED_IMG_SIZE } from "./grid-constants";
+import { coverLayoutFrame } from "@/lib/cover-framing";
 
 const MAX_ZOOM = 4;
 // Space the rotate handle needs ABOVE the frame (circle + connecting
@@ -43,7 +44,7 @@ function pointerAngleDeg(clientX: number, clientY: number, cx: number, cy: numbe
 // already fired before a listener could attach" race for an
 // already-cached image -- `.complete` is checked immediately as a
 // fallback for that same case.
-function useNaturalSize(src: string): NaturalSize | null {
+export function useNaturalSize(src: string): NaturalSize | null {
   const [size, setSize] = useState<NaturalSize | null>(null);
   useEffect(() => {
     // Resets to "loading" for a NEW src, not a state mutation driven by
@@ -98,6 +99,9 @@ function useNaturalSize(src: string): NaturalSize | null {
 function useEditFrame(
   anchorRef: React.RefObject<HTMLElement | null>,
   presentation: "in-place" | "enlarged",
+  // enlarged only: the frame's own aspect (w/h) instead of the anchor's --
+  // a Reel's 9:16 cover framing, edited from its 3:4 tile.
+  frameAspect?: number,
 ): FrameGeom | null {
   const [frame, setFrame] = useState<FrameGeom | null>(null);
   useLayoutEffect(() => {
@@ -128,7 +132,8 @@ function useEditFrame(
       if (presentation === "enlarged") {
         const vv = window.visualViewport;
         const viewport = { width: vv?.width ?? window.innerWidth, height: vv?.height ?? window.innerHeight };
-        const size = fitEnlargedCropFrame({ width: rect.width, height: rect.height }, viewport);
+        const shape = frameAspect ? { width: rect.width, height: rect.width / frameAspect } : { width: rect.width, height: rect.height };
+        const size = fitEnlargedCropFrame(shape, viewport);
         setFrame({
           width: size.width,
           height: size.height,
@@ -196,6 +201,8 @@ export function GridCropOverlay({
   onCancel,
   anchorRef,
   presentation = "in-place",
+  frameAspect,
+  guideAspect,
 }: {
   imageUrl: string;
   initialTransform: GridCoverTransform | null;
@@ -206,8 +213,14 @@ export function GridCropOverlay({
   // "enlarged" (Post Editor): the anchor's aspect, viewport-sized and
   // centred -- see useEditFrame.
   presentation?: "in-place" | "enlarged";
+  // enlarged only: the frame's aspect (w/h) when it isn't the anchor's --
+  // a standalone Reel's 9:16 cover framing (lib/cover-framing.ts).
+  frameAspect?: number;
+  // A fixed, centred, full-width band of this aspect drawn inside the
+  // frame -- what the Grid's 3:4 tile will show of the 9:16 cover.
+  guideAspect?: number;
 }) {
-  const frame = useEditFrame(anchorRef, presentation);
+  const frame = useEditFrame(anchorRef, presentation, frameAspect);
   const natural = useNaturalSize(imageUrl);
   const ready = frame !== null && natural !== null;
 
@@ -473,6 +486,7 @@ export function GridCropOverlay({
               style={imageStyle}
             />
           </div>
+          {guideAspect && <GridBandGuide frameWidth={frame.width} frameHeight={frame.height} bandAspect={guideAspect} />}
           <div className="pointer-events-none absolute inset-0 border-2 border-foreground" />
           {CORNERS.map((corner) => (
             <CornerHandle
@@ -542,6 +556,29 @@ export function GridCropOverlay({
       </div>
     </>,
     document.body,
+  );
+}
+
+// The Grid's 3:4 window inside a Reel's 9:16 cover frame: full width,
+// centred, fixed. Outside it is lightly dimmed -- still part of the exported
+// cover, just not shown in the Grid. Never intercepts the pointer.
+function GridBandGuide({ frameWidth, frameHeight, bandAspect }: { frameWidth: number; frameHeight: number; bandAspect: number }) {
+  const bandH = Math.min(frameHeight, frameWidth / bandAspect);
+  const strip = (frameHeight - bandH) / 2;
+  return (
+    <div className="pointer-events-none absolute inset-0" data-grid-band-guide="">
+      <div className="absolute inset-x-0 top-0 bg-black/30" style={{ height: strip }} />
+      <div className="absolute inset-x-0 bottom-0 bg-black/30" style={{ height: strip }} />
+      <div
+        className="absolute inset-x-0 border-y-2 border-dashed border-white/90"
+        style={{ top: strip, height: bandH }}
+        data-grid-band=""
+      >
+        <span className="absolute left-2 top-2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] tracking-wide text-white uppercase">
+          Shown in Grid
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -666,11 +703,15 @@ export function CroppedCoverImage({
     <div ref={wrapRef} className={`relative overflow-hidden ${className ?? ""}`}>
       {ready ? (
         (() => {
-          const baseScale = coverBaseScale(frameSize.w, frameSize.h, natural.w, natural.h);
-          const zoom = Math.max(transform!.scale, minZoomForCoverage(frameSize.w, frameSize.h, natural.w, natural.h, rotation));
+          // A Reel's 9:16 cover framing is laid out in its own 9:16 frame
+          // (as wide as this box, same centre) -- this box then shows that
+          // frame's centred band, same as lib/image-crop.ts renders it.
+          const layout = coverLayoutFrame(transform, frameSize);
+          const baseScale = coverBaseScale(layout.w, layout.h, natural.w, natural.h);
+          const zoom = Math.max(transform!.scale, minZoomForCoverage(layout.w, layout.h, natural.w, natural.h, rotation));
           const imgW = natural.w * baseScale;
           const imgH = natural.h * baseScale;
-          const { slackX, slackY } = coverageSlackPx(rotation, (imgW * zoom) / 2, (imgH * zoom) / 2, frameSize.w / 2, frameSize.h / 2);
+          const { slackX, slackY } = coverageSlackPx(rotation, (imgW * zoom) / 2, (imgH * zoom) / 2, layout.w / 2, layout.h / 2);
           const clamped = clampOffsetPx({ x: transform!.x * imgW, y: transform!.y * imgH }, rotation, slackX, slackY);
           return (
             // eslint-disable-next-line @next/next/no-img-element

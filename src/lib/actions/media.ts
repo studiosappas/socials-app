@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { logSystemEvent } from "@/lib/system-event-log";
 import type { MediaType } from "@/types/database";
+import { sameBaseFraming } from "@/lib/annotation-frame";
 
 // TEMPORARY DIAGNOSTIC -- added specifically to trace a real, Supabase-
 // backed Adjustments Paste failure a local/stubbed environment could not
@@ -413,7 +414,7 @@ export async function saveMediaAssetPosterAnnotation(
   projectId: string,
   mediaAssetId: string,
   formData: FormData,
-): Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string }> {
+): Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string; coverFramingKept?: boolean }> {
   const opId = (formData.get("__diag_op_id") as string) || null;
   try {
     const file = formData.get("file");
@@ -444,6 +445,13 @@ export async function saveMediaAssetPosterAnnotation(
     const {
       data: { user },
     } = await supabase.auth.getUser();
+
+    // The edit this save started from (the SOURCE asset, read before any
+    // copy-on-write clone below -- a clone starts with no edit of its own).
+    // Compared with the new one to decide whether the post's cover crop
+    // still applies -- see the reset below.
+    const { data: previousRow } = await supabase.from("media_assets").select("annotation_json").eq("id", mediaAssetId).maybeSingle();
+    const previousAnnotation = (previousRow?.annotation_json as object | null) ?? null;
 
     // Same copy-on-write reasoning as saveMediaAssetAnnotation above --
     // FAIL CLOSED, not open, on a determined-necessary clone that fails
@@ -531,8 +539,15 @@ export async function saveMediaAssetPosterAnnotation(
     }
     diagLog(opId, "db-update-complete");
 
-    await resetCoverTransformForAsset(supabase, targetAssetId);
-    diagLog(opId, "cover-transform-reset");
+    // The post's cover crop (posts.cover_transform) was set against the
+    // cover as it was. A save that only changed annotations/adjustments
+    // keeps it; one that changed the underlying frame, crop, rotation or
+    // aspect resets it, since it would now misplace or double-crop the
+    // subject (lib/annotation-frame.ts sameBaseFraming). The caller tells
+    // the user when it was reset.
+    const coverFramingKept = sameBaseFraming(previousAnnotation, annotationJson);
+    if (!coverFramingKept) await resetCoverTransformForAsset(supabase, targetAssetId);
+    diagLog(opId, coverFramingKept ? "cover-transform-kept" : "cover-transform-reset");
 
     // Same reasoning as saveMediaAssetAnnotation above -- brand-new path, but
     // routed through the shared cache so a subsequent normal page load of
@@ -545,7 +560,7 @@ export async function saveMediaAssetPosterAnnotation(
     revalidatePath(`/projects/${projectId}/stories`);
 
     diagLog(opId, "server-complete");
-    return { previewUrl: previewUrl ?? undefined, mediaAssetId: clonedAssetId ?? undefined };
+    return { previewUrl: previewUrl ?? undefined, mediaAssetId: clonedAssetId ?? undefined, coverFramingKept };
   } catch (error) {
     diagLogFail(opId, "saveMediaAssetPosterAnnotation-uncaught", error, { mediaAssetId });
     return {

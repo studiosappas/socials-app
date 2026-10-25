@@ -39,7 +39,7 @@ import {
 } from "@/lib/actions/media";
 import { MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
-import { CroppedCoverImage, GridCropOverlay } from "./grid-crop-overlay";
+import { CroppedCoverImage, GridCropOverlay, useNaturalSize } from "./grid-crop-overlay";
 import { CopyStyleDialog } from "./copy-style-dialog";
 import {
   useCopiedStyle,
@@ -88,7 +88,7 @@ import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { GRID_COVER_ASPECT_CLASS } from "./grid-constants";
 import { newEditAspect } from "@/lib/media-aspect";
-import { markGridPreviewFraming, sameFraming } from "@/lib/cover-framing";
+import { GRID_BAND_ASPECT, REEL_COVER_ASPECT, coverFramingKind, markCoverFraming, sameFraming } from "@/lib/cover-framing";
 import { useMediaTiming } from "@/lib/media-diagnostics";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
@@ -2044,6 +2044,19 @@ const GridSlot = memo(function GridSlot({
   // not just when something the user cares about changed -- see the note
   // on GridSlotBody itself) would defeat that memo for every slot on the
   // board on every pointer-move frame during any drag, not just this one.
+  // Which crop this slot's cover gets (lib/cover-framing.ts) -- same rule
+  // as the Post Editor: a standalone Reel's 9:16 cover framing (edited in
+  // the enlarged 9:16 editor with the Grid band), an older 3:4 Reel cover's
+  // 3:4 crop, or the Grid-preview crop.
+  const reelCoverNatural = useNaturalSize(
+    slot.coverMediaType === "video" && slot.assetCount === 1 && slot.thumbnailUrl ? slot.thumbnailUrl : "",
+  );
+  const framingKind = coverFramingKind({
+    mediaType: slot.coverMediaType,
+    itemCount: slot.assetCount,
+    coverAspect: reelCoverNatural ? reelCoverNatural.w / reelCoverNatural.h : null,
+  });
+
   const handleSaveCrop = useCallback(
     (edited: GridCoverTransform) => {
       if (!slot.postId) return;
@@ -2051,14 +2064,14 @@ const GridSlot = memo(function GridSlot({
       const previousTransform = slot.coverTransform;
       // The overlay "saves" on any outside click: an untouched framing is
       // not rewritten (merely opening and closing Crop must never mark an
-      // existing legacy framing). A real change is a NEW crop: a Grid
-      // preview only, never cropping exports (lib/cover-framing.ts). Undo
-      // restores the previous value verbatim, marker or not.
+      // existing legacy framing). A real change is a NEW crop, marked for
+      // this cover's kind (lib/cover-framing.ts). Undo restores the
+      // previous value verbatim, marker or not.
       if (sameFraming(edited, previousTransform)) {
         requestCloseCrop();
         return;
       }
-      const next = markGridPreviewFraming(edited);
+      const next = markCoverFraming(edited, framingKind);
       // Exits the editor immediately, synchronously, regardless of what
       // happens next -- Confirm must never leave the UI locked waiting on
       // the server (see mutateSlot's own async call below, which this does
@@ -2094,7 +2107,7 @@ const GridSlot = memo(function GridSlot({
         });
       });
     },
-    [slot, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh, requestCloseCrop],
+    [slot, framingKind, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh, requestCloseCrop],
   );
 
   // Purely local intent, dispatched to the shared reducer -- discards the
@@ -2289,9 +2302,10 @@ const GridSlot = memo(function GridSlot({
     const targetSlotId = slot.id;
     const targetSlot = slot;
     const previousTransform = slot.coverTransform;
-    // A pasted crop is a NEW framing on this post -- Grid preview only,
-    // whatever the source's own framing was (lib/cover-framing.ts).
-    const nextTransform = copiedStyle.crop ? markGridPreviewFraming(copiedStyle.crop) : null;
+    // A pasted crop is a NEW framing on this post, marked for THIS cover's
+    // kind, whatever the source's own was (lib/cover-framing.ts) -- every
+    // renderer clamps it to this cover's own coverage limits.
+    const nextTransform = copiedStyle.crop ? markCoverFraming(copiedStyle.crop, framingKind) : null;
 
     if (wantsAssetPaste && slot.coverMediaAssetId && slot.coverOriginalUrl) {
       const mediaAssetId = slot.coverMediaAssetId;
@@ -2534,6 +2548,7 @@ const GridSlot = memo(function GridSlot({
   }, [
     copiedStyle,
     slot,
+    framingKind,
     projectId,
     demoMode,
     applyCropTransform,
@@ -2648,6 +2663,7 @@ const GridSlot = memo(function GridSlot({
         slot={slot}
         posterUnplayable={posterUnplayable}
         transform={slot.coverTransform}
+        reelCoverCrop={framingKind === "reel"}
         canManage={canManage}
         selectionMode={selectionMode}
         selected={selected}
@@ -2688,6 +2704,7 @@ const GridSlotBody = memo(function GridSlotBody({
   slot,
   posterUnplayable,
   transform,
+  reelCoverCrop,
   canManage,
   selectionMode,
   selected,
@@ -2710,6 +2727,9 @@ const GridSlotBody = memo(function GridSlotBody({
   slot: GridBoardSlot;
   posterUnplayable: boolean;
   transform: GridCoverTransform | null;
+  // A standalone Reel's cover: cropped in the enlarged 9:16 editor with the
+  // Grid band, not in place (same editor as the Post Editor's).
+  reelCoverCrop: boolean;
   canManage: boolean;
   selectionMode: boolean;
   selected: boolean;
@@ -2951,6 +2971,9 @@ const GridSlotBody = memo(function GridSlotBody({
           onSave={onSaveCrop}
           onCancel={onCancelCrop}
           anchorRef={tileElRef}
+          presentation={reelCoverCrop ? "enlarged" : "in-place"}
+          frameAspect={reelCoverCrop ? REEL_COVER_ASPECT : undefined}
+          guideAspect={reelCoverCrop ? GRID_BAND_ASPECT : undefined}
         />
       )}
     </>

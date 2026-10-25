@@ -23,7 +23,7 @@ export type AnnotationSaveAction = (
   projectId: string,
   targetId: string,
   formData: FormData,
-) => Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string }>;
+) => Promise<{ previewUrl?: string; message?: string; mediaAssetId?: string; coverFramingKept?: boolean }>;
 
 // The base photo lives as a regular (tagged, non-selectable) object in the
 // canvas's own object stack -- see annotation-editor.tsx's own longer
@@ -276,7 +276,7 @@ export async function exportAndSaveAnnotation(opts: {
   // for every caller that doesn't pass one (AnnotationEditor's own Save
   // doesn't need this, only Grid's Paste Style debug build does).
   opId?: string;
-}): Promise<{ previewUrl: string; mediaAssetId?: string } | { error: string }> {
+}): Promise<{ previewUrl: string; mediaAssetId?: string; annotationJson: object; coverFramingKept?: boolean } | { error: string }> {
   const { canvas, exportScale, projectId, attachmentId, saveAction, postId, opId } = opts;
   try {
     let annotationJson: string;
@@ -334,7 +334,7 @@ export async function exportAndSaveAnnotation(opts: {
     if (opId) formData.set("__diag_op_id", opId);
 
     if (opId) diagStage(opId, "upload-started");
-    let result: { previewUrl?: string; message?: string; mediaAssetId?: string };
+    let result: { previewUrl?: string; message?: string; mediaAssetId?: string; coverFramingKept?: boolean };
     try {
       result = await Promise.race([
         saveAction(projectId, attachmentId, formData),
@@ -358,7 +358,16 @@ export async function exportAndSaveAnnotation(opts: {
       if (opId) diagFail(opId, "save-action-rejected", err, { attachmentId: attachmentId.slice(0, 8) });
       throw err;
     }
-    if (result.previewUrl) return { previewUrl: result.previewUrl, mediaAssetId: result.mediaAssetId };
+    if (result.previewUrl) {
+      // The saved edit itself too, so a caller holding its own copy (Post
+      // Editor) reopens the editor on what was just saved, not on a stale one.
+      return {
+        previewUrl: result.previewUrl,
+        mediaAssetId: result.mediaAssetId,
+        annotationJson: JSON.parse(annotationJson) as object,
+        coverFramingKept: result.coverFramingKept,
+      };
+    }
     if (opId) diagFail(opId, "save-action-message", new Error(result.message ?? "(no message returned)"));
     return { error: result.message ?? "Couldn't save changes." };
   } catch (error) {

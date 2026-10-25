@@ -1,6 +1,10 @@
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 import { GRID_COVER_EXPORT_WIDTH, GRID_COVER_EXPORT_HEIGHT } from "@/app/projects/[projectId]/grid/grid-constants";
 import type { PostExportItem } from "@/lib/post-export-plan";
+import { isReelCoverFraming } from "@/lib/cover-framing";
+
+const REEL_COVER_EXPORT_WIDTH = 1080;
+const REEL_COVER_EXPORT_HEIGHT = 1920;
 
 // Server-side half of a post export: turns planned items (post-export-plan.ts)
 // into real bytes. Kept separate from the route so the storage access is
@@ -36,6 +40,13 @@ export async function renderPostExportItem(
   if (item.operation === "verbatim") return source;
 
   try {
+    // A standalone Reel's 9:16 cover framing (lib/cover-framing.ts) exports
+    // the whole 9:16 frame as the Reel's cover image, at the Reel cover size
+    // (1080x1920).
+    if (isReelCoverFraming(coverTransform)) {
+      const pipeline = await applyCoverTransform(source, coverTransform, REEL_COVER_EXPORT_WIDTH, REEL_COVER_EXPORT_HEIGHT);
+      return await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+    }
     // The width/height here only pin the crop's ASPECT RATIO (the Grid
     // cover's 3:4) -- nativeResolution makes applyCoverTransform return the
     // crop at its own native pixel size, derived from the source's real

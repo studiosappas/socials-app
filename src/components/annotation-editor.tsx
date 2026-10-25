@@ -243,7 +243,9 @@ export function AnnotationEditor({
   // image's own ratio.
   targetAspect?: { w: number; h: number };
   onClose: () => void;
-  onSaved: (previewUrl: string, newMediaAssetId?: string) => void;
+  // saved: the edit just saved, and (Edit Cover) whether the post's cover
+  // crop was kept -- see saveMediaAssetPosterAnnotation.
+  onSaved: (previewUrl: string, newMediaAssetId?: string, saved?: { annotationJson: object; coverFramingKept?: boolean }) => void;
   // Brief attachments and post/Grid media assets are saved through
   // different tables (brief_attachments vs media_assets) behind an
   // identical (projectId, id, formData) => {previewUrl|message} shape, so
@@ -2404,7 +2406,7 @@ export function AnnotationEditor({
         saveAction,
       });
       if ("previewUrl" in result) {
-        onSaved(result.previewUrl, result.mediaAssetId);
+        onSaved(result.previewUrl, result.mediaAssetId, { annotationJson: result.annotationJson, coverFramingKept: result.coverFramingKept });
       } else {
         // Previously silent -- a failed save (e.g. a pending migration
         // meaning the target column doesn't exist yet) looked identical to

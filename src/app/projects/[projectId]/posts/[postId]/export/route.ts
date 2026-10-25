@@ -76,9 +76,7 @@ export async function GET(
   // column isolation in this codebase -- a missing cover_transform column
   // just means the cover exports unframed, not that the whole export fails.
   const { data: postRow } = await supabase.from("posts").select("cover_transform").eq("id", postId).maybeSingle();
-  // Only a legacy (unmarked) framing crops the export; a framing saved by a
-  // new Crop is a Grid preview only (lib/cover-framing.ts).
-  const coverTransform = exportCoverFraming((postRow?.cover_transform as CoverTransform | null) ?? null);
+  const storedCoverTransform = (postRow?.cover_transform as CoverTransform | null) ?? null;
 
   const { data: postAssets, error: postAssetsError } = await supabase
     .from("post_assets")
@@ -153,6 +151,12 @@ export async function GET(
     posterPath: posterByMediaId.get(r.media!.id) ?? null,
     coverEdited: coverEditedMediaIds.has(r.media!.id),
   }));
+
+  // Which framing crops the export (lib/cover-framing.ts): a legacy one, or
+  // a Reel cover framing while this is still a standalone Reel -- never a
+  // Grid-preview-only one.
+  const coverIsReel = assets.length === 1 && assets[0].mediaType === "video";
+  const coverTransform = exportCoverFraming(storedCoverTransform, coverIsReel);
 
   let plan = planPostExport(assets, coverTransform, variant);
   if (onlyAssetId) {

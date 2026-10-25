@@ -1,24 +1,36 @@
 // Which posts.cover_transform values crop EXPORTS -- pure, so
 // cover-framing.test.ts runs under Node.
 //
-// posts.cover_transform is the post cover's pan/zoom/rotate inside the
-// Grid's 3:4 tile ({ scale, x, y, rotation? }, JSONB -- no schema). It used
-// to crop the exported cover too. Now a framing saved by an explicit NEW
-// Crop carries a scope marker and is a Grid PREVIEW only: Grid tiles and
-// viewers still show it, exports ship the media at its own saved framing
-// (4:5 feed edit, 9:16 Reel cover, or the original).
+// posts.cover_transform is the post cover's pan/zoom/rotate ({ scale, x, y,
+// rotation? }, JSONB -- no schema). A scope marker says what a crop applies
+// to:
 //
-//   marked (new):    { scale, x, y, rotation, scope: "grid-preview", scopeVersion: 1 }
-//   unmarked (old):  { scale, x, y, rotation? }  -- crops exports exactly as before
+//   unmarked (old):  { scale, x, y, rotation? }
+//       the Grid's 3:4 window; crops exports at 3:4 exactly as before
+//   grid-preview:    { ..., scope: "grid-preview", scopeVersion: 1 }
+//       the Grid's 3:4 window, preview only -- exports ship the media at
+//       its own saved framing (image covers, carousel videos)
+//   reel-cover:      { ..., scope: "reel-cover", scopeVersion: 1 }
+//       a standalone Reel's 9:16 cover framing. Exported cover images use
+//       the whole 9:16 frame; every 3:4 preview (Grid, tiles, viewers, PDF,
+//       Full Feed PNG) shows its fixed, centred 3:4 band -- one crop, both
+//       outcomes, see reelCoverFrame below.
 //
-// Anything that isn't EXACTLY the current marker -- missing, another scope
-// string, another version, wrong types -- is treated as legacy, so an
-// existing framing can never silently stop cropping its export. Nothing
-// rewrites existing rows: the marker is only ever written with a new,
-// actually changed crop (see markGridPreviewFraming's callers).
+// Anything that isn't EXACTLY one of the markers -- missing, another scope
+// string, another version, wrong types -- is legacy, so an existing framing
+// can never silently stop cropping its export. Nothing rewrites existing
+// rows: a marker is only ever written with a new, actually changed crop
+// (see markCoverFraming's callers).
 
 export const GRID_PREVIEW_SCOPE = "grid-preview";
 export const GRID_PREVIEW_SCOPE_VERSION = 1;
+export const REEL_COVER_SCOPE = "reel-cover";
+export const REEL_COVER_SCOPE_VERSION = 1;
+
+// The aspect (w/h) a reel-cover framing is edited and exported in, and the
+// Grid band shown inside it.
+export const REEL_COVER_ASPECT = 9 / 16;
+export const GRID_BAND_ASPECT = 3 / 4;
 
 export type FramingScope = { scope?: unknown; scopeVersion?: unknown };
 
@@ -28,23 +40,87 @@ export function isGridPreviewFraming(transform: unknown): boolean {
   return t.scope === GRID_PREVIEW_SCOPE && t.scopeVersion === GRID_PREVIEW_SCOPE_VERSION;
 }
 
-// The framing an EXPORT applies to the cover: the stored value for a
-// legacy (unmarked) framing, null for a Grid-preview-only one.
-export function exportCoverFraming<T>(transform: T | null | undefined): T | null {
-  if (!transform) return null;
-  return isGridPreviewFraming(transform) ? null : transform;
+export function isReelCoverFraming(transform: unknown): boolean {
+  if (!transform || typeof transform !== "object") return false;
+  const t = transform as FramingScope;
+  return t.scope === REEL_COVER_SCOPE && t.scopeVersion === REEL_COVER_SCOPE_VERSION;
 }
 
-// A new crop as written by an explicit Crop / Paste Style save.
+// Which crop a post's cover gets:
+//   "reel"         a standalone Reel (one item, a video) -- 9:16 editor with
+//                  the Grid band, reel-cover framing
+//   "legacy-reel"  a standalone Reel whose cover IMAGE is an older 3:4 one --
+//                  keeps the 3:4 crop and its 3:4 export, unmarked, as before
+//   "preview"      everything else (image covers, carousels) -- 3:4,
+//                  grid-preview
+// coverAspect: the cover image's own width/height, when known.
+export type CoverFramingKind = "reel" | "legacy-reel" | "preview";
+
+const LEGACY_REEL_COVER_TOLERANCE = 0.01;
+
+export function coverFramingKind(cover: {
+  mediaType: "image" | "video" | null | undefined;
+  itemCount: number;
+  coverAspect?: number | null;
+}): CoverFramingKind {
+  if (cover.mediaType !== "video" || cover.itemCount !== 1) return "preview";
+  const a = cover.coverAspect;
+  if (a && Math.abs(a / GRID_BAND_ASPECT - 1) <= LEGACY_REEL_COVER_TOLERANCE) return "legacy-reel";
+  return "reel";
+}
+
+// A new crop as written by an explicit Crop / Paste Style save, for a cover
+// of the given kind. Any marker the input carried (a pasted crop, say) is
+// replaced -- the TARGET's kind decides.
+export function markCoverFraming<T extends { scale: number; x: number; y: number; rotation?: number }>(
+  transform: T,
+  kind: CoverFramingKind,
+): { scale: number; x: number; y: number; rotation?: number; scope?: string; scopeVersion?: number } {
+  const { scale, x, y, rotation } = transform;
+  const base = rotation === undefined ? { scale, x, y } : { scale, x, y, rotation };
+  if (kind === "reel") return { ...base, scope: REEL_COVER_SCOPE, scopeVersion: REEL_COVER_SCOPE_VERSION };
+  if (kind === "legacy-reel") return base;
+  return { ...base, scope: GRID_PREVIEW_SCOPE, scopeVersion: GRID_PREVIEW_SCOPE_VERSION };
+}
+
+// Kept for its D2 callers' wording: a crop on a "preview" cover.
 export function markGridPreviewFraming<T extends object>(transform: T): T & { scope: string; scopeVersion: number } {
   return { ...transform, scope: GRID_PREVIEW_SCOPE, scopeVersion: GRID_PREVIEW_SCOPE_VERSION };
+}
+
+// The framing an EXPORT applies to the cover:
+//   legacy (unmarked)  -> applied (3:4), as always
+//   grid-preview       -> null (preview only)
+//   reel-cover         -> applied (9:16) only while the cover is still a
+//                         standalone Reel (coverIsReel); after a reorder or
+//                         an added item it's preview only
+// Callers that don't pass coverIsReel get the safe default (not a Reel).
+export function exportCoverFraming<T>(transform: T | null | undefined, coverIsReel = false): T | null {
+  if (!transform) return null;
+  if (isGridPreviewFraming(transform)) return null;
+  if (isReelCoverFraming(transform)) return coverIsReel ? transform : null;
+  return transform;
+}
+
+// The frame a reel-cover framing is laid out in, for a box of the given size:
+// a 9:16 frame as wide as the box, sharing its centre. A 3:4 box (Grid tile,
+// viewer, PDF/Full Feed cell) therefore shows exactly the frame's centred 3:4
+// band; a 9:16 box shows all of it. Exact for a cover image of any aspect,
+// since the cover is fitted into this frame, not into the box. Any other
+// framing is laid out in the box itself.
+export function coverLayoutFrame(transform: unknown, box: { w: number; h: number }): { w: number; h: number } {
+  if (!isReelCoverFraming(transform)) return box;
+  return { w: box.w, h: box.w / REEL_COVER_ASPECT };
 }
 
 type Framing = { scale: number; x: number; y: number; rotation?: number };
 
 // Whether a crop editor's result is the framing it started from -- the
 // crop overlay "saves" on any outside click, so closing it without touching
-// anything must not rewrite (and so newly mark) an existing framing.
+// anything must not rewrite (and so newly mark) an existing framing. The
+// stored marker is deliberately not compared: an unchanged crop is never
+// rewritten, whatever its scope; only a real change writes the cover kind's
+// marker (markCoverFraming).
 export function sameFraming(a: Framing | null | undefined, b: Framing | null | undefined): boolean {
   if (!a || !b) return !a && !b;
   const eps = 1e-9;

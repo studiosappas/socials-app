@@ -62,6 +62,59 @@ export function recoverSavedFrame(annotationJson: object | null | undefined): Sa
   return { width: frameW, height: frameH };
 }
 
+// Whether two saved edits put the SAME underlying cover framing on the
+// SAME photo -- i.e. a save that only changed annotations (text, arrows,
+// drawing, logos) or adjustments (filters). Used to keep a post's cover crop
+// (posts.cover_transform) across such a save instead of resetting it.
+// Everything that would move or reshape what the crop was set against --
+// another photo or frame, Crop Image, rotate/flip, the frame's aspect, the
+// photo's placement -- makes it "different". Placement is compared relative
+// to the recovered frame, so a reopen in a different window size (which
+// rescales every object) doesn't count as a change. Unrecoverable framing
+// on either side -> false (reset: never guess).
+export function sameBaseFraming(previous: object | null | undefined, next: object | null | undefined): boolean {
+  const a = baseFramingSignature(previous);
+  const b = baseFramingSignature(next);
+  if (!a || !b) return false;
+  if (a.src !== b.src || a.flipX !== b.flipX || a.flipY !== b.flipY) return false;
+  const close = (x: number, y: number, tol: number) => Math.abs(x - y) <= tol;
+  return (
+    close(a.aspect, b.aspect, 1e-3) &&
+    close(a.angle, b.angle, 1e-6) &&
+    close(a.cropX, b.cropX, 0.5) &&
+    close(a.cropY, b.cropY, 0.5) &&
+    close(a.width, b.width, 0.5) &&
+    close(a.height, b.height, 0.5) &&
+    close(a.left, b.left, 1e-3) &&
+    close(a.top, b.top, 1e-3) &&
+    close(a.dispW, b.dispW, 1e-3)
+  );
+}
+
+function baseFramingSignature(annotationJson: object | null | undefined) {
+  if (!annotationJson) return null;
+  const photo = findSavedBasePhoto(annotationJson as RawJson);
+  const frame = recoverSavedFrame(annotationJson);
+  if (!photo || !frame) return null;
+  const src = typeof photo.src === "string" ? photo.src : "";
+  return {
+    // A signed storage URL's token changes on every reopen; the object path
+    // doesn't. A picked video frame's data: URL is compared as is.
+    src: /^https?:/.test(src) ? src.split("?")[0] : src,
+    aspect: frame.width / frame.height,
+    angle: num(photo.angle, 0),
+    flipX: photo.flipX === true,
+    flipY: photo.flipY === true,
+    cropX: num(photo.cropX, 0),
+    cropY: num(photo.cropY, 0),
+    width: num(photo.width, 0),
+    height: num(photo.height, 0),
+    left: num(photo.left, 0) / frame.height,
+    top: num(photo.top, 0) / frame.height,
+    dispW: (num(photo.width, 0) * num(photo.scaleX, 1)) / frame.height,
+  };
+}
+
 // Relative aspect difference below which a saved frame counts as "the same
 // shape" as the target (float noise from serialization). The ratios this
 // app uses differ by far more: 3:4 vs 4:5 is ~6.7%, 4:5 vs 9:16 ~42%.
