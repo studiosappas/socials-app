@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { SharedGalleryItem } from "@/lib/data/share-preview";
 import { Lightbox, MediaFrame, type FlatMedia } from "@/components/media-gallery";
 import { MentionField } from "@/components/ui/mention-input";
@@ -32,11 +32,15 @@ export function SharedGallery({
   members: { id: string; name: string }[];
 }) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const originalAspects = useOriginalAspects(items);
+  // A post's chosen ratio as a number; "original" waits for its first item
+  // to load (3:4 until then). Null = the legacy fixed 3:4 / 9:16 box.
+  const aspectOf = (item: SharedGalleryItem) => (item.aspect === "original" ? (originalAspects[item.id] ?? null) : item.aspect);
 
   const flatMedia = useMemo<FlatMedia[]>(() => {
     const list: FlatMedia[] = [];
     for (const item of items) {
-      item.media.forEach((m, i) => {
+      item.media.forEach((m) => {
         if (!m.url) return;
         list.push({
           key: m.mediaAssetId,
@@ -44,14 +48,15 @@ export function SharedGallery({
           mediaType: m.mediaType,
           posterUrl: m.posterUrl,
           contentType: item.type,
-          // Only the cover (first media item) ever has a meaningful crop --
-          // every other item's own crop is already baked into its image.
-          coverTransform: i === 0 ? item.coverTransform : null,
+          // Per-item framing, resolved in getSharedPreviewData.
+          coverTransform: m.coverTransform ?? null,
+          aspect: aspectOf(item),
         });
       });
     }
     return list;
-  }, [items]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, originalAspects]);
 
   const indexByKey = useMemo(() => {
     const map = new Map<string, number>();
@@ -78,13 +83,14 @@ export function SharedGallery({
         <section key={item.id} className="animate-settle-in flex w-full flex-col items-center gap-4">
           {item.media.length > 1 ? (
             <div className="flex w-full max-w-6xl flex-wrap items-center justify-center gap-3">
-              {item.media.map((m, i) => (
+              {item.media.map((m) => (
                 <MediaFrame
                   key={m.mediaAssetId}
                   media={m}
                   type={item.type}
                   grouped
-                  coverTransform={i === 0 ? item.coverTransform : null}
+                  coverTransform={m.coverTransform ?? null}
+                  aspect={aspectOf(item)}
                   onOpen={() => {
                     const idx = indexByKey.get(m.mediaAssetId);
                     if (idx !== undefined) setLightboxIndex(idx);
@@ -96,7 +102,8 @@ export function SharedGallery({
             <MediaFrame
               media={item.media[0]}
               type={item.type}
-              coverTransform={item.coverTransform}
+              coverTransform={item.media[0].coverTransform ?? null}
+              aspect={aspectOf(item)}
               onOpen={() => {
                 const i = indexByKey.get(item.media[0].mediaAssetId);
                 if (i !== undefined) setLightboxIndex(i);
@@ -121,6 +128,31 @@ export function SharedGallery({
       )}
     </div>
   );
+}
+
+// The natural ratio of each "original"-ratio post's first item -- what the
+// export uses for every one of its frames.
+function useOriginalAspects(items: SharedGalleryItem[]): Record<string, number> {
+  const [aspects, setAspects] = useState<Record<string, number>>({});
+  useEffect(() => {
+    let cancelled = false;
+    for (const item of items) {
+      const first = item.media[0];
+      const src = item.aspect === "original" && first ? (first.mediaType === "image" ? first.url : first.posterUrl) : null;
+      if (!src) continue;
+      const img = new Image();
+      img.onload = () => {
+        if (!cancelled && img.naturalWidth && img.naturalHeight) {
+          setAspects((prev) => ({ ...prev, [item.id]: img.naturalWidth / img.naturalHeight }));
+        }
+      };
+      img.src = src;
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [items]);
+  return aspects;
 }
 
 const STATUS_LABEL: Record<ReviewStatus, string> = {

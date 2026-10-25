@@ -1086,6 +1086,8 @@ export type SharedPreviewMediaItem = {
   previewStoragePath: string | null;
   posterStoragePath: string | null;
   mediaType: MediaType;
+  // posts only, after add_post_aspect_ratio_and_frame_transform.sql
+  frameTransform?: { scale: number; x: number; y: number; rotation?: number } | null;
 };
 
 export type SharedPreviewItem = {
@@ -1099,6 +1101,8 @@ export type SharedPreviewItem = {
   // The one canonical crop for a post's cover -- null for stories and for a
   // post never manually cropped. See get_shared_preview's own comment.
   coverTransform: { scale: number; x: number; y: number } | null;
+  // Absent before add_post_aspect_ratio_and_frame_transform.sql.
+  aspectRatio?: string | null;
   media: SharedPreviewMediaItem[];
 };
 

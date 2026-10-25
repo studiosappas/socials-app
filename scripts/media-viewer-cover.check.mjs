@@ -30,11 +30,11 @@ const HARNESS = `"use client";
 // TEMPORARY -- created and deleted by scripts/media-viewer-cover.check.mjs. Never commit.
 import { SharedGallery } from "../preview/[token]/shared-gallery";
 import type { SharedGalleryItem } from "@/lib/data/share-preview";
-const base = { caption: "", notes: "", reviewStatus: "pending" as const, storyId: null };
+const base = { caption: "", notes: "", reviewStatus: "pending" as const, storyId: null, aspect: null };
 const ITEMS: SharedGalleryItem[] = [
   // a Reel whose cover was saved through Edit Cover, with a Grid framing (zoom 2), landscape video
   { ...base, id: "i-a", type: "post", postId: "p-a", coverTransform: { scale: 2, x: 0, y: 0, rotation: 0 },
-    media: [{ mediaAssetId: "m-a", url: "${M}landscape.webm", posterUrl: "${M}cover-edited.svg", mediaType: "video" }] },
+    media: [{ mediaAssetId: "m-a", url: "${M}landscape.webm", posterUrl: "${M}cover-edited.svg", mediaType: "video", coverTransform: { scale: 2, x: 0, y: 0, rotation: 0 } }] },
   // a Reel with NO poster at all, portrait video
   { ...base, id: "i-b", type: "post", postId: "p-b", coverTransform: null,
     media: [{ mediaAssetId: "m-b", url: "${M}portrait.webm", posterUrl: null, mediaType: "video" }] },
@@ -47,6 +47,11 @@ const ITEMS: SharedGalleryItem[] = [
   // a video that can't be loaded
   { ...base, id: "i-d", type: "post", postId: "p-d", coverTransform: null,
     media: [{ mediaAssetId: "m-d", url: "${M}missing.webm", posterUrl: "${M}poster-auto.svg", mediaType: "video" }] },
+  // aspect-ratio posts (as getSharedPreviewData builds them): a framed 1:1 image, and an Original-ratio 4:5 image
+  { ...base, id: "i-e", type: "post", postId: "p-e", coverTransform: null, aspect: 1,
+    media: [{ mediaAssetId: "m-e", url: "${M}image.svg", posterUrl: null, mediaType: "image", coverTransform: { scale: 1, x: 0, y: 0, rotation: 0, scope: "export-frame", scopeVersion: 1, aspect: 1 } as never }] },
+  { ...base, id: "i-f", type: "post", postId: "p-f", coverTransform: null, aspect: "original",
+    media: [{ mediaAssetId: "m-f", url: "${M}image.svg?f", posterUrl: null, mediaType: "image", coverTransform: { scale: 1, x: 0, y: 0, rotation: 0, scope: "export-frame", scopeVersion: 1, aspect: "original" } as never }] },
 ];
 export default function Harness() {
   return <SharedGallery token="t" title="Viewer check" projectName="P" items={ITEMS} members={[]} />;
@@ -195,6 +200,22 @@ async function run(engine, browser, media) {
       });
       return v.videoWidth > 0;
     }, `${M}landscape.webm`);
+    if (engine === "chromium") {
+      const ratios = await page.locator("button[title='View larger']").evaluateAll((els) => els.map((e) => { const r = e.getBoundingClientRect(); return +(r.width / r.height).toFixed(3); }));
+      await check(`${label}: /preview frames follow the post's ratio -- legacy 3:4, 1:1, Original 4:5`, async () => {
+        assert.deepEqual(ratios, [0.75, 1, 0.8]);
+      });
+      await page.locator("button[title='View larger']").nth(1).click();
+      await page.waitForTimeout(500);
+      await check(`${label}: the 1:1 post's lightbox box is square`, async () => {
+        const b = await page.locator("div.fixed.inset-0.z-50 .animate-settle-in").boundingBox();
+        assert.ok(Math.abs(b.width / b.height - 1) < 0.01, `${b.width}x${b.height}`);
+      });
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(300);
+    }
     const playbackCheck = async (name, fn) => {
       if (decodes) return check(name, fn);
       skipped++;

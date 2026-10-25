@@ -3,12 +3,17 @@ import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import type { GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 import type { ReviewStatus } from "@/types/database";
+import { aspectValue, parseAspectChoice } from "@/lib/aspect-ratio";
+import { exportFraming } from "@/lib/cover-framing";
 
 export type SharedGalleryMedia = {
   mediaAssetId: string;
   url: string | null;
   posterUrl: string | null;
   mediaType: "image" | "video" | "pdf";
+  // The framing this item is shown with: the legacy cover crop (cover only)
+  // or, for a post with a chosen aspect ratio, its export framing.
+  coverTransform?: GridCoverTransform | null;
 };
 
 export type SharedGalleryItem = {
@@ -28,6 +33,9 @@ export type SharedGalleryItem = {
   // Only ever meaningful for media[0]; every other item's own crop is
   // already baked into its own previewStoragePath image.
   coverTransform: GridCoverTransform | null;
+  // A post's chosen aspect ratio -- its frames are shown at it instead of
+  // 3:4 ("original" = the first item's own ratio). Null = legacy 3:4.
+  aspect: number | "original" | null;
   media: SharedGalleryMedia[];
 };
 
@@ -81,24 +89,38 @@ export const getSharedPreviewData = cache(async function getSharedPreviewData(
     // reasoning as every other "new column might not exist yet" spot in
     // this codebase, just applied to an RPC response instead of a select.
     members: data.members ?? [],
-    items: data.items.map((item) => ({
-      id: item.id,
-      type: item.type,
-      postId: item.postId,
-      storyId: item.storyId,
-      caption: item.caption,
-      notes: item.notes,
-      reviewStatus: item.reviewStatus,
-      coverTransform: item.coverTransform ?? null,
-      media: item.media.map((m) => ({
-        mediaAssetId: m.mediaAssetId,
-        // Same "edited preview wins" fallback used everywhere else this
-        // media shows up (Grid, post editor) -- a re-annotated cover should
-        // look the same here as it does inside the app.
-        url: (m.previewStoragePath ? urlByPath.get(m.previewStoragePath) : undefined) ?? urlByPath.get(m.storagePath) ?? null,
-        posterUrl: m.posterStoragePath ? urlByPath.get(m.posterStoragePath) ?? null : null,
-        mediaType: m.mediaType,
-      })),
-    })),
+    items: data.items.map((item) => {
+      const choice = item.type === "post" ? parseAspectChoice(item.aspectRatio) : null;
+      const aspect = choice ? (choice === "original" ? "original" : aspectValue(choice, null)) : null;
+      return {
+        id: item.id,
+        type: item.type,
+        postId: item.postId,
+        storyId: item.storyId,
+        caption: item.caption,
+        notes: item.notes,
+        reviewStatus: item.reviewStatus,
+        coverTransform: item.coverTransform ?? null,
+        aspect,
+        media: item.media.map((m, i) => ({
+          mediaAssetId: m.mediaAssetId,
+          // Same "edited preview wins" fallback used everywhere else this
+          // media shows up (Grid, post editor) -- a re-annotated cover should
+          // look the same here as it does inside the app.
+          url: (m.previewStoragePath ? urlByPath.get(m.previewStoragePath) : undefined) ?? urlByPath.get(m.storagePath) ?? null,
+          posterUrl: m.posterStoragePath ? urlByPath.get(m.posterStoragePath) ?? null : null,
+          mediaType: m.mediaType,
+          // Same rule as the export: with a ratio set, the cover and every
+          // image get their own frame; without one, only the cover's legacy crop.
+          coverTransform: aspect
+            ? i === 0 || m.mediaType === "image"
+              ? (exportFraming(aspect, m.frameTransform) as GridCoverTransform)
+              : null
+            : i === 0
+              ? item.coverTransform ?? null
+              : null,
+        })),
+      };
+    }),
   };
 });

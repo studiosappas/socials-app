@@ -29,6 +29,9 @@ export type FlatMedia = {
   // Only ever set for a post's cover (first media item) -- see
   // SharedGalleryItem.coverTransform's own comment.
   coverTransform: GridCoverTransform | null;
+  // A post's chosen aspect ratio (width / height), replacing the fixed 3:4
+  // box -- unset everywhere except the Shared Client Preview.
+  aspect?: number | null;
 };
 
 export const ASPECT_CLASS: Record<GalleryItemType, string> = {
@@ -59,6 +62,7 @@ export function MediaFrame({
   type,
   grouped = false,
   coverTransform = null,
+  aspect = null,
   onOpen,
 }: {
   media: GalleryMedia;
@@ -66,13 +70,16 @@ export function MediaFrame({
   grouped?: boolean;
   // Only ever passed for a post's cover item -- see FlatMedia's own comment.
   coverTransform?: GridCoverTransform | null;
+  // See FlatMedia.aspect.
+  aspect?: number | null;
   onOpen: () => void;
 }) {
   if (!media.url) return null;
-  const className = `${WIDTH_CLASS[type][grouped ? "grouped" : "solo"]} ${ASPECT_CLASS[type]} shrink-0 overflow-hidden bg-black/[.03]`;
+  const className = `${WIDTH_CLASS[type][grouped ? "grouped" : "solo"]} ${aspect ? "" : ASPECT_CLASS[type]} shrink-0 overflow-hidden bg-black/[.03]`;
+  const style = aspect ? { aspectRatio: aspect } : undefined;
   if (media.mediaType === "video") {
     return (
-      <div className={className}>
+      <div className={className} style={style}>
         <VideoCoverPlayer url={media.url} posterUrl={media.posterUrl} coverTransform={coverTransform} />
       </div>
     );
@@ -88,6 +95,7 @@ export function MediaFrame({
       type="button"
       onClick={onOpen}
       title="View larger"
+      style={style}
       className={`${className} cursor-zoom-in transition-opacity duration-150 hover:opacity-90`}
     >
       <CroppedCoverImage src={imageSrc} transform={coverTransform} className="h-full w-full select-none" />
@@ -143,7 +151,12 @@ export function Lightbox({
           </>
         )}
 
-        <div key={current.key} className={`animate-settle-in shrink-0 overflow-hidden bg-black/[.03] ${LIGHTBOX_BOX_CLASS[current.contentType]}`}>
+        <div
+          key={current.key}
+          className={`animate-settle-in shrink-0 overflow-hidden bg-black/[.03] ${current.aspect ? "" : LIGHTBOX_BOX_CLASS[current.contentType]}`}
+          // Same sizing rule as LIGHTBOX_BOX_CLASS, for any ratio.
+          style={current.aspect ? { width: `min(92vw, ${(86 * current.aspect).toFixed(3)}dvh)`, aspectRatio: current.aspect } : undefined}
+        >
           {current.mediaType === "video" ? (
             <VideoCoverPlayer url={current.url} posterUrl={current.posterUrl} coverTransform={current.coverTransform} />
           ) : (
