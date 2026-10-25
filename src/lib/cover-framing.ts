@@ -102,15 +102,64 @@ export function exportCoverFraming<T>(transform: T | null | undefined, coverIsRe
   return transform;
 }
 
-// The frame a reel-cover framing is laid out in, for a box of the given size:
-// a 9:16 frame as wide as the box, sharing its centre. A 3:4 box (Grid tile,
-// viewer, PDF/Full Feed cell) therefore shows exactly the frame's centred 3:4
-// band; a 9:16 box shows all of it. Exact for a cover image of any aspect,
-// since the cover is fitted into this frame, not into the box. Any other
-// framing is laid out in the box itself.
-export function coverLayoutFrame(transform: unknown, box: { w: number; h: number }): { w: number; h: number } {
-  if (!isReelCoverFraming(transform)) return box;
-  return { w: box.w, h: box.w / REEL_COVER_ASPECT };
+// The frame a framing is laid out in, for a box of the given size: the
+// framing's own frame (a Reel's 9:16 cover frame, or a post's export frame
+// at its chosen aspect), scaled to the LARGEST size that still covers the
+// box, sharing its centre. The box then shows exactly the frame's centred
+// window of the box's own shape -- for a 3:4 Grid box: a full-width band of
+// a taller frame (9:16), a full-height window of a wider one (4:5, 1:1,
+// landscape). A box of the frame's own shape shows all of it. Exact for a
+// cover image of any aspect, since the image is fitted into this frame, not
+// into the box. `natural` resolves an "original" aspect (the image's own).
+// Any other framing is laid out in the box itself.
+export function coverLayoutFrame(
+  transform: unknown,
+  box: { w: number; h: number },
+  natural?: { w: number; h: number } | null,
+): { w: number; h: number } {
+  const aspect = framingAspect(transform, natural);
+  if (!aspect) return box;
+  return aspect <= box.w / box.h ? { w: box.w, h: box.w / aspect } : { w: box.h * aspect, h: box.h };
+}
+
+// --- Export framing (posts.aspect_ratio + post_assets.frame_transform) -----
+// Never stored in cover_transform: built in memory from the post's chosen
+// aspect and the item's own frame_transform, and handed to the same
+// renderers (CroppedCoverImage, applyCoverTransform) as any other framing.
+
+export const EXPORT_FRAME_SCOPE = "export-frame";
+
+export type ExportFraming = {
+  scale: number;
+  x: number;
+  y: number;
+  rotation?: number;
+  scope: typeof EXPORT_FRAME_SCOPE;
+  scopeVersion: 1;
+  // w/h, or "original" = the rendered image's own aspect
+  aspect: number | "original";
+};
+
+export function exportFraming(
+  aspect: number | "original",
+  frame: { scale: number; x: number; y: number; rotation?: number } | null | undefined,
+): ExportFraming {
+  const { scale = 1, x = 0, y = 0, rotation = 0 } = frame ?? {};
+  return { scale, x, y, rotation, scope: EXPORT_FRAME_SCOPE, scopeVersion: 1, aspect };
+}
+
+export function isExportFraming(transform: unknown): transform is ExportFraming {
+  if (!transform || typeof transform !== "object") return false;
+  const t = transform as { scope?: unknown; scopeVersion?: unknown };
+  return t.scope === EXPORT_FRAME_SCOPE && t.scopeVersion === 1;
+}
+
+// The frame aspect a framing is laid out in, or null for "lay out in the box".
+function framingAspect(transform: unknown, natural?: { w: number; h: number } | null): number | null {
+  if (isReelCoverFraming(transform)) return REEL_COVER_ASPECT;
+  if (!isExportFraming(transform)) return null;
+  if (transform.aspect === "original") return natural && natural.h > 0 ? natural.w / natural.h : null;
+  return transform.aspect > 0 ? transform.aspect : null;
 }
 
 type Framing = { scale: number; x: number; y: number; rotation?: number };

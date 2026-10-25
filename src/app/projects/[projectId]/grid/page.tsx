@@ -202,6 +202,9 @@ export default async function GridPage({
       assetCount: slot.assetCount,
       coverTransform: slot.coverTransform,
       scheduledDate: slot.scheduledDate,
+      aspectRatio: slot.aspectRatio,
+      coverPostAssetId: slot.coverPostAssetId,
+      coverFrameTransform: slot.coverFrameTransform,
     })),
   }));
 

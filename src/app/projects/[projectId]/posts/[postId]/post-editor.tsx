@@ -45,12 +45,24 @@ import { newEditAspect } from "@/lib/media-aspect";
 import { effectivePostType } from "@/lib/post-type";
 import {
   GRID_BAND_ASPECT,
-  REEL_COVER_ASPECT,
-  coverFramingKind,
   exportCoverFraming,
+  exportFraming,
+  isReelCoverFraming,
   markCoverFraming,
   sameFraming,
 } from "@/lib/cover-framing";
+import {
+  aspectLabel,
+  aspectOptions,
+  aspectValue,
+  aspectWarning,
+  defaultAspectChoice,
+  editorAspect,
+  type AspectChoice,
+  type AspectPostKind,
+} from "@/lib/aspect-ratio";
+import { recoverSavedFrame } from "@/lib/annotation-frame";
+import { setPostAspectRatio, updatePostAssetFrameTransform } from "@/lib/actions/posts";
 import { currentDeviceIsPhoneOrTablet } from "@/lib/native-share-device";
 import { convertToTask } from "@/lib/actions/todo";
 import { addPostComment, fetchPostComments } from "@/lib/actions/post-comments";
@@ -92,6 +104,9 @@ export type PostAssetItem = {
   // raw <video> element instead, which looks identical whether a cover was
   // ever picked or not.
   posterUrl: string | null;
+  // This item's own export framing inside the post's chosen aspect ratio
+  // (post_assets.frame_transform, lib/aspect-ratio.ts); null = centred.
+  frameTransform?: { scale: number; x: number; y: number; rotation?: number } | null;
   // Local-only: set when this session saves an Edit Cover on a video, since
   // the save callback doesn't return the new annotation_json. Download
   // Media uses it to include that cover (see videoCoverDownloadSource).
@@ -125,6 +140,8 @@ type PostRecord = {
   // The one canonical crop for this post's cover asset (position 0) -- same
   // value Grid's own crop tool reads/writes.
   coverTransform: GridCoverTransform | null;
+  // The chosen export aspect ratio (lib/aspect-ratio.ts); absent/null = legacy.
+  aspectRatio?: AspectChoice | null;
 };
 
 const labelClass = "text-xs tracking-wide text-muted uppercase";
@@ -244,9 +261,16 @@ export function PostEditor({
   const [overrideCoverTransform, setOverrideCoverTransform] = useState<GridCoverTransform | null | undefined>(
     undefined,
   );
+  // The post's chosen export aspect ratio (lib/aspect-ratio.ts) and each
+  // item's own framing in it -- optimistic overrides until fresh server
+  // data arrives, same pattern as the cover crop.
+  const [aspectOverride, setAspectOverride] = useState<AspectChoice | null | undefined>(undefined);
+  const [frameOverrides, setFrameOverrides] = useState<Record<string, GridCoverTransform | null>>({});
   if (post !== prevPost) {
     setPrevPost(post);
     setOverrideCoverTransform(undefined);
+    setAspectOverride(undefined);
+    setFrameOverrides({});
   }
   const effectiveCoverTransform = overrideCoverTransform !== undefined ? overrideCoverTransform : post.coverTransform;
 
@@ -266,6 +290,68 @@ export function PostEditor({
     liveCoverTransformRef.current = transform;
   }, []);
   const closeViewer = useCallback(() => setViewer(null), []);
+
+  // --- Aspect ratio -------------------------------------------------------
+  const storedAspect = aspectOverride !== undefined ? aspectOverride : (post.aspectRatio ?? null);
+  const isStandaloneReel = orderedAssets.length === 1 && orderedAssets[0]?.mediaType === "video";
+  const aspectKind: AspectPostKind = isStandaloneReel ? "reel" : "feed";
+  // What the editors work in: the stored ratio, else a Reel cover's 9:16
+  // default (written only on Apply). A feed post with none stays legacy.
+  const editorChoice = storedAspect ?? defaultAspectChoice(aspectKind);
+  // "Original" = the FIRST item's own image (a carousel's shared ratio).
+  const firstItem = orderedAssets[0];
+  const firstSrc = firstItem ? (firstItem.mediaType === "video" ? firstItem.posterUrl : firstItem.url) : null;
+  const firstNatural = useNaturalSize(editorChoice === "original" && firstSrc ? firstSrc : "");
+  const firstAspect = firstNatural ? firstNatural.w / firstNatural.h : null;
+  const editorAspectValue = editorChoice ? aspectValue(editorChoice, firstAspect) : null;
+  const aspectWarningText = editorChoice ? aspectWarning(aspectKind, editorChoice, editorAspectValue) : null;
+  // A standalone Reel's Staging-era 9:16 crop (reel-cover in cover_transform)
+  // is the starting point of its framing until one is saved per item.
+  const legacyReelFrame = isStandaloneReel && isReelCoverFraming(effectiveCoverTransform) ? effectiveCoverTransform : null;
+
+  function exportFrameFor(asset: PostAssetItem, index: number): ExportFrameProps | null {
+    if (!editorChoice || !editorAspectValue) return null;
+    const frame = asset.postAssetId in frameOverrides ? frameOverrides[asset.postAssetId] : (asset.frameTransform ?? (index === 0 ? legacyReelFrame : null));
+    // Previews switch only once a ratio is STORED -- a legacy post keeps
+    // showing exactly what it showed until an explicit choice / Apply.
+    const preview = storedAspect ? (storedAspect === "original" && index === 0 ? "original" : editorAspectValue) : null;
+    const saved = asset.mediaType === "image" && asset.annotationJson ? recoverSavedFrame(asset.annotationJson) : null;
+    const needsReview = Boolean(storedAspect && saved && Math.abs(saved.width / saved.height / editorAspectValue - 1) > 0.01);
+    return { editorAspect: editorAspectValue, preview, frame: frame ?? null, aspectStored: storedAspect !== null, needsReview };
+  }
+
+  async function handleAspectChoice(choice: AspectChoice) {
+    if (choice === storedAspect) return;
+    const previous = aspectOverride;
+    setAspectOverride(choice);
+    try {
+      await setPostAspectRatio(projectId, post.id, choice);
+      router.refresh();
+    } catch (error) {
+      console.error("Failed to set aspect ratio:", error);
+      setAspectOverride(previous);
+      showError("Couldn't change the aspect ratio. Please try again.");
+    }
+  }
+
+  async function handleSaveFrame(postAssetId: string, frame: GridCoverTransform) {
+    const previousFrames = frameOverrides;
+    const previousAspect = aspectOverride;
+    // Apply on a Reel cover whose 9:16 was only the default also stores it.
+    const writeAspect = storedAspect === null ? editorChoice : null;
+    setFrameOverrides((m) => ({ ...m, [postAssetId]: frame }));
+    if (writeAspect) setAspectOverride(writeAspect);
+    try {
+      if (writeAspect) await setPostAspectRatio(projectId, post.id, writeAspect);
+      await updatePostAssetFrameTransform(projectId, post.id, postAssetId, frame);
+      router.refresh();
+    } catch (error) {
+      console.error("Failed to save framing:", error);
+      setFrameOverrides(previousFrames);
+      setAspectOverride(previousAspect);
+      showError("Couldn't save that crop. Please try again.");
+    }
+  }
 
   function openViewer(postAssetId: string) {
     const media = buildPostViewerMedia(orderedAssets, liveCoverTransformRef.current);
@@ -511,7 +597,11 @@ export function PostEditor({
           liveCoverTransformRef.current,
           orderedAssets.length === 1 && orderedAssets[0].mediaType === "video",
         );
-        const media = editedDownloadSource(a, index === 0, transform, projectId, post.id);
+        // with a stored aspect ratio, images come framed from the export route
+        const media =
+          storedAspect && a.mediaType === "image"
+            ? { url: postExportUrl(projectId, post.id, { postAssetId: a.postAssetId }), viaServer: true, filename: index === 0 ? "cover.jpg" : `slide-${index + 1}.jpg` }
+            : editedDownloadSource(a, index === 0, transform, projectId, post.id);
         const cover = videoCoverDownloadSource(a, index === 0, transform, orderedAssets.length, projectId, post.id);
         return cover ? [media, cover] : [media];
       });
@@ -579,6 +669,16 @@ export function PostEditor({
           onDragEnd={handleDragEnd}
           onDragCancel={() => setActiveAssetId(null)}
         >
+          {orderedAssets.length > 0 && (
+            <AspectRatioSelector
+              kind={aspectKind}
+              selected={editorChoice}
+              stored={storedAspect !== null}
+              disabled={!canManage}
+              warning={aspectWarningText}
+              onSelect={handleAspectChoice}
+            />
+          )}
           <SortableContext
             items={orderedAssets.map((a) => a.postAssetId)}
             strategy={rectSortingStrategy}
@@ -592,6 +692,8 @@ export function PostEditor({
                   isCover={index === 0}
                   itemCount={orderedAssets.length}
                   coverTransform={effectiveCoverTransform}
+                  exportFrame={exportFrameFor(asset, index)}
+                  onSaveFrame={handleSaveFrame}
                   projectId={projectId}
                   postId={post.id}
                   onRemove={() => handleRemoveAsset(asset.postAssetId)}
@@ -607,7 +709,8 @@ export function PostEditor({
                       annotationJson: asset.annotationJson,
                       mediaType: asset.mediaType,
                       isCover: index === 0,
-                      targetAspect: newEditAspect(asset.mediaType, orderedAssets.length),
+                      // the post's aspect ratio when one applies, else the legacy rule
+                      targetAspect: editorAspect(editorChoice, firstAspect) ?? newEditAspect(asset.mediaType, orderedAssets.length),
                     })
                   }
                 />
@@ -1090,6 +1193,63 @@ function AssetPreview({
   );
 }
 
+type ExportFrameProps = {
+  // the frame the crop editor works in (w/h)
+  editorAspect: number;
+  // what the 3:4 tile previews: the stored ratio's frame ("original" = the
+  // image's own), or null while the ratio is only a default (legacy preview)
+  preview: number | "original" | null;
+  frame: GridCoverTransform | null;
+  aspectStored: boolean;
+  // a saved Edit Image made for another ratio
+  needsReview: boolean;
+};
+
+// The post's export aspect ratio. Writes on click (an explicit choice);
+// a Reel cover's 9:16 default shows selected but isn't stored until chosen
+// or applied.
+function AspectRatioSelector({
+  kind,
+  selected,
+  stored,
+  disabled,
+  warning,
+  onSelect,
+}: {
+  kind: AspectPostKind;
+  selected: AspectChoice | null;
+  stored: boolean;
+  disabled: boolean;
+  warning: string | null;
+  onSelect: (choice: AspectChoice) => void;
+}) {
+  return (
+    <div className="mb-2 flex flex-col gap-1" data-aspect-selector="">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-[11px] tracking-wide text-muted uppercase">{kind === "reel" ? "Cover ratio" : "Aspect ratio"}</span>
+        {aspectOptions(kind).map((choice) => (
+          <button
+            key={choice}
+            type="button"
+            disabled={disabled}
+            aria-pressed={selected === choice}
+            onClick={() => onSelect(choice)}
+            className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors duration-150 ${
+              selected === choice ? "border-foreground bg-foreground text-background" : "border-border text-foreground hover:border-foreground/40"
+            }`}
+          >
+            {aspectLabel(choice)}
+            {kind === "reel" && choice === "9:16" ? " (recommended)" : ""}
+          </button>
+        ))}
+        {!selected && <span className="text-[11px] text-muted">As uploaded (no ratio chosen)</span>}
+        {selected && !stored && <span className="text-[11px] text-muted">default -- applied on Crop</span>}
+      </div>
+      {warning && <p className="text-[11px] text-amber-700 dark:text-amber-400">{warning}</p>}
+    </div>
+  );
+}
+
 function SortableAsset({
   asset,
   canManage,
@@ -1103,6 +1263,8 @@ function SortableAsset({
   onChooseFromLibrary,
   onPreview,
   reportCoverTransform,
+  exportFrame,
+  onSaveFrame,
 }: {
   asset: PostAssetItem;
   canManage: boolean;
@@ -1127,6 +1289,10 @@ function SortableAsset({
   // section into a temporary replace-target mode instead. See PostEditor's
   // own replaceTarget state.
   onChooseFromLibrary: (postAssetId: string, isCover: boolean) => void;
+  // The post's aspect ratio applies (lib/aspect-ratio.ts): this item's own
+  // export framing at that ratio. Absent -> the legacy cover crop path.
+  exportFrame?: ExportFrameProps | null;
+  onSaveFrame?: (postAssetId: string, frame: GridCoverTransform) => void;
 }) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -1217,13 +1383,10 @@ function SortableAsset({
   // "Download Cover Image": a standalone Reel's explicitly changed cover, as
   // an image (the menu entry only appears when videoCoverSource exists --
   // never for a video inside a carousel).
-  // Which crop this cover gets (lib/cover-framing.ts): a standalone Reel's
-  // 9:16 cover framing (the editor shows the Grid's 3:4 band inside it), an
-  // older 3:4 Reel cover's 3:4 crop, or the Grid-preview crop.
-  const coverNatural = useNaturalSize(isCover && asset.mediaType === "video" && asset.posterUrl ? asset.posterUrl : "");
-  const framingKind = isCover
-    ? coverFramingKind({ mediaType: asset.mediaType, itemCount, coverAspect: coverNatural ? coverNatural.w / coverNatural.h : null })
-    : "preview";
+  // With the post's aspect ratio: images (and a standalone Reel's cover)
+  // are framed at it; a video inside a carousel keeps its file as is.
+  const frameable = asset.mediaType === "image" || (isCover && itemCount === 1);
+  const framed = Boolean(exportFrame && frameable);
   // Downloads apply the framing an export does -- see exportCoverFraming.
   const exportTransform = exportCoverFraming(effectiveTransform, isCover && asset.mediaType === "video" && itemCount === 1);
   const videoCoverSource = videoCoverDownloadSource(asset, isCover, exportTransform, itemCount, projectId, postId);
@@ -1231,7 +1394,12 @@ function SortableAsset({
     setMenuOpen(false);
     if (downloading) return;
     const source =
-      kind === "cover" ? videoCoverSource : editedDownloadSource(asset, isCover, exportTransform, projectId, postId);
+      kind === "cover"
+        ? videoCoverSource
+        : framed && exportFrame?.preview != null && asset.mediaType === "image"
+          ? // rendered at the post's ratio by the export route (single item)
+            { url: postExportUrl(projectId, postId, { postAssetId: asset.postAssetId }), viaServer: true, filename: isCover ? "cover.jpg" : "slide.jpg" }
+          : editedDownloadSource(asset, isCover, exportTransform, projectId, postId);
     if (!source) {
       showError("This file isn't available to download right now. Refresh the page and try again.");
       return;
@@ -1254,12 +1422,8 @@ function SortableAsset({
     // rewritten (an existing legacy framing must not get marked by merely
     // opening and closing Crop). A real change is a NEW crop, marked for
     // this cover's kind (lib/cover-framing.ts).
-    // Exception: Apply in a standalone Reel's 9:16 editor on a cover with no crop
-    // yet saves that framing even untouched -- a wider cover (4:5 automatic
-    // poster) fills the 9:16 height and can't be moved without zooming, and
-    // Apply must still give it its 9:16 cover / centred Grid band.
-    if (sameFraming(edited, effectiveTransform) && !(framingKind === "reel" && !effectiveTransform)) return;
-    const next = markCoverFraming(edited, framingKind);
+    if (sameFraming(edited, effectiveTransform)) return;
+    const next = markCoverFraming(edited, "preview");
     setOverrideTransform(next);
     try {
       await updatePostCoverTransform(projectId, postId, next);
@@ -1278,6 +1442,24 @@ function SortableAsset({
   // image) -- the raw video file itself can't be panned/zoomed like Grid's
   // crop overlay expects. No poster yet means nothing to crop.
   const cropImageUrl = asset.mediaType === "video" ? asset.posterUrl : asset.url;
+
+  // Apply in the aspect-ratio editor: writes this item's framing (and the
+  // ratio itself when it was only the default -- see PostEditor's
+  // handleSaveFrame). An untouched editor writes nothing -- unless nothing is
+  // saved yet, where Apply is the explicit choice of the shown framing.
+  function handleSaveFrame(edited: GridCoverTransform) {
+    setCropMode(false);
+    if (!exportFrame) return;
+    if (exportFrame.frame && exportFrame.aspectStored && sameFraming(edited, exportFrame.frame)) return;
+    const { scale, x, y, rotation } = edited;
+    onSaveFrame?.(asset.postAssetId, { scale, x, y, rotation: rotation ?? 0 });
+  }
+  const tilePreviewTransform =
+    framed && exportFrame?.preview != null
+      ? exportFraming(exportFrame.preview, exportFrame.frame)
+      : isCover
+        ? effectiveTransform
+        : null;
 
   return (
     <div
@@ -1304,7 +1486,17 @@ function SortableAsset({
         title={onPreview ? (canManage ? "Click to view larger · drag to reorder" : "View larger") : undefined}
         data-post-media-preview={onPreview ? "" : undefined}
       >
-        <AssetPreview asset={asset} coverTransform={isCover ? effectiveTransform : null} />
+        <AssetPreview asset={asset} coverTransform={tilePreviewTransform} />
+        {exportFrame?.needsReview && (
+          <span title="This edit was made for another aspect ratio -- check its framing" className="pointer-events-none absolute inset-x-1 bottom-1 truncate rounded bg-amber-500/90 px-1 py-0.5 text-center text-[9px] text-white">
+            Review framing
+          </span>
+        )}
+        {exportFrame?.preview != null && !frameable && asset.mediaType === "video" && (
+          <span title="The carousel's aspect ratio applies to its images; this video file is downloaded unchanged" className="pointer-events-none absolute inset-x-1 bottom-1 truncate rounded bg-black/70 px-1 py-0.5 text-center text-[9px] text-white">
+            Video file unchanged
+          </span>
+        )}
       </div>
       {canManage && (
         <div ref={menuRef} className="absolute left-1 top-1 z-10">
@@ -1334,7 +1526,7 @@ function SortableAsset({
               >
                 {asset.mediaType === "video" ? "Edit Cover" : "Edit Image"}
               </button>
-              {isCover && cropImageUrl && (
+              {cropImageUrl && (framed || (isCover && !exportFrame)) && (
                 <button
                   type="button"
                   onClick={() => {
@@ -1390,7 +1582,21 @@ function SortableAsset({
           )}
         </div>
       )}
-      {cropMode && cropImageUrl && (
+      {cropMode && cropImageUrl && framed && exportFrame && (
+        <GridCropOverlay
+          imageUrl={cropImageUrl}
+          initialTransform={exportFrame.frame}
+          onSave={handleSaveFrame}
+          onCancel={() => setCropMode(false)}
+          anchorRef={tileRef}
+          // The post's chosen aspect ratio; the cover also shows what the
+          // Grid's 3:4 tile will show of it.
+          presentation="enlarged"
+          frameAspect={exportFrame.editorAspect}
+          guideAspect={isCover ? GRID_BAND_ASPECT : undefined}
+        />
+      )}
+      {cropMode && cropImageUrl && !framed && (
         <GridCropOverlay
           imageUrl={cropImageUrl}
           initialTransform={effectiveTransform}
@@ -1399,11 +1605,7 @@ function SortableAsset({
           anchorRef={tileRef}
           // The 96x128 tile is too small to crop on -- same 3:4 frame,
           // enlarged and centred; the saved crop is identical either way.
-          // A standalone Reel's cover is framed in 9:16 instead, with the
-          // Grid's 3:4 band drawn inside it.
           presentation="enlarged"
-          frameAspect={framingKind === "reel" ? REEL_COVER_ASPECT : undefined}
-          guideAspect={framingKind === "reel" ? GRID_BAND_ASPECT : undefined}
         />
       )}
       {replaceOpen && (

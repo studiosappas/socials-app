@@ -327,6 +327,8 @@ export interface Database {
           status: PostStatus;
           review_status: ReviewStatus;
           cover_transform: object | null;
+          // "original" | "1:1" | "4:5" | "9:16"; null = legacy (lib/aspect-ratio.ts)
+          aspect_ratio: string | null;
           created_at: string;
         };
         Insert: {
@@ -339,6 +341,7 @@ export interface Database {
           status?: PostStatus;
           review_status?: ReviewStatus;
           cover_transform?: object | null;
+          aspect_ratio?: string | null;
         };
         Update: {
           post_type?: PostType;
@@ -349,6 +352,7 @@ export interface Database {
           status?: PostStatus;
           review_status?: ReviewStatus;
           cover_transform?: object | null;
+          aspect_ratio?: string | null;
         };
         Relationships: [];
       };
@@ -376,9 +380,9 @@ export interface Database {
         Relationships: [];
       };
       post_assets: {
-        Row: { id: string; post_id: string; media_asset_id: string; position: number };
-        Insert: { post_id: string; media_asset_id: string; position?: number };
-        Update: { media_asset_id?: string; position?: number };
+        Row: { id: string; post_id: string; media_asset_id: string; position: number; frame_transform: object | null };
+        Insert: { post_id: string; media_asset_id: string; position?: number; frame_transform?: object | null };
+        Update: { media_asset_id?: string; position?: number; frame_transform?: object | null };
         Relationships: [
           {
             foreignKeyName: "post_assets_media_asset_id_fkey";

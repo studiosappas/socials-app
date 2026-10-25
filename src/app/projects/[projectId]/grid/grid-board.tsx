@@ -88,7 +88,18 @@ import { logGridInteraction, logGridDataEvent } from "./grid-diagnostics";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { GRID_COVER_ASPECT_CLASS } from "./grid-constants";
 import { newEditAspect } from "@/lib/media-aspect";
-import { GRID_BAND_ASPECT, REEL_COVER_ASPECT, coverFramingKind, markCoverFraming, sameFraming } from "@/lib/cover-framing";
+import {
+  GRID_BAND_ASPECT,
+  REEL_COVER_ASPECT,
+  coverFramingKind,
+  exportFraming,
+  isExportFraming,
+  isReelCoverFraming,
+  markCoverFraming,
+  sameFraming,
+} from "@/lib/cover-framing";
+import { aspectValue } from "@/lib/aspect-ratio";
+import { setPostAspectRatio, updatePostAssetFrameTransform } from "@/lib/actions/posts";
 import { useMediaTiming } from "@/lib/media-diagnostics";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
@@ -2056,6 +2067,53 @@ const GridSlot = memo(function GridSlot({
     itemCount: slot.assetCount,
     coverAspect: reelCoverNatural ? reelCoverNatural.w / reelCoverNatural.h : null,
   });
+  // The post's export aspect ratio (lib/aspect-ratio.ts) -- or a standalone
+  // Reel's 9:16 default, written only on Apply. With one, Grid's Crop edits
+  // the cover item's own framing in that ratio (same as the Post Editor) and
+  // the tile shows its centred 3:4 window. Needs the cover's post_assets row.
+  const isReelSlot = slot.coverMediaType === "video" && slot.assetCount === 1;
+  const gridAspectChoice = slot.coverPostAssetId ? (slot.aspectRatio ?? (isReelSlot ? "9:16" : null)) : null;
+  const thumbNatural = useNaturalSize(gridAspectChoice === "original" && slot.thumbnailUrl ? slot.thumbnailUrl : "");
+  const gridFrameAspect = gridAspectChoice ? aspectValue(gridAspectChoice, thumbNatural ? thumbNatural.w / thumbNatural.h : null) : null;
+  // What a crop becomes on this slot: an export framing, or the legacy crop.
+  const previewForSlot = useCallback(
+    (t: GridCoverTransform): GridCoverTransform => {
+      if (gridAspectChoice && gridFrameAspect) {
+        const { scale, x, y, rotation } = t;
+        return exportFraming(gridAspectChoice === "original" ? "original" : gridFrameAspect, { scale, x, y, rotation }) as GridCoverTransform;
+      }
+      return markCoverFraming(t, framingKind);
+    },
+    [gridAspectChoice, gridFrameAspect, framingKind],
+  );
+  const cropFrameAspect = gridAspectChoice && gridFrameAspect ? gridFrameAspect : framingKind === "reel" ? REEL_COVER_ASPECT : undefined;
+  const cropInitialTransform = gridAspectChoice
+    ? (slot.coverFrameTransform ?? (isReelCoverFraming(slot.coverTransform) ? slot.coverTransform : null))
+    : slot.coverTransform;
+
+  // Writes a crop where it belongs: an export framing (lib/cover-framing.ts)
+  // to the cover item's own frame (+ the ratio, when it was only the Reel
+  // default); anything else to the legacy cover crop -- clearing a ratio that
+  // was only ever this slot's default, so Undo restores a legacy post exactly.
+  const persistCropOnly = useCallback(
+    async (postId: string, transform: GridCoverTransform | null): Promise<boolean> => {
+      if (demoMode) return true;
+      try {
+        if (isExportFraming(transform) && slot.coverPostAssetId && gridAspectChoice) {
+          if (!slot.aspectRatio) await setPostAspectRatio(projectId, postId, gridAspectChoice);
+          const { scale, x, y, rotation } = transform;
+          await updatePostAssetFrameTransform(projectId, postId, slot.coverPostAssetId, { scale, x, y, rotation });
+        } else {
+          if (!slot.aspectRatio && gridAspectChoice) await setPostAspectRatio(projectId, postId, null);
+          await updatePostCoverTransform(projectId, postId, transform);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [demoMode, projectId, slot.coverPostAssetId, slot.aspectRatio, gridAspectChoice],
+  );
 
   const handleSaveCrop = useCallback(
     (edited: GridCoverTransform) => {
@@ -2067,13 +2125,17 @@ const GridSlot = memo(function GridSlot({
       // existing legacy framing). A real change is a NEW crop, marked for
       // this cover's kind (lib/cover-framing.ts). Undo restores the
       // previous value verbatim, marker or not.
-      // Same exception as the Post Editor: Apply on an uncropped Reel cover
-      // saves its default 9:16 framing.
-      if (sameFraming(edited, previousTransform) && !(framingKind === "reel" && !previousTransform)) {
+      // With an aspect ratio: unchanged only when that framing is already
+      // stored; Apply on a default (unstored) one saves it -- same as the
+      // Post Editor.
+      const unchanged = gridAspectChoice
+        ? Boolean(slot.aspectRatio && slot.coverFrameTransform && sameFraming(edited, slot.coverFrameTransform))
+        : sameFraming(edited, previousTransform) && !(framingKind === "reel" && !previousTransform);
+      if (unchanged) {
         requestCloseCrop();
         return;
       }
-      const next = markCoverFraming(edited, framingKind);
+      const next = previewForSlot(edited);
       // Exits the editor immediately, synchronously, regardless of what
       // happens next -- Confirm must never leave the UI locked waiting on
       // the server (see mutateSlot's own async call below, which this does
@@ -2083,8 +2145,7 @@ const GridSlot = memo(function GridSlot({
       mutateSlot(slot.id, { ...slot, coverTransform: next }, async () => {
         // The crop itself is applied optimistically either way -- demoMode
         // just skips persisting it, same reasoning as every mutation here.
-        if (demoMode) return;
-        await updatePostCoverTransform(projectId, postId, next);
+        if (!(await persistCropOnly(postId, next))) throw new Error("Couldn't save that crop.");
       }).then((ok) => {
         if (!ok) {
           showError("Couldn't save that crop. Please try again.");
@@ -2096,20 +2157,20 @@ const GridSlot = memo(function GridSlot({
           label: "Crop",
           undo: () =>
             mutateSlot(slot.id, { ...slot, coverTransform: previousTransform }, async () => {
-              await updatePostCoverTransform(projectId, postId, previousTransform);
+              if (!(await persistCropOnly(postId, previousTransform))) throw new Error("Couldn't undo that crop.");
             }).then((undoOk) => {
               if (!undoOk) requestIdleRefresh();
             }),
           redo: () =>
             mutateSlot(slot.id, { ...slot, coverTransform: next }, async () => {
-              await updatePostCoverTransform(projectId, postId, next);
+              if (!(await persistCropOnly(postId, next))) throw new Error("Couldn't redo that crop.");
             }).then((redoOk) => {
               if (!redoOk) requestIdleRefresh();
             }),
         });
       });
     },
-    [slot, framingKind, demoMode, projectId, pushCommand, mutateSlot, showError, requestIdleRefresh, requestCloseCrop],
+    [slot, framingKind, gridAspectChoice, previewForSlot, demoMode, pushCommand, mutateSlot, showError, requestIdleRefresh, requestCloseCrop, persistCropOnly],
   );
 
   // Purely local intent, dispatched to the shared reducer -- discards the
@@ -2185,18 +2246,6 @@ const GridSlot = memo(function GridSlot({
   // command (which bundles a crop change into the SAME one undo entry as
   // the asset/text/adjustments change it was pasted together with -- see
   // that command's own comment on why).
-  const persistCropOnly = useCallback(
-    async (postId: string, transform: GridCoverTransform | null): Promise<boolean> => {
-      if (demoMode) return true;
-      try {
-        await updatePostCoverTransform(projectId, postId, transform);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    [demoMode, projectId],
-  );
 
   // Rebuilds+re-persists a FULL canonical annotation state (adjustments,
   // text, every other Fabric object) through the exact same detached-
@@ -2307,7 +2356,7 @@ const GridSlot = memo(function GridSlot({
     // A pasted crop is a NEW framing on this post, marked for THIS cover's
     // kind, whatever the source's own was (lib/cover-framing.ts) -- every
     // renderer clamps it to this cover's own coverage limits.
-    const nextTransform = copiedStyle.crop ? markCoverFraming(copiedStyle.crop, framingKind) : null;
+    const nextTransform = copiedStyle.crop ? previewForSlot(copiedStyle.crop) : null;
 
     if (wantsAssetPaste && slot.coverMediaAssetId && slot.coverOriginalUrl) {
       const mediaAssetId = slot.coverMediaAssetId;
@@ -2550,7 +2599,7 @@ const GridSlot = memo(function GridSlot({
   }, [
     copiedStyle,
     slot,
-    framingKind,
+    previewForSlot,
     projectId,
     demoMode,
     applyCropTransform,
@@ -2665,7 +2714,8 @@ const GridSlot = memo(function GridSlot({
         slot={slot}
         posterUnplayable={posterUnplayable}
         transform={slot.coverTransform}
-        reelCoverCrop={framingKind === "reel"}
+        cropFrameAspect={cropFrameAspect}
+        cropInitialTransform={cropInitialTransform}
         canManage={canManage}
         selectionMode={selectionMode}
         selected={selected}
@@ -2706,7 +2756,8 @@ const GridSlotBody = memo(function GridSlotBody({
   slot,
   posterUnplayable,
   transform,
-  reelCoverCrop,
+  cropFrameAspect,
+  cropInitialTransform,
   canManage,
   selectionMode,
   selected,
@@ -2729,9 +2780,11 @@ const GridSlotBody = memo(function GridSlotBody({
   slot: GridBoardSlot;
   posterUnplayable: boolean;
   transform: GridCoverTransform | null;
-  // A standalone Reel's cover: cropped in the enlarged 9:16 editor with the
-  // Grid band, not in place (same editor as the Post Editor's).
-  reelCoverCrop: boolean;
+  // A post with an export aspect ratio (or a standalone Reel): cropped in the
+  // enlarged editor at that ratio with the Grid's 3:4 window shown, not in
+  // place (same editor as the Post Editor's). Undefined -> in place, 3:4.
+  cropFrameAspect?: number;
+  cropInitialTransform: GridCoverTransform | null;
   canManage: boolean;
   selectionMode: boolean;
   selected: boolean;
@@ -2969,13 +3022,13 @@ const GridSlotBody = memo(function GridSlotBody({
       {cropMode && slot.thumbnailUrl && (
         <GridCropOverlay
           imageUrl={slot.thumbnailUrl}
-          initialTransform={transform}
+          initialTransform={cropInitialTransform}
           onSave={onSaveCrop}
           onCancel={onCancelCrop}
           anchorRef={tileElRef}
-          presentation={reelCoverCrop ? "enlarged" : "in-place"}
-          frameAspect={reelCoverCrop ? REEL_COVER_ASPECT : undefined}
-          guideAspect={reelCoverCrop ? GRID_BAND_ASPECT : undefined}
+          presentation={cropFrameAspect ? "enlarged" : "in-place"}
+          frameAspect={cropFrameAspect}
+          guideAspect={cropFrameAspect ? GRID_BAND_ASPECT : undefined}
         />
       )}
     </>

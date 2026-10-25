@@ -27,8 +27,17 @@ export type GridSlotWithPath = {
   coverMediaAssetId: string | null;
   coverOriginalPath: string | null;
   assetCount: number;
+  // What every 3:4 Grid surface shows: the post's export framing (its chosen
+  // aspect + the cover item's frame_transform, lib/cover-framing.ts) when an
+  // aspect ratio is set, else the legacy cover crop (posts.cover_transform).
   coverTransform: CoverTransform | null;
   scheduledDate: string | null;
+  // The chosen export aspect ratio (lib/aspect-ratio.ts); null = legacy.
+  aspectRatio: AspectChoice | null;
+  // The cover's post_assets row and its own saved export framing -- what
+  // Grid's Crop edits once an aspect ratio applies.
+  coverPostAssetId: string | null;
+  coverFrameTransform: CoverTransform | null;
 };
 
 export type GridRowWithSlots = { rowId: string; slots: GridSlotWithPath[] };
@@ -75,6 +84,18 @@ export async function getGridRowsWithCoverPaths(
     transformByPostId.set(t.id, (t.cover_transform as CoverTransform | null) ?? null);
     scheduledDateByPostId.set(t.id, (t as { scheduled_date: string | null }).scheduled_date ?? null);
   }
+
+  // Isolated the same way: the aspect ratio / per-item framing columns are
+  // newer (supabase/add_post_aspect_ratio_and_frame_transform.sql) -- until
+  // they exist every post reads as legacy.
+  const { data: aspectRows } = postIds.length ? await supabase.from("posts").select("id, aspect_ratio").in("id", postIds) : { data: [] };
+  const aspectByPostId = new Map((aspectRows ?? []).map((r) => [r.id, parseAspectChoice((r as { aspect_ratio?: unknown }).aspect_ratio)]));
+  const { data: coverFrameRows } = postIds.length
+    ? await supabase.from("post_assets").select("id, post_id, frame_transform").in("post_id", postIds).eq("position", 0)
+    : { data: [] };
+  const coverFrameByPostId = new Map(
+    ((coverFrameRows ?? []) as { id: string; post_id: string; frame_transform: CoverTransform | null }[]).map((r) => [r.post_id, r]),
+  );
 
   const { data: postAssets } = postIds.length
     ? await supabase
@@ -175,6 +196,13 @@ export async function getGridRowsWithCoverPaths(
     slotsByRow.set(slot.row_id, list);
   }
 
+  function gridCoverTransform(postId: string): CoverTransform | null {
+    const aspect = aspectByPostId.get(postId) ?? null;
+    if (!aspect) return transformByPostId.get(postId) ?? null;
+    const value = aspect === "original" ? "original" : aspectValue(aspect, null);
+    return value ? (exportFraming(value, coverFrameByPostId.get(postId)?.frame_transform) as CoverTransform) : null;
+  }
+
   return (rows ?? []).map((row) => ({
     rowId: row.id,
     slots: (slotsByRow.get(row.id) ?? []).map((slot) => ({
@@ -186,8 +214,13 @@ export async function getGridRowsWithCoverPaths(
       coverMediaAssetId: slot.post_id ? coverMediaIdByPost.get(slot.post_id) ?? null : null,
       coverOriginalPath: slot.post_id ? coverOriginalPathByPost.get(slot.post_id) ?? null : null,
       assetCount: slot.post_id ? countByPost.get(slot.post_id) ?? 0 : 0,
-      coverTransform: slot.post_id ? transformByPostId.get(slot.post_id) ?? null : null,
+      coverTransform: slot.post_id ? gridCoverTransform(slot.post_id) : null,
       scheduledDate: slot.post_id ? scheduledDateByPostId.get(slot.post_id) ?? null : null,
+      aspectRatio: slot.post_id ? aspectByPostId.get(slot.post_id) ?? null : null,
+      coverPostAssetId: slot.post_id ? coverFrameByPostId.get(slot.post_id)?.id ?? null : null,
+      coverFrameTransform: slot.post_id ? coverFrameByPostId.get(slot.post_id)?.frame_transform ?? null : null,
     })),
   }));
 }
+import { aspectValue, parseAspectChoice, type AspectChoice } from "@/lib/aspect-ratio";
+import { exportFraming } from "@/lib/cover-framing";

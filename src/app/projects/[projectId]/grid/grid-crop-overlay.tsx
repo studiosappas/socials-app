@@ -620,19 +620,34 @@ function ZoomControl({
   );
 }
 
-// The Grid's 3:4 window inside a Reel's 9:16 cover frame: full width,
-// centred, fixed. Outside it is lightly dimmed -- still part of the exported
-// cover, just not shown in the Grid. Never intercepts the pointer.
+// What the Grid's 3:4 tile shows of this frame: its largest centred window
+// of the band's aspect -- full width in a taller frame (a 9:16 Reel cover),
+// full height in a wider one (4:5, 1:1, landscape). Outside it is darker:
+// still part of the export, just not shown in the Grid. Fixed; never
+// intercepts the pointer.
 function GridBandGuide({ frameWidth, frameHeight, bandAspect }: { frameWidth: number; frameHeight: number; bandAspect: number }) {
-  const bandH = Math.min(frameHeight, frameWidth / bandAspect);
-  const strip = (frameHeight - bandH) / 2;
+  const tall = frameWidth / frameHeight <= bandAspect;
+  const bandW = tall ? frameWidth : frameHeight * bandAspect;
+  const bandH = tall ? frameWidth / bandAspect : frameHeight;
+  const sx = (frameWidth - bandW) / 2;
+  const sy = (frameHeight - bandH) / 2;
+  const dim = "absolute bg-black/50";
   return (
     <div className="pointer-events-none absolute inset-0" data-grid-band-guide="">
-      <div className="absolute inset-x-0 top-0 bg-black/50" style={{ height: strip }} />
-      <div className="absolute inset-x-0 bottom-0 bg-black/50" style={{ height: strip }} />
+      {tall ? (
+        <>
+          <div className={`${dim} inset-x-0 top-0`} style={{ height: sy }} />
+          <div className={`${dim} inset-x-0 bottom-0`} style={{ height: sy }} />
+        </>
+      ) : (
+        <>
+          <div className={`${dim} inset-y-0 left-0`} style={{ width: sx }} />
+          <div className={`${dim} inset-y-0 right-0`} style={{ width: sx }} />
+        </>
+      )}
       <div
-        className="absolute inset-x-0 border-y-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
-        style={{ top: strip, height: bandH }}
+        className={`absolute border-white shadow-[0_0_0_1px_rgba(0,0,0,0.35)] ${tall ? "border-y-2" : "border-x-2"}`}
+        style={{ left: sx, top: sy, width: bandW, height: bandH }}
         data-grid-band=""
       >
         <span className="absolute left-2 top-2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] tracking-wide text-white uppercase">
@@ -767,7 +782,7 @@ export function CroppedCoverImage({
           // A Reel's 9:16 cover framing is laid out in its own 9:16 frame
           // (as wide as this box, same centre) -- this box then shows that
           // frame's centred band, same as lib/image-crop.ts renders it.
-          const layout = coverLayoutFrame(transform, frameSize);
+          const layout = coverLayoutFrame(transform, frameSize, natural);
           const baseScale = coverBaseScale(layout.w, layout.h, natural.w, natural.h);
           const zoom = Math.max(transform!.scale, minZoomForCoverage(layout.w, layout.h, natural.w, natural.h, rotation));
           const imgW = natural.w * baseScale;

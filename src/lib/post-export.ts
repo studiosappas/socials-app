@@ -3,6 +3,7 @@ import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 import { GRID_COVER_EXPORT_WIDTH, GRID_COVER_EXPORT_HEIGHT } from "@/app/projects/[projectId]/grid/grid-constants";
 import type { PostExportItem } from "@/lib/post-export-plan";
 import { isReelCoverFraming } from "@/lib/cover-framing";
+import { EXPORT_MAX_WIDTH } from "@/lib/aspect-ratio";
 
 const REEL_COVER_EXPORT_WIDTH = 1080;
 const REEL_COVER_EXPORT_HEIGHT = 1920;
@@ -41,6 +42,20 @@ export async function renderPostExportItem(
   }
   if (!source || source.length === 0) throw new PostExportError(item);
 
+  // A post with a chosen aspect ratio (posts.aspect_ratio): this item's own
+  // saved framing (post_assets.frame_transform) at that ratio -- the plan sets
+  // it on every image and on a Reel's cover image (post-export-plan.ts).
+  if (item.frame) {
+    try {
+      const a = item.frame.aspect;
+      const { scale = 1, x = 0, y = 0, rotation = 0 } = item.frame.transform ?? {};
+      const pipeline = await applyCoverTransform(source, { scale, x, y, rotation }, 1000 * a, 1000, { nativeResolution: true });
+      return await capToExportWidth(pipeline);
+    } catch (error) {
+      throw new PostExportError(item, error);
+    }
+  }
+
   // A standalone Reel's uncropped cover image that isn't 9:16 (an automatic
   // poster of a 4:5 / square / landscape video): exported as the default
   // centred 9:16 framing, at 1080x1920. A 9:16 one ships as is, and an older
@@ -51,8 +66,10 @@ export async function renderPostExportItem(
     const near = (a: number) => Math.abs(aspect / a - 1) <= 0.01;
     if (aspect && !near(9 / 16) && !near(3 / 4)) {
       try {
-        const pipeline = await applyCoverTransform(source, DEFAULT_REEL_COVER_FRAMING, REEL_COVER_EXPORT_WIDTH, REEL_COVER_EXPORT_HEIGHT);
-        return await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+        const pipeline = await applyCoverTransform(source, DEFAULT_REEL_COVER_FRAMING, REEL_COVER_EXPORT_WIDTH, REEL_COVER_EXPORT_HEIGHT, {
+          nativeResolution: true,
+        });
+        return await capToExportWidth(pipeline);
       } catch (error) {
         throw new PostExportError(item, error);
       }
@@ -63,11 +80,13 @@ export async function renderPostExportItem(
 
   try {
     // A standalone Reel's 9:16 cover framing (lib/cover-framing.ts) exports
-    // the whole 9:16 frame as the Reel's cover image, at the Reel cover size
-    // (1080x1920).
+    // the whole 9:16 frame as the Reel's cover image -- at the source's own
+    // resolution, up to 1080 wide, never upscaled.
     if (isReelCoverFraming(coverTransform)) {
-      const pipeline = await applyCoverTransform(source, coverTransform, REEL_COVER_EXPORT_WIDTH, REEL_COVER_EXPORT_HEIGHT);
-      return await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+      const pipeline = await applyCoverTransform(source, coverTransform, REEL_COVER_EXPORT_WIDTH, REEL_COVER_EXPORT_HEIGHT, {
+        nativeResolution: true,
+      });
+      return await capToExportWidth(pipeline);
     }
     // The width/height here only pin the crop's ASPECT RATIO (the Grid
     // cover's 3:4) -- nativeResolution makes applyCoverTransform return the
@@ -82,6 +101,15 @@ export async function renderPostExportItem(
   } catch (error) {
     throw new PostExportError(item, error);
   }
+}
+
+// Up to EXPORT_MAX_WIDTH wide, never upscaled: the crop arrives at the
+// source's native resolution and is only ever scaled DOWN.
+async function capToExportWidth(pipeline: import("sharp").Sharp): Promise<Buffer> {
+  const { data, info } = await pipeline.png().toBuffer({ resolveWithObject: true });
+  const out = sharp(data);
+  if (info.width > EXPORT_MAX_WIDTH) out.resize({ width: EXPORT_MAX_WIDTH });
+  return out.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
 }
 
 // All-or-nothing: the first item that can't be produced fails the whole

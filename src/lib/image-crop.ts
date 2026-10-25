@@ -7,7 +7,7 @@ import {
   minZoomForCoverage,
   normalizeRotationDeg,
 } from "./crop-geometry";
-import { coverLayoutFrame, isReelCoverFraming } from "./cover-framing";
+import { coverLayoutFrame, isExportFraming, isReelCoverFraming } from "./cover-framing";
 
 // rotation: an arbitrary degree value (freeform, not quantized) -- see
 // grid-crop-overlay.tsx for the client-side editor this mirrors. Optional,
@@ -58,26 +58,29 @@ export async function applyCoverTransform(
     return sharp(buffer).resize(targetW, targetH, { fit: "cover", position: "centre" });
   }
 
-  // A Reel's 9:16 cover framing (lib/cover-framing.ts): laid out in a 9:16
-  // frame as wide as this target, sharing its centre -- so a 3:4 target (a
-  // Grid cell, a PDF thumb) gets exactly that frame's centred band, and a
-  // 9:16 target the whole frame. Rendered as the full frame, then the band
-  // cut out of it.
-  if (isReelCoverFraming(transform)) {
-    const frame = coverLayoutFrame(transform, { w: targetW, h: targetH });
-    if (Math.abs(frame.h - targetH) > 0.5) {
-      const { scale, x, y, rotation } = transform;
-      const full = await (await applyCoverTransform(buffer, { scale, x, y, rotation }, targetW, Math.round(frame.h), options))
-        .png()
-        .toBuffer({ resolveWithObject: true });
-      const bandH = Math.min(full.info.height, Math.round((full.info.width * targetH) / targetW));
-      return sharp(full.data).extract({
-        left: 0,
-        top: Math.round((full.info.height - bandH) / 2),
-        width: full.info.width,
-        height: bandH,
-      });
+  // A framing with its own frame (lib/cover-framing.ts: a Reel's 9:16 cover
+  // framing, a post's export framing at its chosen aspect): laid out in that
+  // frame, scaled to just cover this target and sharing its centre -- so a
+  // 3:4 target (a Grid cell, a PDF thumb) gets exactly the frame's centred
+  // 3:4 window, and a target of the frame's own shape the whole frame.
+  // Rendered as the full frame, then that window cut out of it.
+  if (isReelCoverFraming(transform) || isExportFraming(transform)) {
+    const meta = await sharp(buffer).metadata();
+    const natural = meta.width && meta.height ? { w: meta.width, h: meta.height } : null;
+    const frame = coverLayoutFrame(transform, { w: targetW, h: targetH }, natural);
+    const { scale, x, y, rotation } = transform as CoverTransform;
+    const plain = { scale, x, y, rotation };
+    if (Math.abs(frame.w - targetW) <= 0.5 && Math.abs(frame.h - targetH) <= 0.5) {
+      return applyCoverTransform(buffer, plain, targetW, targetH, options);
     }
+    const full = await (await applyCoverTransform(buffer, plain, Math.round(frame.w), Math.round(frame.h), options))
+      .png()
+      .toBuffer({ resolveWithObject: true });
+    const fw = full.info.width;
+    const fh = full.info.height;
+    const winW = Math.min(fw, Math.round((fh * targetW) / targetH));
+    const winH = Math.min(fh, Math.round((fw * targetH) / targetW));
+    return sharp(full.data).extract({ left: Math.round((fw - winW) / 2), top: Math.round((fh - winH) / 2), width: winW, height: winH });
   }
 
   const { width: naturalW, height: naturalH } = await sharp(buffer).metadata();

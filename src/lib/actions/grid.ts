@@ -556,6 +556,9 @@ export async function placeMediaInSlot(
       }
 
       await supabase.from("posts").update({ cover_transform: null }).eq("id", postId);
+      // The kept row now holds different media: its own framing goes (the
+      // post's aspect ratio stays). Own statement -- see replacePostAsset.
+      await supabase.from("post_assets").update({ frame_transform: null }).eq("id", keepRow.id);
       await syncPostType(supabase, postId);
       return { postId, mediaAssetId: assetIdToUse };
     }

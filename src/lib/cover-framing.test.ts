@@ -11,6 +11,7 @@ import {
   coverFramingKind,
   coverLayoutFrame,
   exportCoverFraming,
+  exportFraming,
   isGridPreviewFraming,
   isReelCoverFraming,
   markCoverFraming,
@@ -147,6 +148,16 @@ test("sameFraming ignores the marker: an UNCHANGED crop is never rewritten, what
   // a real change is a new crop (written with the cover kind's marker)
   assert.equal(sameFraming({ ...t, x: 0.2 }, { ...t, scope: "reel-cover", scopeVersion: 1 }), false);
   assert.equal(sameFraming(null, t), false, "cropping a never-framed cover");
+});
+
+test("export framing: the 3:4 Grid box shows the frame's largest centred 3:4 window -- band of a taller frame, full height of a wider one", () => {
+  const box = { w: 300, h: 400 };
+  assert.deepEqual(coverLayoutFrame(exportFraming(9 / 16, null), box), { w: 300, h: 300 / (9 / 16) });
+  assert.deepEqual(coverLayoutFrame(exportFraming(1, null), box), { w: 400, h: 400 }, "1:1 -> full height, sides cut");
+  assert.deepEqual(coverLayoutFrame(exportFraming(4 / 5, null), box), { w: 320, h: 400 }, "4:5 -> full height");
+  assert.deepEqual(coverLayoutFrame(exportFraming("original", null), box, { w: 768, h: 480 }), { w: 640, h: 400 }, "original = the image's own");
+  assert.deepEqual(coverLayoutFrame(exportFraming("original", null), box, null), box, "original, size unknown -> the box");
+  assert.deepEqual(coverLayoutFrame(exportFraming(4 / 5, null), { w: 800, h: 1000 }), { w: 800, h: 1000 }, "its own shape: all of it");
 });
 
 console.log(`\n${passed} tests passed`);

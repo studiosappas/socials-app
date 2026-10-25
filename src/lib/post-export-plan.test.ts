@@ -12,6 +12,7 @@ import {
   planPostExport,
   postExportUrl,
   videoCoverDownloadSource,
+  withAspectFrames,
   type PostExportAsset,
 } from "./post-export-plan.ts";
 
@@ -245,13 +246,12 @@ const videoShown = (coverEdited: boolean | undefined, annotationJson: object | n
   coverEdited,
 });
 
-test("client: a standalone Reel's edited cover image comes straight from storage", () => {
-  assert.deepEqual(videoCoverDownloadSource(videoShown(true), true, null, 1, "p", "q"), { url: "https://s/poster.jpg", viaServer: false });
-  // edited state read from saved annotation_json when the session didn't set it
-  assert.deepEqual(videoCoverDownloadSource(videoShown(undefined, { objects: [] }), true, null, 1, "p", "q"), {
-    url: "https://s/poster.jpg",
-    viaServer: false,
-  });
+test("client: a standalone Reel's edited cover image always comes from the export route (which renders its ratio)", () => {
+  for (const shown of [videoShown(true), videoShown(undefined, { objects: [] })]) {
+    const s = videoCoverDownloadSource(shown, true, null, 1, "p", "q");
+    assert.equal(s?.viaServer, true);
+    assert.match(s?.url ?? "", /part=cover-image/);
+  }
 });
 
 test("client: no 'Download Cover Image' for a video inside a carousel, at any position, edited or framed", () => {
@@ -275,8 +275,10 @@ test("client: a framed Reel cover's image is rendered by the export route, edite
   }
 });
 
-test("client: a standalone Reel's AUTOMATIC poster downloads as its cover image, straight from storage", () => {
-  assert.deepEqual(videoCoverDownloadSource(videoShown(false), true, null, 1, "p", "q"), { url: "https://s/poster.jpg", viaServer: false });
+test("client: a standalone Reel's AUTOMATIC poster downloads as its cover image, via the export route", () => {
+  const s = videoCoverDownloadSource(videoShown(false), true, null, 1, "p", "q");
+  assert.equal(s?.viaServer, true);
+  assert.match(s?.url ?? "", /part=cover-image/);
 });
 
 test("client: no cover image for images, or videos without a poster", () => {
@@ -316,10 +318,36 @@ test("client and server agree on which video cover images exist and which are re
         const where = `framing ${Boolean(framing)}, edited ${coverEdited}, layout ${layout}`;
         if (layout !== "reel") assert.equal(serverCover, undefined, where);
         assert.equal(Boolean(serverCover), Boolean(clientCover), where);
-        if (serverCover && clientCover) assert.equal(clientCover.viaServer, serverCover.operation === "cover-crop", where);
+        // a standalone Reel's cover image always comes from the route, which decides how to render it
+        if (serverCover && clientCover) assert.equal(clientCover.viaServer, true, where);
       }
     }
   }
+});
+
+test("withAspectFrames: every IMAGE and a Reel's cover image get the ratio + their own frame (.jpg); videos untouched", () => {
+  const img = (id: string): PostExportAsset => ({ postAssetId: id, mediaType: "image", storagePath: `p/${id}.png`, previewPath: null });
+  const vid: PostExportAsset = { postAssetId: "v", mediaType: "video", storagePath: "p/v.mp4", previewPath: null, posterPath: "p/v.jpg" };
+  const carousel = [img("a"), vid, img("b")];
+  const frames = new Map([["b", { scale: 1.2, x: 0.1, y: 0 }]]);
+  const out = withAspectFrames(planPostExport(carousel, null, "edited"), carousel, 0.8, frames);
+  assert.deepEqual(
+    out.map((i) => [i.filename, i.frame ? [i.frame.aspect, i.frame.transform] : null]),
+    [
+      ["cover.jpg", [0.8, null]],
+      ["slide-2.mp4", null],
+      ["slide-3.jpg", [0.8, { scale: 1.2, x: 0.1, y: 0 }]],
+    ],
+  );
+  const reel = [vid];
+  const r = withAspectFrames(planPostExport(reel, null, "edited"), reel, 9 / 16, new Map([["v", { scale: 1.5, x: 0, y: 0.1 }]]));
+  assert.deepEqual(
+    r.map((i) => [i.filename, i.frame?.transform ?? null]),
+    [
+      ["cover.mp4", null],
+      ["cover-image.jpg", { scale: 1.5, x: 0, y: 0.1 }],
+    ],
+  );
 });
 
 console.log(`\n${passed} tests passed`);

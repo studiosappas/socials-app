@@ -18,6 +18,7 @@ import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import type { LibraryPage } from "@/lib/media-library-paging";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
+import { parseAspectChoice, type AspectChoice } from "@/lib/aspect-ratio";
 
 export type UpdatePostState = { message?: string } | undefined;
 
@@ -494,6 +495,11 @@ export async function replacePostAsset(
     .eq("id", postAssetId);
   if (updateError) return { message: updateError.message };
 
+  // The replaced item's own framing belonged to the old media (the post's
+  // chosen aspect ratio stays). Its own statement: a not-yet-migrated
+  // database just has nothing to clear.
+  await supabase.from("post_assets").update({ frame_transform: null }).eq("id", postAssetId);
+
   if (existingRow?.position === 0) {
     await supabase.from("posts").update({ cover_transform: null }).eq("id", postId);
   }
@@ -556,4 +562,35 @@ export async function removePostLink(projectId: string, postId: string, linkId: 
   await supabase.from("post_links").delete().eq("id", linkId);
   // Not revalidating -- its one caller (PostLinks' remove button) already
   // calls router.refresh() itself right after this resolves.
+}
+
+// The post's chosen export aspect ratio (posts.aspect_ratio, lib/aspect-ratio.ts)
+// -- written only by an explicit choice (the selector, or Apply in a crop
+// editor), never by opening/closing one. null clears it back to legacy.
+export async function setPostAspectRatio(projectId: string, postId: string, choice: AspectChoice | null) {
+  const value = choice === null ? null : parseAspectChoice(choice);
+  if (choice !== null && !value) throw new Error("Unknown aspect ratio.");
+  const supabase = await createClient();
+  const { error } = await supabase.from("posts").update({ aspect_ratio: value }).eq("id", postId).eq("project_id", projectId);
+  if (error) throw new Error(error.message);
+}
+
+// One item's own export framing inside the post's ratio
+// (post_assets.frame_transform) -- non-destructive, written on Apply.
+export async function updatePostAssetFrameTransform(
+  projectId: string,
+  postId: string,
+  postAssetId: string,
+  transform: { scale: number; x: number; y: number; rotation?: number } | null,
+) {
+  const clean =
+    transform === null
+      ? null
+      : { scale: Number(transform.scale), x: Number(transform.x), y: Number(transform.y), rotation: Number(transform.rotation ?? 0) };
+  if (clean && !Object.values(clean).every(Number.isFinite)) throw new Error("Invalid framing.");
+  const supabase = await createClient();
+  const { data: post } = await supabase.from("posts").select("id").eq("id", postId).eq("project_id", projectId).maybeSingle();
+  if (!post) throw new Error("This post no longer exists.");
+  const { error } = await supabase.from("post_assets").update({ frame_transform: clean }).eq("id", postAssetId).eq("post_id", postId);
+  if (error) throw new Error(error.message);
 }

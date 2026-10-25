@@ -3,7 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 import { effectivePostType } from "@/lib/post-type";
-import { exportCoverFraming } from "@/lib/cover-framing";
+import { exportCoverFraming, exportFraming } from "@/lib/cover-framing";
+import { aspectValue, parseAspectChoice } from "@/lib/aspect-ratio";
 import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
 
 const PAGE_W = 612; // US Letter, points
@@ -127,8 +128,20 @@ export async function GET(
     entry.count += 1;
     assetsPerPost.set(pa.post_id, entry);
   }
+  // A post with a chosen aspect ratio shows its export framing's centred 3:4
+  // window instead, same as its Grid tile (lib/grid-data.ts). Newer columns,
+  // isolated: until they exist every post is legacy.
+  const { data: aspectRows } = await supabase.from("posts").select("id, aspect_ratio").in("id", orderedPostIds);
+  const aspectByPostId = new Map((aspectRows ?? []).map((r) => [r.id, parseAspectChoice((r as { aspect_ratio?: unknown }).aspect_ratio)]));
+  const { data: coverFrameRows } = await supabase.from("post_assets").select("post_id, frame_transform").in("post_id", orderedPostIds).eq("position", 0);
+  const coverFrameByPostId = new Map(
+    ((coverFrameRows ?? []) as { post_id: string; frame_transform: CoverTransform | null }[]).map((r) => [r.post_id, r.frame_transform]),
+  );
   const coverTransformByPostId = new Map(
     orderedPostIds.map((id) => {
+      const choice = aspectByPostId.get(id) ?? null;
+      const value = choice === "original" ? "original" : choice ? aspectValue(choice, null) : null;
+      if (value) return [id, exportFraming(value, coverFrameByPostId.get(id)) as CoverTransform];
       const a = assetsPerPost.get(id);
       return [id, exportCoverFraming(storedCoverTransformByPostId.get(id) ?? null, a?.count === 1 && a.firstType === "video")];
     }),

@@ -47,6 +47,7 @@
     "src/lib/media-aspect.test.ts",
     "src/lib/cover-framing.test.ts",
     "src/lib/native-share-device.test.ts",
+    "src/lib/aspect-ratio.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }

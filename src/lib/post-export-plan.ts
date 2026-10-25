@@ -67,6 +67,10 @@ export type PostExportItem = {
   operation: "verbatim" | "cover-crop";
   // Name inside the zip / of the single downloaded file.
   filename: string;
+  // A post with a chosen aspect ratio: render this image at that aspect (w/h)
+  // with its own saved framing (post_assets.frame_transform) -- see
+  // withAspectFrames below.
+  frame?: { aspect: number; transform: { scale: number; x: number; y: number; rotation?: number } | null };
 };
 
 export function parseExportVariant(value: string | null | undefined): PostExportVariant {
@@ -186,6 +190,31 @@ export function postExportUrl(
 // Where ONE asset's edited result comes from, mirroring planPostExport: the
 // only case a browser can't satisfy from a URL it already holds is the
 // cover image with a saved Grid framing, which the export route renders.
+// A post with a chosen aspect ratio (posts.aspect_ratio, lib/aspect-ratio.ts):
+// every IMAGE item and a standalone Reel's cover image are rendered at that
+// aspect with their own saved framing (post_assets.frame_transform; none =
+// centred). Videos are untouched -- their files ship byte-for-byte.
+// `aspect` is the resolved w/h ("original" already resolved by the caller
+// from the first item's source). Pure: the route and the regression check
+// both use it.
+export function withAspectFrames(
+  items: PostExportItem[],
+  assets: PostExportAsset[],
+  aspect: number,
+  frames: ReadonlyMap<string, { scale: number; x: number; y: number; rotation?: number } | null>,
+): PostExportItem[] {
+  const typeById = new Map(assets.map((a) => [a.postAssetId, a.mediaType]));
+  return items.map((item) => {
+    const isImage = item.part === "media" && typeById.get(item.postAssetId) === "image";
+    if (!isImage && item.part !== "cover-image") return item;
+    return {
+      ...item,
+      filename: item.filename.replace(/.[^.]+$/, ".jpg"),
+      frame: { aspect, transform: frames.get(item.postAssetId) ?? null },
+    };
+  });
+}
+
 export function editedDownloadSource(
   asset: DownloadableAsset,
   isCover: boolean,

@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { parseAspectChoice, type AspectChoice } from "@/lib/aspect-ratio";
+type FrameTransform = { scale: number; x: number; y: number; rotation?: number };
 import type { MediaLibraryItem, GridCoverTransform } from "@/app/projects/[projectId]/grid/grid-board";
 import type { PostAssetItem, PostLinkItem } from "@/app/projects/[projectId]/posts/[postId]/post-editor";
 import { getProjectMemberOptions, type ProjectMemberOption } from "@/lib/data/post-comments";
@@ -30,6 +32,8 @@ export type PostCoreData = {
     // same value Grid's own crop tool reads/writes (updatePostCoverTransform),
     // now also the post editor's cover tile and its own Crop action.
     coverTransform: GridCoverTransform | null;
+    // The chosen export aspect ratio (lib/aspect-ratio.ts); null = legacy.
+    aspectRatio: AspectChoice | null;
   };
   assets: PostAssetItem[];
   links: PostLinkItem[];
@@ -66,6 +70,8 @@ export async function getPostCoreData(
     timeRowResult,
     reviewStatusRowResult,
     coverTransformRowResult,
+    aspectRowResult,
+    frameRowsResult,
     postAssetsResult,
     linksResult,
     members,
@@ -84,6 +90,11 @@ export async function getPostCoreData(
     // Isolated the same way -- the one canonical cover crop, same column
     // Grid's own crop tool reads/writes.
     supabase.from("posts").select("cover_transform").eq("id", postId).maybeSingle(),
+    // Isolated the same way -- the aspect ratio / per-item framing columns are
+    // newer (supabase/add_post_aspect_ratio_and_frame_transform.sql): until
+    // they exist these just read as null, i.e. legacy behaviour.
+    supabase.from("posts").select("aspect_ratio").eq("id", postId).maybeSingle(),
+    supabase.from("post_assets").select("id, frame_transform").eq("post_id", postId),
     supabase
       .from("post_assets")
       .select("id, position, media_assets(id, storage_path, media_type)")
@@ -102,6 +113,10 @@ export async function getPostCoreData(
   const timeRow = timeRowResult.data;
   const reviewStatusRow = reviewStatusRowResult.data;
   const coverTransformRow = coverTransformRowResult.data;
+  const aspectRatio = parseAspectChoice((aspectRowResult.data as { aspect_ratio?: unknown } | null)?.aspect_ratio);
+  const frameByPostAssetId = new Map(
+    ((frameRowsResult.data ?? []) as { id: string; frame_transform: FrameTransform | null }[]).map((r) => [r.id, r.frame_transform ?? null]),
+  );
   const postAssets = postAssetsResult.data;
   const links = linksResult.data;
   const customFonts = deriveCustomFontFaces(brandMoodboard);
@@ -186,6 +201,7 @@ export async function getPostCoreData(
       annotationJson: preview?.annotationJson ?? null,
       mediaType: (media?.media_type as "image" | "video") ?? "image",
       posterUrl: media ? (posterPathByMediaId.get(media.id) ? urlByPath.get(posterPathByMediaId.get(media.id)!) ?? null : null) : null,
+      frameTransform: frameByPostAssetId.get(pa.id) ?? null,
     };
   });
 
@@ -201,6 +217,7 @@ export async function getPostCoreData(
       scheduled_time: timeRow?.scheduled_time ?? null,
       review_status: reviewStatusRow?.review_status ?? "pending",
       coverTransform: (coverTransformRow?.cover_transform as GridCoverTransform | null) ?? null,
+      aspectRatio,
     },
     assets,
     links: postLinks,

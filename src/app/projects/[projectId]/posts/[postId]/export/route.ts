@@ -1,7 +1,9 @@
 import JSZip from "jszip";
 import { createClient } from "@/lib/supabase/server";
 import type { CoverTransform } from "@/lib/image-crop";
-import { parseExportPart, parseExportVariant, planPostExport, type PostExportAsset } from "@/lib/post-export-plan";
+import { parseExportPart, parseExportVariant, planPostExport, withAspectFrames, type PostExportAsset } from "@/lib/post-export-plan";
+import { aspectValue, parseAspectChoice } from "@/lib/aspect-ratio";
+import sharp from "sharp";
 import { PostExportError, contentTypeForFilename, renderPostExport } from "@/lib/post-export";
 import { exportCoverFraming } from "@/lib/cover-framing";
 
@@ -77,6 +79,12 @@ export async function GET(
   // just means the cover exports unframed, not that the whole export fails.
   const { data: postRow } = await supabase.from("posts").select("cover_transform").eq("id", postId).maybeSingle();
   const storedCoverTransform = (postRow?.cover_transform as CoverTransform | null) ?? null;
+  // The post's chosen export aspect ratio and each item's own framing --
+  // isolated the same way (newer columns: until they exist, legacy).
+  const { data: aspectRow } = await supabase.from("posts").select("aspect_ratio").eq("id", postId).maybeSingle();
+  const aspectChoice = parseAspectChoice((aspectRow as { aspect_ratio?: unknown } | null)?.aspect_ratio);
+  const { data: frameRows } = await supabase.from("post_assets").select("id, frame_transform").eq("post_id", postId);
+  const frames = new Map(((frameRows ?? []) as { id: string; frame_transform: CoverTransform | null }[]).map((r) => [r.id, r.frame_transform ?? null]));
 
   const { data: postAssets, error: postAssetsError } = await supabase
     .from("post_assets")
@@ -158,7 +166,33 @@ export async function GET(
   const coverIsReel = assets.length === 1 && assets[0].mediaType === "video";
   const coverTransform = exportCoverFraming(storedCoverTransform, coverIsReel);
 
-  let plan = planPostExport(assets, coverTransform, variant);
+  const download = async (storagePath: string) => {
+    const { data, error } = await supabase.storage.from("project-media").download(storagePath);
+    if (error || !data) throw error ?? new Error("empty storage response");
+    return Buffer.from(await data.arrayBuffer());
+  };
+
+  // A chosen aspect ratio: every image (and a Reel's cover image) at that
+  // ratio with its own framing; the legacy cover crop no longer applies.
+  // "Original" = the first item's own image (its saved edit, the original,
+  // or a video's cover image).
+  let aspect: number | null = null;
+  if (aspectChoice && variant === "edited") {
+    if (aspectChoice === "original") {
+      const first = assets[0];
+      const firstPath = first.mediaType === "video" ? first.posterPath : (first.previewPath ?? first.storagePath);
+      try {
+        const meta = firstPath ? await sharp(await download(firstPath)).metadata() : null;
+        aspect = meta?.width && meta?.height ? meta.width / meta.height : null;
+      } catch {
+        aspect = null;
+      }
+    } else {
+      aspect = aspectValue(aspectChoice, null);
+    }
+  }
+
+  let plan = aspect ? withAspectFrames(planPostExport(assets, null, variant), assets, aspect, frames) : planPostExport(assets, coverTransform, variant);
   if (onlyAssetId) {
     plan = plan.filter((item) => item.postAssetId === onlyAssetId && item.part === onlyPart);
     if (plan.length === 0) return errorResponse(404, "That item is no longer part of this post. Please refresh and try again.");
@@ -166,16 +200,7 @@ export async function GET(
 
   let rendered;
   try {
-    rendered = await renderPostExport(
-      plan,
-      coverTransform,
-      async (storagePath) => {
-        const { data, error } = await supabase.storage.from("project-media").download(storagePath);
-        if (error || !data) throw error ?? new Error("empty storage response");
-        return Buffer.from(await data.arrayBuffer());
-      },
-      { reelCover: coverIsReel },
-    );
+    rendered = await renderPostExport(plan, aspect ? null : coverTransform, download, { reelCover: coverIsReel && !aspect });
   } catch (error) {
     if (error instanceof PostExportError) {
       console.error("[post-export] item failed", { postId, variant, message: error.message, cause: String(error.cause ?? "") });
