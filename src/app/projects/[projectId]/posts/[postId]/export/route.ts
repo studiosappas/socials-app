@@ -183,7 +183,9 @@ export async function GET(
       const firstPath = first.mediaType === "video" ? first.posterPath : (first.previewPath ?? first.storagePath);
       try {
         const meta = firstPath ? await sharp(await download(firstPath)).metadata() : null;
-        aspect = meta?.width && meta?.height ? meta.width / meta.height : null;
+        // the DISPLAYED size (EXIF orientation applied), as the editor sees it
+        const shown = meta?.autoOrient;
+        aspect = shown?.width && shown?.height ? shown.width / shown.height : null;
       } catch {
         aspect = null;
       }

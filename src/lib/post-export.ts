@@ -61,7 +61,7 @@ export async function renderPostExportItem(
   // centred 9:16 framing, at 1080x1920. A 9:16 one ships as is, and an older
   // 3:4 Reel cover keeps its 3:4 export.
   if (options?.reelCover && item.part === "cover-image" && item.operation === "verbatim") {
-    const { width, height } = await sharp(source).metadata();
+    const { width, height } = (await sharp(source).metadata()).autoOrient;
     const aspect = width && height ? width / height : 0;
     const near = (a: number) => Math.abs(aspect / a - 1) <= 0.01;
     if (aspect && !near(9 / 16) && !near(3 / 4)) {

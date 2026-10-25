@@ -40,6 +40,14 @@ export type CoverTransform = { scale: number; x: number; y: number; rotation?: n
 // regardless of what targetW/targetH are. Returns an unfinished sharp
 // pipeline so each caller can apply its own final format (raw pixels for
 // compositing, jpeg for a standalone file).
+// A phone photo is often stored sideways with an EXIF orientation tag that
+// viewers apply; sharp reads (and, stripping the tag, writes) the STORED
+// pixels. Bakes the orientation in, losslessly, only when there is one.
+export async function uprightImage(buffer: Buffer): Promise<Buffer> {
+  const { orientation } = await sharp(buffer).metadata();
+  return orientation && orientation > 1 ? sharp(buffer).rotate().png({ compressionLevel: 1 }).toBuffer() : buffer;
+}
+
 export async function applyCoverTransform(
   buffer: Buffer,
   transform: CoverTransform | null,
@@ -54,6 +62,9 @@ export async function applyCoverTransform(
     nativeResolution?: boolean;
   },
 ): Promise<Sharp> {
+  // Everything below works in the image as DISPLAYED -- the editor (a
+  // browser <img>) honours EXIF orientation; sharp does not unless asked.
+  buffer = await uprightImage(buffer);
   if (!transform) {
     return sharp(buffer).resize(targetW, targetH, { fit: "cover", position: "centre" });
   }

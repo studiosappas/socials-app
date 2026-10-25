@@ -92,6 +92,10 @@ function fixtures() {
     for (let i = 0; i < video.length; i++) video[i] = (i * 17 + 3) % 251;
     m.set("p/reel.mp4", video);
     m.set("p/slide.png", await sharp({ create: { width: 1080, height: 1350, channels: 3, background: "#336699" } }).png().toBuffer());
+    // a phone photo: STORED 400x300 (left half red, right blue) + EXIF orientation 6,
+    // so it DISPLAYS as a 300x400 portrait, red on top
+    const red = await sharp({ create: { width: 200, height: 300, channels: 3, background: "#ff0000" } }).png().toBuffer();
+    m.set("p/exif-6.jpg", await sharp({ create: { width: 400, height: 300, channels: 3, background: "#0000ff" } }).composite([{ input: red, left: 0, top: 0 }]).jpeg({ quality: 97 }).withMetadata({ orientation: 6 }).toBuffer());
     return m;
   })();
   return cache;
@@ -119,6 +123,7 @@ export async function GET(request: Request) {
   const assets =
     layout === "carousel" ? [V, I]
     : layout === "post" ? [P("pa-i", url.searchParams.get("poster") ?? "img-768x480.jpg")]
+    : layout === "carousel-exif" ? [P("pa-1", "auto-square.jpg"), P("pa-2", "exif-6.jpg")]
     : layout === "carousel3" ? [P("pa-1", "auto-landscape.jpg"), V, P("pa-3", "auto-square.jpg")]
     : [V];
   // exactly what posts/[postId]/export/route.ts does with the stored crop
@@ -130,7 +135,7 @@ export async function GET(request: Request) {
   if (choice === "original") {
     const first = assets[0];
     const meta = await sharp(files.get(first.mediaType === "video" ? first.posterPath! : first.storagePath)!).metadata();
-    aspect = meta.width! / meta.height!;
+    aspect = meta.autoOrient.width / meta.autoOrient.height;
   } else if (choice) aspect = aspectValue(choice, null);
   const coverTransform = aspect ? null : exportCoverFraming(t, coverIsReel);
   let plan = aspect ? withAspectFrames(planPostExport(assets, null, "edited"), assets, aspect, frames) : planPostExport(assets, coverTransform, "edited");
@@ -736,6 +741,20 @@ async function partE() {
     assert.equal(sha(z.files["slide-2.mp4"]), sha((await route("fixture=p/reel.mp4")).buf));
     const [w3, h3] = await dims(z.files["slide-3.jpg"]);
     await assertFraming(z.files["slide-3.jpg"], "auto-square.jpg", (u, v) => sourceAt("auto-square.jpg", t3, { w: w3, h: h3 }, u, v), { w: w3, h: h3 }, "slide 3");
+  });
+  await check("E. Carousel at 4:5: slide 2, a phone photo with EXIF orientation 6, keeps its upright orientation (red on top)", async () => {
+    const z = await zipOf("assets=carousel-exif&aspect=4:5");
+    assert.deepEqual(z.names, ["cover.jpg", "slide-2.jpg"]);
+    const { data, info } = await sharp(z.files["slide-2.jpg"]).raw().toBuffer({ resolveWithObject: true });
+    const px = (u, v) => { const i = (Math.floor(v * (info.height - 1)) * info.width + Math.floor(u * (info.width - 1))) * info.channels; return [data[i], data[i + 1], data[i + 2]]; };
+    assert.ok(Math.abs(info.width / info.height - 0.8) < 0.01, `${info.width}x${info.height}`);
+    const [top, bottom] = [px(0.5, 0.1), px(0.5, 0.9)];
+    assert.ok(top[0] > 200 && top[2] < 60 && bottom[2] > 200 && bottom[0] < 60, `top ${top} bottom ${bottom} (${info.width}x${info.height})`);
+  });
+  await check("E. Original from an EXIF-rotated first image uses its DISPLAYED 3:4 ratio, upright", async () => {
+    const z = await zipOf("assets=post&poster=exif-6.jpg&aspect=original");
+    const { width, height } = await sharp(z.files["cover.jpg"]).metadata();
+    assert.deepEqual([width, height], [300, 400]);
   });
   await check("E. the Grid's 3:4 tile of a 1:1 post = the centred 3:4 window of the exported square (Grid stays 3:4)", async () => {
     const t = { scale: 1.2, x: 0.05, y: 0 };
