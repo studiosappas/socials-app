@@ -866,22 +866,26 @@ try {
   fs.writeFileSync(path.join(HARNESS_DIR, "grid", "page.tsx"), GRID);
   server = spawn(`npx next dev --port ${PORT}`, { cwd: ROOT, shell: true, stdio: "ignore" });
   await waitForServer(`${BASE}/files?fixture=p/slide.png`, 300000);
-  await partA();
-  await partE();
+  // ONLY=EF (etc.) runs just those parts
+  const on = (p) => !process.env.ONLY || process.env.ONLY.includes(p);
+  if (on("A")) await partA();
+  if (on("E")) await partE();
   const cr = await chromium.launch();
   browsers.push(cr);
   const media = { "reel.webm": [await recordVideo(cr), "video/webm"], "slide.png": [(await route("fixture=p/slide.png")).buf, "image/png"] };
   for (const name of Object.keys(POSTERS)) media[name] = [(await route(`fixture=p/${name}`)).buf, "image/jpeg"];
-  await guarded("B. chromium", () => partB("chromium", cr, media));
-  await guarded("C. chromium", () => partC(cr, media));
-  await guarded("D. chromium", () => partD("chromium", cr, media));
-  await guarded("F. chromium", () => partF(cr, media));
+  if (on("B")) await guarded("B. chromium", () => partB("chromium", cr, media));
+  if (on("C")) await guarded("C. chromium", () => partC(cr, media));
+  if (on("D")) await guarded("D. chromium", () => partD("chromium", cr, media));
+  if (on("F")) await guarded("F. chromium", () => partF(cr, media));
+  if (on("B") || on("D")) {
   const wk = await webkit.launch();
   browsers.push(wk);
-  await guarded("B. webkit", () => partB("webkit", wk, media));
-  await guarded("D. webkit", () => partD("webkit", wk, media));
+  if (on("B")) await guarded("B. webkit", () => partB("webkit", wk, media));
+  if (on("D")) await guarded("D. webkit", () => partD("webkit", wk, media));
   skipped += 2;
   console.log("SKIP - webkit: C. Edit Cover keep/reset + reopen (this browser build can't decode the WebM fixture the frame picker needs)");
+  }
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
   if (server?.pid) {
