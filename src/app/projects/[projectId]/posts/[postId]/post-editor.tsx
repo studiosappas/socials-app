@@ -122,10 +122,6 @@ type EditingImage = {
   // Position 0 in the post's own asset order is its cover -- saving it
   // resets the cover's Grid framing (see handleAnnotationSaved).
   isCover: boolean;
-  // The frame a NEW edit is built at (lib/media-aspect.ts): 4:5 for feed
-  // posts and every carousel item, 9:16 for a standalone Reel's cover. A
-  // SAVED edit reopens at its own saved frame regardless (AnnotationEditor).
-  targetAspect: { w: number; h: number };
 };
 
 type PostRecord = {
@@ -709,8 +705,6 @@ export function PostEditor({
                       annotationJson: asset.annotationJson,
                       mediaType: asset.mediaType,
                       isCover: index === 0,
-                      // the post's aspect ratio when one applies, else the legacy rule
-                      targetAspect: editorAspect(editorChoice, firstAspect) ?? newEditAspect(asset.mediaType, orderedAssets.length),
                     })
                   }
                 />
@@ -808,7 +802,27 @@ export function PostEditor({
         imageUrl={editingImage?.imageUrl ?? null}
         initialAnnotationJson={editingImage?.annotationJson ?? null}
         mediaType={editingImage?.mediaType}
-        targetAspect={editingImage?.targetAspect}
+        // Live, from the post's ratio (the one source of truth): the
+        // selector inside the editor changes it, and the editor follows.
+        targetAspect={
+          editingImage ? (editorAspect(editorChoice, firstAspect) ?? newEditAspect(editingImage.mediaType, orderedAssets.length)) : undefined
+        }
+        renderAspectSelector={
+          canManage
+            ? (guard) => (
+                <AspectRatioSelector
+                  kind={aspectKind}
+                  selected={editorChoice}
+                  stored={storedAspect !== null}
+                  disabled={false}
+                  warning={null}
+                  inEditor
+                  note={orderedAssets.length > 1 ? "Changes the whole post: every image in this carousel" : "Changes the whole post"}
+                  onSelect={(choice) => guard(() => void handleAspectChoice(choice))}
+                />
+              )
+            : undefined
+        }
         onClose={() => setEditingImage(null)}
         onSaved={handleAnnotationSaved}
         saveAction={editingImage?.mediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation}
@@ -1214,6 +1228,8 @@ function AspectRatioSelector({
   stored,
   disabled,
   warning,
+  inEditor = false,
+  note,
   onSelect,
 }: {
   kind: AspectPostKind;
@@ -1221,11 +1237,15 @@ function AspectRatioSelector({
   stored: boolean;
   disabled: boolean;
   warning: string | null;
+  // Edit Image's one-line copy of this control (see AnnotationEditor's
+  // renderAspectSelector): no wrapping, plus a note on what it changes.
+  inEditor?: boolean;
+  note?: string;
   onSelect: (choice: AspectChoice) => void;
 }) {
   return (
-    <div className="mb-2 flex flex-col gap-1" data-aspect-selector="">
-      <div className="flex flex-wrap items-center gap-1.5">
+    <div className={inEditor ? "flex shrink-0 items-center" : "mb-2 flex flex-col gap-1"} data-aspect-selector={inEditor ? "editor" : ""}>
+      <div className={`flex items-center gap-1.5 ${inEditor ? "flex-nowrap whitespace-nowrap" : "flex-wrap"}`}>
         <span className="mr-1 text-[11px] tracking-wide text-muted uppercase">{kind === "reel" ? "Cover ratio" : "Aspect ratio"}</span>
         {aspectOptions(kind).map((choice) => (
           <button
@@ -1244,6 +1264,7 @@ function AspectRatioSelector({
         ))}
         {!selected && <span className="text-[11px] text-muted">As uploaded (no ratio chosen)</span>}
         {selected && !stored && <span className="text-[11px] text-muted">default -- applied on Crop</span>}
+        {note && <span className="ml-1 text-[11px] text-muted">{note}</span>}
       </div>
       {warning && <p className="text-[11px] text-amber-700 dark:text-amber-400">{warning}</p>}
     </div>

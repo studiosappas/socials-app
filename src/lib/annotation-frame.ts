@@ -172,6 +172,26 @@ export function rescaleAnnotationJson<T extends object>(annotationJson: T, ratio
 
 const near = (a: number, b: number) => Math.abs(a / b - 1) <= SAME_ASPECT_TOLERANCE;
 
+// "4:5", "16:9", ... for a frame aspect; anything else as "1.60:1".
+const KNOWN_RATIOS: [number, string][] = [
+  [1, "1:1"],
+  [4 / 5, "4:5"],
+  [5 / 4, "5:4"],
+  [16 / 9, "16:9"],
+  [9 / 16, "9:16"],
+  [3 / 4, "3:4"],
+];
+export function frameRatioLabel(aspect: { w: number; h: number }): string {
+  const a = aspect.w / aspect.h;
+  return KNOWN_RATIOS.find(([r]) => near(a, r))?.[1] ?? `${a.toFixed(2)}:1`;
+}
+
+// Whether a restore kept a saved frame of another ratio than the post's
+// current one -- the case Re-frame is offered for (images only).
+export function isRatioMismatchRestore(plan: RestorePlan | null): boolean {
+  return Boolean(plan?.keptSavedAspect);
+}
+
 // Whether a restore kept an older 3:4 frame where new edits are 4:5.
 export function isLegacy34Restore(plan: RestorePlan | null, targetAspect: { w: number; h: number } | undefined): boolean {
   if (!plan?.keptSavedAspect || !targetAspect) return false;

@@ -148,6 +148,23 @@ export function exportFraming(
   return { scale, x, y, rotation, scope: EXPORT_FRAME_SCOPE, scopeVersion: 1, aspect };
 }
 
+// A carousel slide's (position > 0) framing at the post's shared ratio, as
+// the export applies it: an IMAGE slide of a post with a chosen ratio gets
+// its own frame at that ratio -- "original" being the FIRST item's
+// displayed ratio (firstAspect), never the slide's own. Legacy posts
+// (choice null) and video slides: null, i.e. unframed.
+export function slideExportFraming(
+  choice: "original" | "1:1" | "4:5" | "5:4" | "16:9" | "9:16" | null,
+  mediaType: string,
+  frame: { scale: number; x: number; y: number; rotation?: number } | null | undefined,
+  firstAspect: number | null,
+): ExportFraming | null {
+  if (!choice || mediaType !== "image") return null;
+  const value = choice === "original" ? (firstAspect && firstAspect > 0 ? firstAspect : null) : SLIDE_RATIOS[choice];
+  return value ? exportFraming(value, frame) : null;
+}
+const SLIDE_RATIOS = { "1:1": 1, "4:5": 4 / 5, "5:4": 5 / 4, "16:9": 16 / 9, "9:16": 9 / 16 } as const;
+
 export function isExportFraming(transform: unknown): transform is ExportFraming {
   if (!transform || typeof transform !== "object") return false;
   const t = transform as { scope?: unknown; scopeVersion?: unknown };

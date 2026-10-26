@@ -397,7 +397,7 @@ const actionArgs = (actions) =>
 // every framing written: an item's export frame (updatePostAssetFrameTransform) or a legacy cover crop
 const writes = (actions) => actionArgs(actions).map((a) => a.find((x) => x && typeof x === "object" && "scale" in x)).filter(Boolean);
 // every aspect ratio stored (setPostAspectRatio)
-const aspectWrites = (actions) => actionArgs(actions).map((a) => a.find((x) => typeof x === "string" && /^(original|1:1|4:5|9:16)$/.test(x))).filter(Boolean);
+const aspectWrites = (actions) => actionArgs(actions).map((a) => a.find((x) => typeof x === "string" && /^(original|1:1|4:5|5:4|16:9|9:16)$/.test(x))).filter(Boolean);
 const ef = (t, aspect = 9 / 16) => ({ ...t, scope: "export-frame", scopeVersion: 1, aspect });
 async function panZoom(page) {
   const f = await crop(page).boundingBox();
@@ -760,6 +760,29 @@ async function partE() {
     const { width, height } = await sharp(z.files["cover.jpg"]).metadata();
     assert.deepEqual([width, height], [300, 400]);
   });
+  // Client PDF: a carousel slide's 3:4 thumb (applyCoverTransform at 360x480 with
+  // slideExportFraming) = the centred 3:4 window of that slide's download
+  const centre34 = async (buf) => {
+    const [w, h] = await dims(buf);
+    const ww = Math.min(w, Math.round(h * 0.75));
+    const hh = Math.min(h, Math.round(ww / 0.75));
+    return sharp(buf).extract({ left: Math.round((w - ww) / 2), top: Math.round((h - hh) / 2), width: ww, height: hh }).png().toBuffer();
+  };
+  for (const [label, aspect, frameAspect] of [["4:5", "4:5", 0.8], ["Original (first item 1280x720)", "original", 1280 / 720]]) {
+    await check(`E. Client PDF, ${label} carousel: slide 3's 3:4 thumb shows its OWN saved framing, same as its download`, async () => {
+      const t3 = { scale: 1.4, x: 0.15, y: -0.1 };
+      const z = await zipOf(`assets=carousel3&aspect=${aspect}${fr({ "pa-3": t3 })}`);
+      const thumb = (await route(`cell=1&poster=auto-square.jpg${tq(ef(t3, frameAspect))}`)).buf;
+      const d = await meanDiff(thumb, await centre34(z.files["slide-3.jpg"]));
+      assert.ok(d < 2.5, `mean diff ${d.toFixed(2)}`);
+      const unframed = (await route("cell=1&poster=auto-square.jpg")).buf;
+      assert.ok((await meanDiff(unframed, await centre34(z.files["slide-3.jpg"]))) > 5, "the old unframed thumb would differ");
+      if (aspect === "original") {
+        const ownRatio = (await route(`cell=1&poster=auto-square.jpg${tq(ef(t3, "original"))}`)).buf;
+        assert.ok((await meanDiff(ownRatio, await centre34(z.files["slide-3.jpg"]))) > 5, "framing at the slide's own ratio would differ");
+      }
+    });
+  }
   await check("E. the Grid's 3:4 tile of a 1:1 post = the centred 3:4 window of the exported square (Grid stays 3:4)", async () => {
     const t = { scale: 1.2, x: 0.05, y: 0 };
     const z = await zipOf(`assets=post&poster=auto-square.jpg&aspect=1:1${fr({ "pa-i": t })}`);
@@ -867,6 +890,32 @@ async function partF(browser, media) {
       assert.equal(frameCalls.length, 1);
       assert.ok(frameCalls[0].includes("pa-3"), JSON.stringify(frameCalls[0]));
       assert.deepEqual(aspectWrites(s.actions), []);
+    });
+    await s.ctx.close();
+  }
+  {
+    // Edit Image carries the post's own ratio control (one source of truth)
+    const s = await newPage(browser, media, { cfg: { t: null, kind: "carousel3", poster: "auto-portrait.jpg", annotation: null, aspect: "4:5" } });
+    await ready(s.page);
+    await s.page.locator("button[title='Frame options']").first().click();
+    await s.page.getByRole("button", { name: "Edit Image", exact: true }).click();
+    await s.page.locator(".canvas-container").waitFor({ timeout: 60000 });
+    await s.page.waitForTimeout(1200);
+    const ratio = async () => s.page.locator(".canvas-container").evaluate((el) => { const r = el.getBoundingClientRect(); return r.width / r.height; });
+    const ed = s.page.locator("[data-aspect-selector='editor']");
+    await check("F. Edit Image shows the post's six ratios, the current one selected, and says it changes every image in the carousel", async () => {
+      assert.deepEqual((await ed.locator("button").allInnerTexts()).map((l) => l.trim()), ["Original", "1:1", "4:5", "5:4", "16:9", "9:16"]);
+      assert.equal(await ed.locator("button[aria-pressed='true']").innerText(), "4:5");
+      assert.equal(await ed.getByText("Changes the whole post: every image in this carousel").count(), 1);
+      assert.ok(Math.abs((await ratio()) - 0.8) < 0.01);
+    });
+    await ed.locator("button").filter({ hasText: /^16:9$/ }).click();
+    for (const end = Date.now() + 15000; aspectWrites(s.actions).length === 0 && Date.now() < end; ) await s.page.waitForTimeout(200);
+    await s.page.locator(".canvas-container").waitFor({ timeout: 60000 });
+    await s.page.waitForTimeout(1200);
+    await check("F. choosing 16:9 there stores the POST's ratio (one write) and the editor reloads at 16:9", async () => {
+      assert.deepEqual(aspectWrites(s.actions), ["16:9"]);
+      assert.ok(Math.abs((await ratio()) - 16 / 9) < 0.01, String(await ratio()));
     });
     await s.ctx.close();
   }

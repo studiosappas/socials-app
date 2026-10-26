@@ -15,6 +15,8 @@ import {
   reframeBlockers,
   rescaleAnnotationJson,
   sameBaseFraming,
+  frameRatioLabel,
+  isRatioMismatchRestore,
 } from "./annotation-frame.ts";
 import { annotationCropStateFromWindow } from "./crop-geometry.ts";
 
@@ -277,6 +279,17 @@ test("Edit Image (signed storage URL): only the object path counts, not the expi
   const c = { objects: [{ ...photo, src: "https://x.supabase.co/storage/v1/object/sign/project-media/p/other.png?token=one" }] };
   assert.equal(sameBaseFraming(a, b), true);
   assert.equal(sameBaseFraming(a, c), false);
+});
+
+test("Re-frame names frames by ratio, and is offered for ANY saved-ratio mismatch", () => {
+  assert.deepEqual(
+    [{ w: 3, h: 4 }, { w: 4, h: 5 }, { w: 1, h: 1 }, { w: 5, h: 4 }, { w: 16, h: 9 }, { w: 9, h: 16 }, { w: 1080, h: 1350 }].map(frameRatioLabel),
+    ["3:4", "4:5", "1:1", "5:4", "16:9", "9:16", "4:5"],
+  );
+  assert.equal(frameRatioLabel({ w: 1.6, h: 1 }), "1.60:1");
+  assert.equal(isRatioMismatchRestore({ aspect: { w: 4, h: 5 }, keptSavedAspect: true, savedHeight: 500 }), true);
+  assert.equal(isRatioMismatchRestore({ aspect: { w: 16, h: 9 }, keptSavedAspect: false, savedHeight: 360 }), false);
+  assert.equal(isRatioMismatchRestore(null), false);
 });
 
 console.log(`\n${passed} tests passed`);

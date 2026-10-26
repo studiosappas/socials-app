@@ -14,6 +14,10 @@
 //      picture (objects rescaled to the saved frame), at the saved aspect
 //   D. a legacy 3:4 save reopened where the target is 4:5 keeps its 3:4
 //      frame and framing (never recropped), and still saves 3:4
+//   G. every post ratio: 5:4 / 16:9 frames fit the window (portrait frames
+//      unchanged), "Re-frame to {ratio}" for any saved-ratio mismatch, and the
+//      in-editor ratio control asks before discarding unsaved changes
+//      (ONLY=G runs just this part)
 //
 // Everything temporary lives under one folder that is ALWAYS deleted
 // (finally). Playwright's Chromium is not Safari / a real phone.
@@ -33,13 +37,13 @@ const BASE = `http://localhost:${PORT}/preview-annotation-crop-harness-check`;
 
 const HARNESS = `"use client";
 // TEMPORARY -- created and deleted by scripts/annotation-crop.check.mjs. Never commit.
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AnnotationEditor } from "@/components/annotation-editor";
 declare global {
   interface Window { __saves: { json: string; previewUrl: string }[]; __editorCloses?: number }
 }
-const ASPECTS: Record<string, { w: number; h: number }> = { "34": { w: 3, h: 4 }, "45": { w: 4, h: 5 }, "916": { w: 9, h: 16 } };
+const ASPECTS: Record<string, { w: number; h: number }> = { "34": { w: 3, h: 4 }, "45": { w: 4, h: 5 }, "916": { w: 9, h: 16 }, "11": { w: 1, h: 1 }, "54": { w: 5, h: 4 }, "169": { w: 16, h: 9 } };
 async function saveAction(_projectId: string, _id: string, formData: FormData) {
   const file = formData.get("file") as File;
   const previewUrl = URL.createObjectURL(file);
@@ -49,12 +53,19 @@ async function saveAction(_projectId: string, _id: string, formData: FormData) {
 }
 function Editor() {
   const params = useSearchParams();
-  const aspect = ASPECTS[params.get("aspect") ?? "45"];
+  // the post's ratio, as the Post Editor holds it; ?selector=1 adds its control
+  const [aspectKey, setAspectKey] = useState(params.get("aspect") ?? "45");
+  const aspect = ASPECTS[aspectKey];
   const restore = params.get("restore");
   const initial = restore ? JSON.parse(atob(restore)) : null;
   return (
     <AnnotationEditor projectId="p" attachmentId="a" postId="q" open imageUrl="https://media.test/photo.png"
       initialAnnotationJson={initial} mediaType="image" targetAspect={aspect}
+      renderAspectSelector={params.get("selector") ? (guard) => (
+        <span data-test-selector="">{["45", "11", "169"].map((k) => (
+          <button key={k} type="button" aria-pressed={k === aspectKey} onClick={() => guard(() => setAspectKey(k))}>ratio-{k}</button>
+        ))}</span>
+      ) : undefined}
       onClose={() => { window.__editorCloses = (window.__editorCloses ?? 0) + 1; }} onSaved={() => {}} saveAction={saveAction} />
   );
 }
@@ -405,6 +416,138 @@ async function run(browser, photo) {
   return clean34.json;
 }
 
+// --- G: every post ratio ---------------------------------------------------
+async function runRatios(browser, photo) {
+  async function open(viewport, query) {
+    const ctx = await browser.newContext({ viewport });
+    const page = await ctx.newPage();
+    await page.route("https://media.test/**", (r) => r.fulfill({ body: photo, contentType: "image/png" }));
+    await page.goto(BASE + query, { waitUntil: "networkidle" });
+    await ready(page);
+    return { ctx, page };
+  }
+  async function ready(page) {
+    await page.locator(".canvas-container").waitFor({ timeout: 30000 });
+    await page.waitForFunction(() => {
+      const el = [...document.querySelectorAll("p")].find((p) => p.textContent === "Loading image…");
+      return el && getComputedStyle(el.parentElement).display === "none";
+    }, null, { timeout: 30000 });
+    await page.waitForTimeout(300);
+  }
+  const box = (page) => page.locator(".canvas-container").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { w: r.width, h: r.height, x: r.x, y: r.y, right: r.right, bottom: r.bottom };
+  });
+  async function save(page) {
+    const before = await page.evaluate(() => (window.__saves ?? []).length);
+    await page.getByRole("button", { name: "Save Changes" }).click();
+    await page.waitForFunction((n) => (window.__saves ?? []).length > n, before, { timeout: 30000 });
+    return page.evaluate(() => window.__saves[window.__saves.length - 1].json);
+  }
+  const restoreQuery = (json, aspect) => `?aspect=${aspect}&restore=${encodeURIComponent(Buffer.from(json).toString("base64"))}`;
+  const near = (a, b) => Math.abs(a / b - 1) < 0.01;
+
+  for (const viewport of [{ width: 1400, height: 900 }, { width: 390, height: 844 }]) {
+    const tag = `${viewport.width}x${viewport.height}`;
+    const frames = {};
+    for (const k of ["45", "916", "11", "54", "169"]) {
+      const s = await open(viewport, `?aspect=${k}`);
+      frames[k] = await box(s.page);
+      await s.ctx.close();
+    }
+    await check(`G. ${tag}: 5:4 and 16:9 frames have their ratio and fit inside the window`, async () => {
+      for (const [k, a] of [["54", 5 / 4], ["169", 16 / 9]]) {
+        const b = frames[k];
+        assert.ok(near(b.w / b.h, a), `${k}: ${b.w}x${b.h}`);
+        assert.ok(b.x >= 0 && b.right <= viewport.width && b.bottom <= viewport.height, `${k} overflows: ${JSON.stringify(b)}`);
+      }
+    });
+    await check(`G. ${tag}: portrait/square frames keep the established layout (same height; 16:9 width = that height)`, async () => {
+      assert.ok(near(frames["45"].h, frames["916"].h) && near(frames["45"].h, frames["11"].h), JSON.stringify(frames));
+      assert.ok(near(frames["45"].w / frames["45"].h, 0.8));
+      assert.ok(near(frames["169"].w, frames["45"].h), `16:9 w ${frames["169"].w} vs portrait h ${frames["45"].h}`);
+    });
+  }
+
+  // a saved 4:5 edit (photo only), and one with an arrow, reopened where the post is now 16:9
+  const make = await open({ width: 1280, height: 900 }, "?aspect=45");
+  const clean45 = await save(make.page);
+  await make.page.locator("button[title='Arrows']").first().click();
+  await make.page.mouse.click(5, 5);
+  const arrow45 = await save(make.page);
+  await make.ctx.close();
+
+  const rf = await open({ width: 1280, height: 900 }, restoreQuery(clean45, "169"));
+  await check("G. a saved 4:5 edit where the post is 16:9 stays 4:5 and offers 'Re-frame to 16:9'", async () => {
+    assert.equal(await rf.page.getByRole("button", { name: "Re-frame to 16:9" }).count(), 1);
+    const b = await box(rf.page);
+    assert.ok(near(b.w / b.h, 0.8), JSON.stringify(b));
+  });
+  await rf.page.getByRole("button", { name: "Re-frame to 16:9" }).click();
+  await rf.page.locator("[data-reframe-dialog]").waitFor();
+  await check("G. its dialog proposes a 16:9 frame over the original photo", async () => {
+    const fb = await rf.page.locator("[data-reframe-dialog] div.relative").first().boundingBox();
+    assert.ok(near(fb.width / fb.height, 16 / 9), JSON.stringify(fb));
+    assert.equal(await rf.page.locator("[data-reframe-dialog] img").first().getAttribute("src"), "https://media.test/photo.png");
+  });
+  await rf.page.getByRole("button", { name: "Apply re-frame" }).click();
+  await rf.page.locator("[data-reframe-dialog]").waitFor({ state: "detached" });
+  await rf.page.waitForTimeout(500);
+  await check("G. Apply makes the canvas 16:9, with Undo offered; nothing saved until Save Changes", async () => {
+    const b = await box(rf.page);
+    assert.ok(near(b.w / b.h, 16 / 9), JSON.stringify(b));
+    assert.equal(await rf.page.getByText("Re-framed to 16:9 · not saved yet").count(), 1);
+    assert.equal(await rf.page.evaluate(() => (window.__saves ?? []).length), 0);
+  });
+  await rf.ctx.close();
+
+  const blocked = await open({ width: 1280, height: 900 }, restoreQuery(arrow45, "169"));
+  await blocked.page.getByRole("button", { name: "Re-frame to 16:9" }).click();
+  await blocked.page.locator("[data-reframe-dialog]").waitFor();
+  await check("G. with an arrow on it, Re-frame to 16:9 is refused with the reason (nothing applied)", async () => {
+    assert.equal(await blocked.page.getByText(/placed for the 4:5 frame\. A 16:9 frame would move them/).count(), 1);
+    assert.equal(await blocked.page.getByRole("button", { name: "Apply re-frame" }).count(), 0);
+  });
+  await blocked.ctx.close();
+
+  // the in-editor ratio control (the post's own, via renderAspectSelector)
+  const sel = await open({ width: 1280, height: 900 }, "?aspect=45&selector=1");
+  const pick = async (k) => {
+    await sel.page.locator(`[data-test-selector] button:has-text("ratio-${k}")`).click();
+    await sel.page.waitForTimeout(400);
+  };
+  let asked = 0;
+  sel.page.on("dialog", (d) => {
+    asked++;
+    void (asked === 1 ? d.dismiss() : d.accept());
+  });
+  await pick("11");
+  await ready(sel.page);
+  await check("G. switching ratio with no changes reloads straight away at 1:1 (no question)", async () => {
+    assert.equal(asked, 0);
+    const b = await box(sel.page);
+    assert.ok(near(b.w / b.h, 1), JSON.stringify(b));
+  });
+  await sel.page.locator("button[title='Arrows']").first().click();
+  await sel.page.mouse.click(5, 5);
+  await sel.page.waitForTimeout(300);
+  await pick("169");
+  await check("G. with an unsaved change it asks first; declining keeps the edit and the 1:1 frame", async () => {
+    assert.equal(asked, 1);
+    const b = await box(sel.page);
+    assert.ok(near(b.w / b.h, 1), JSON.stringify(b));
+    assert.equal(await sel.page.locator("[data-test-selector] button[aria-pressed='true']").innerText(), "ratio-11");
+  });
+  await pick("169");
+  await ready(sel.page);
+  await check("G. ...accepting reloads at 16:9", async () => {
+    assert.equal(asked, 2);
+    const b = await box(sel.page);
+    assert.ok(near(b.w / b.h, 16 / 9), JSON.stringify(b));
+  });
+  await sel.ctx.close();
+}
+
 // --- F: Escape closes ONLY the topmost layer -------------------------------
 // The editor on its own, the way Brief hosts it. A document- and a
 // window-level Escape listener stand in for whatever is underneath (the Post
@@ -512,13 +655,18 @@ try {
   const browser = await chromium.launch();
   try {
     console.log(`### AnnotationEditor crop/restore -- chromium ${browser.version()}`);
-    const legacy34Json = await run(browser, photo);
-    await runEscape("chromium", browser, photo, legacy34Json);
-    const wk = await webkit.launch();
-    try {
-      await runEscape("webkit", wk, photo, legacy34Json);
-    } finally {
-      await wk.close();
+    if (process.env.ONLY === "G") {
+      await runRatios(browser, photo);
+    } else {
+      const legacy34Json = await run(browser, photo);
+      await runEscape("chromium", browser, photo, legacy34Json);
+      await runRatios(browser, photo);
+      const wk = await webkit.launch();
+      try {
+        await runEscape("webkit", wk, photo, legacy34Json);
+      } finally {
+        await wk.close();
+      }
     }
   } finally {
     await browser.close();

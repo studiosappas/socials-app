@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Button } from "@/components/ui/button";
 import { captureVideoFrameAsDataUrl } from "@/lib/video-poster";
@@ -33,7 +33,8 @@ import {
   type AnnotationSaveAction,
 } from "@/lib/annotation-engine";
 import {
-  isLegacy34Restore,
+  frameRatioLabel,
+  isRatioMismatchRestore,
   planAnnotationRestore,
   proposeReframeWindow,
   reframeBlockers,
@@ -215,6 +216,7 @@ export function AnnotationEditor({
   onSaved,
   saveAction,
   customFonts = [],
+  renderAspectSelector,
 }: {
   projectId: string;
   attachmentId: string | null;
@@ -255,6 +257,11 @@ export function AnnotationEditor({
   // lib/data/brand-moodboard.ts's deriveCustomFontFaces) -- merged into the
   // font picker below, alongside the built-in generic stacks.
   customFonts?: CustomFontFace[];
+  // The post's own aspect-ratio control (Post Editor), shown in the header.
+  // It changes the POST's ratio (posts.aspect_ratio -- the one source of
+  // truth); the editor only supplies `guard`, which asks before discarding
+  // unsaved changes, and reloads its frame when targetAspect changes.
+  renderAspectSelector?: (guard: (proceed: () => void) => void) => React.ReactNode;
 }) {
   const isVideo = mediaType === "video";
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -428,11 +435,16 @@ export function AnnotationEditor({
   //                re-frame" restores it (frame size included, which the
   //                regular Undo history can't do).
   const [legacyFrame, setLegacyFrame] = useState(false);
+  // the saved frame's ratio label ("3:4", "4:5", ...) while legacyFrame
+  const [savedFrameLabel, setSavedFrameLabel] = useState("");
   const [reframe, setReframe] = useState<
     | { blockers: ReframeBlocker[]; sourceUrl: string; zoom: number; offset: { x: number; y: number } }
     | null
   >(null);
   const [reframeUndo, setReframeUndo] = useState<{ json: string; width: number; height: number; exportScale: number } | null>(null);
+  useEffect(() => {
+    reframeUndoRef.current = reframeUndo !== null;
+  }, [reframeUndo]);
   const [reframeBusy, setReframeBusy] = useState(false);
   const [reframeError, setReframeError] = useState<string | undefined>();
   // The base photo's CURRENT full source (getElement().src), captured fresh
@@ -547,16 +559,33 @@ export function AnnotationEditor({
   // pattern for "reset state when a prop changes" -- it lands in the SAME
   // commit as the rest of this render, so the remount and the load
   // effect's teardown/construct cycle stay in lock-step.
+  // renderAspectSelector's guard: a ratio change rebuilds the frame, so
+  // unsaved changes (anything since load, or an applied re-frame) are only
+  // discarded after asking. Read at click time, never during render.
+  const reframeUndoRef = useRef(false);
+  const guardAspectChange = useCallback((proceed: () => void) => {
+    const unsaved = historyIndexRef.current > 0 || reframeUndoRef.current;
+    if (unsaved && !confirm("Change the post's aspect ratio? This discards your unsaved changes to this image.")) return;
+    proceed();
+  }, []);
+  const aspectKey = targetAspect ? (targetAspect.w / targetAspect.h).toFixed(4) : "";
+  const [sessionAspectKey, setSessionAspectKey] = useState(aspectKey);
   const [session, setSession] = useState<{ active: boolean; attachmentId: string | null }>({
     active: false,
     attachmentId: null,
   });
   if (open && (!session.active || session.attachmentId !== attachmentId)) {
     setSession({ active: true, attachmentId });
+    setSessionAspectKey(aspectKey);
     setPickedFrameUrl(null);
     setForcePicker(isVideo && !initialAnnotationJson);
     setIsRestoringSaved(false);
     setVideoLoadError(undefined);
+    setCanvasNonce((n) => n + 1);
+  } else if (open && session.active && aspectKey !== sessionAspectKey) {
+    // The post's ratio changed while open (renderAspectSelector): rebuild
+    // the frame at the new ratio, in this same commit (see above).
+    setSessionAspectKey(aspectKey);
     setCanvasNonce((n) => n + 1);
   } else if (!open && session.active) {
     // Bookkeeping only (no picker/canvas resets) -- marks the session as
@@ -785,9 +814,12 @@ export function AnnotationEditor({
             canvas.sendObjectToBack(legacyPhoto);
           }
           canvas.requestRenderAll();
-          // An older 3:4 image edit where new edits are 4:5: offer the
-          // explicit Re-frame action (never automatic).
-          if (!isVideo && isLegacy34Restore(restorePlan, targetAspect)) setLegacyFrame(true);
+          // A saved image edit in another ratio than the post's current
+          // one: offer the explicit Re-frame action (never automatic).
+          if (!isVideo && restorePlan && isRatioMismatchRestore(restorePlan)) {
+            setSavedFrameLabel(frameRatioLabel(restorePlan.aspect));
+            setLegacyFrame(true);
+          }
           finish();
         });
       } else {
@@ -1470,7 +1502,7 @@ export function AnnotationEditor({
           exportScaleRef.current = before.exportScale;
           await canvas.loadFromJSON(JSON.parse(before.json)).catch(() => {});
           canvas.requestRenderAll();
-          setReframeError("Couldn't re-frame this image. Your 3:4 edit is unchanged.");
+          setReframeError(`Couldn't re-frame this image. Your ${savedFrameLabel} edit is unchanged.`);
         }
       } finally {
         applyingCropRef.current = false;
@@ -2419,6 +2451,9 @@ export function AnnotationEditor({
     }
   }
 
+  // The post's ratio, as Re-frame names it.
+  const targetLabel = targetAspect ? frameRatioLabel(targetAspect) : "";
+
   if (!open || internallyClosed) return null;
 
   return (
@@ -2486,7 +2521,7 @@ export function AnnotationEditor({
           )}
           {tool !== "crop" && ready && legacyFrame && !reframeUndo && (
             <>
-              <span className="hidden shrink-0 text-xs text-muted sm:inline">Older 3:4 edit</span>
+              <span className="hidden shrink-0 text-xs text-muted sm:inline">{savedFrameLabel === "3:4" ? "Older 3:4 edit" : `${savedFrameLabel} edit`}</span>
               <Button
                 type="button"
                 variant="secondary"
@@ -2495,13 +2530,13 @@ export function AnnotationEditor({
                 disabled={reframeBusy}
                 className="shrink-0 py-1.5 text-xs"
               >
-                Re-frame to 4:5
+                Re-frame to {targetLabel}
               </Button>
             </>
           )}
           {tool !== "crop" && ready && reframeUndo && (
             <>
-              <span className="hidden min-w-0 truncate text-xs text-muted sm:inline">Re-framed to 4:5 · not saved yet</span>
+              <span className="hidden min-w-0 truncate text-xs text-muted sm:inline">Re-framed to {targetLabel} · not saved yet</span>
               <Button
                 type="button"
                 variant="secondary"
@@ -2529,9 +2564,20 @@ export function AnnotationEditor({
         </button>
       </div>
 
+      {/* One fixed line for the whole session (scrolls sideways when
+          narrow), so it never changes the canvas area's height. */}
+      {renderAspectSelector && !(isVideo && forcePicker) && (
+        <div className="flex shrink-0 items-center overflow-x-auto px-6 pb-1" data-editor-aspect-row="">
+          <EditorAspectSlot render={renderAspectSelector} guard={guardAspectChange} />
+        </div>
+      )}
+
       {reframe && (
         <ReframeDialog
           reframe={reframe}
+          aspect={targetAspect ? targetAspect.w / targetAspect.h : 4 / 5}
+          fromLabel={savedFrameLabel}
+          toLabel={targetLabel}
           busy={reframeBusy}
           error={reframeError}
           onZoomChange={(zoom) => setReframe((r) => (r ? { ...r, zoom } : r))}
@@ -3274,19 +3320,34 @@ function pointerAngleDeg(clientX: number, clientY: number, cx: number, cy: numbe
 // works) specifically so handleApplyCrop's own already-correct pan-
 // direction math needed no changes beyond adding rotation -- only the
 // zoom/pan CLAMP bounds needed to become rotation-aware.
-const REFRAME_BLOCKER_TEXT: Record<ReframeBlocker, string> = {
-  objects:
-    "It has text, drawings, arrows or a logo placed for the 3:4 frame. A 4:5 frame would move them relative to the photo, so they'd no longer be where you put them.",
-  "baked-pixels":
-    "The photo itself was rotated, flipped or had its background removed. Re-framing starts from your original photo, which would undo that.",
-  unreadable: "This edit's saved framing couldn't be read, so a 4:5 framing can't be proposed safely.",
-};
+// Hosts the caller's aspect-ratio control; guard is only ever called from
+// its click handlers.
+function EditorAspectSlot({
+  render,
+  guard,
+}: {
+  render: (guard: (proceed: () => void) => void) => React.ReactNode;
+  guard: (proceed: () => void) => void;
+}) {
+  return <>{render(guard)}</>;
+}
+
+const reframeBlockerText = (b: ReframeBlocker, from: string, to: string): string =>
+  ({
+    objects: `It has text, drawings, arrows or a logo placed for the ${from} frame. A ${to} frame would move them relative to the photo, so they'd no longer be where you put them.`,
+    "baked-pixels":
+      "The photo itself was rotated, flipped or had its background removed. Re-framing starts from your original photo, which would undo that.",
+    unreadable: `This edit's saved framing couldn't be read, so a ${to} framing can't be proposed safely.`,
+  })[b];
 
 // Re-frame to 4:5's confirmation: the proposed framing over the ORIGINAL
 // photo, adjustable before anything changes -- or, when re-framing would
 // lose or move something, just the reasons and no way to apply.
 function ReframeDialog({
   reframe,
+  aspect,
+  fromLabel,
+  toLabel,
   busy,
   error,
   onZoomChange,
@@ -3295,6 +3356,10 @@ function ReframeDialog({
   onCancel,
 }: {
   reframe: { blockers: ReframeBlocker[]; sourceUrl: string; zoom: number; offset: { x: number; y: number } };
+  // the post's ratio (w/h) and the two frames' labels
+  aspect: number;
+  fromLabel: string;
+  toLabel: string;
   busy: boolean;
   error: string | undefined;
   onZoomChange: (zoom: number) => void;
@@ -3319,17 +3384,19 @@ function ReframeDialog({
     >
       <div className="flex w-full max-w-md flex-col items-center gap-4">
         <h2 id="reframe-title" className="text-sm font-semibold tracking-wide uppercase">
-          Re-frame to 4:5
+          Re-frame to {toLabel}
         </h2>
         {blocked ? (
           <>
             <p className="text-sm">Re-framing isn&apos;t available for this edit:</p>
             <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
               {reframe.blockers.map((b) => (
-                <li key={b}>{REFRAME_BLOCKER_TEXT[b]}</li>
+                <li key={b}>{reframeBlockerText(b, fromLabel, toLabel)}</li>
               ))}
             </ul>
-            <p className="text-xs text-muted">Your 3:4 edit stays exactly as it is. To get a 4:5 version, start a new edit of this image.</p>
+            <p className="text-xs text-muted">
+              Your {fromLabel} edit stays exactly as it is. To get a {toLabel} version, start a new edit of this image.
+            </p>
             <Button type="button" variant="primary" radius="full" onClick={onCancel} autoFocus>
               OK
             </Button>
@@ -3337,12 +3404,12 @@ function ReframeDialog({
         ) : (
           <>
             <p className="text-center text-xs text-muted">
-              Starts from your original photo, not the current 3:4 crop. Drag to reposition, drag a corner to zoom.
-              Adjustments are kept. Your 3:4 edit isn&apos;t changed unless you apply this and then press Save Changes.
+              Starts from your original photo, not the current {fromLabel} crop. Drag to reposition, drag a corner to zoom.
+              Adjustments are kept. Your {fromLabel} edit isn&apos;t changed unless you apply this and then press Save Changes.
             </p>
             <div
               className="relative bg-background"
-              style={{ width: "min(320px, 70vw, calc((100dvh - 260px) * 0.8))", aspectRatio: "4 / 5" }}
+              style={{ width: `min(320px, 70vw, calc((100dvh - 260px) * ${aspect.toFixed(4)}))`, aspectRatio: String(aspect) }}
             >
               <AnnotationCropOverlay
                 imageUrl={reframe.sourceUrl}

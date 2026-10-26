@@ -87,8 +87,12 @@ export function computeCanvasFrame(targetAspect: { w: number; h: number }): {
     typeof window !== "undefined"
       ? Math.max(240, Math.min(MAX_DISPLAY, window.innerWidth - 64, window.innerHeight - 280))
       : MAX_DISPLAY;
-  const canvasW = maxDisplay * (targetAspect.w / targetAspect.h);
-  const canvasH = maxDisplay;
+  // The longer side gets maxDisplay: a portrait/square frame is height-
+  // limited (unchanged), a landscape one (5:4, 16:9) width-limited, so it
+  // never overflows the viewport.
+  const a = targetAspect.w / targetAspect.h;
+  const canvasW = a > 1 ? maxDisplay : maxDisplay * a;
+  const canvasH = a > 1 ? maxDisplay / a : maxDisplay;
   const exportScale = TARGET_EXPORT_W / canvasW;
   return { canvasW, canvasH, exportScale };
 }

@@ -17,6 +17,7 @@ import {
   markCoverFraming,
   markGridPreviewFraming,
   sameFraming,
+  slideExportFraming,
 } from "./cover-framing.ts";
 
 let passed = 0;
@@ -158,6 +159,18 @@ test("export framing: the 3:4 Grid box shows the frame's largest centred 3:4 win
   assert.deepEqual(coverLayoutFrame(exportFraming("original", null), box, { w: 768, h: 480 }), { w: 640, h: 400 }, "original = the image's own");
   assert.deepEqual(coverLayoutFrame(exportFraming("original", null), box, null), box, "original, size unknown -> the box");
   assert.deepEqual(coverLayoutFrame(exportFraming(4 / 5, null), { w: 800, h: 1000 }), { w: 800, h: 1000 }, "its own shape: all of it");
+});
+
+test("Client PDF slides: an image slide gets its own frame at the post's ratio; legacy and video slides stay unframed", () => {
+  const f = { scale: 1.3, x: 0.1, y: -0.05, rotation: 0 };
+  assert.deepEqual(slideExportFraming("4:5", "image", f, null), { ...f, scope: "export-frame", scopeVersion: 1, aspect: 4 / 5 });
+  assert.equal(slideExportFraming("16:9", "image", null, null)?.aspect, 16 / 9);
+  assert.equal(slideExportFraming("16:9", "image", null, null)?.scale, 1);
+  assert.equal(slideExportFraming(null, "image", f, null), null);
+  assert.equal(slideExportFraming("4:5", "video", f, null), null);
+  // "Original" = the FIRST item's ratio, never the slide's own
+  assert.equal(slideExportFraming("original", "image", f, 1.6)?.aspect, 1.6);
+  assert.equal(slideExportFraming("original", "image", f, null), null);
 });
 
 console.log(`\n${passed} tests passed`);

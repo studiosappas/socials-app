@@ -1,9 +1,10 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
 import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { applyCoverTransform, type CoverTransform } from "@/lib/image-crop";
 import { effectivePostType } from "@/lib/post-type";
-import { exportCoverFraming, exportFraming } from "@/lib/cover-framing";
+import { exportCoverFraming, exportFraming, slideExportFraming } from "@/lib/cover-framing";
 import { aspectValue, parseAspectChoice } from "@/lib/aspect-ratio";
 import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
 
@@ -133,10 +134,15 @@ export async function GET(
   // isolated: until they exist every post is legacy.
   const { data: aspectRows } = await supabase.from("posts").select("id, aspect_ratio").in("id", orderedPostIds);
   const aspectByPostId = new Map((aspectRows ?? []).map((r) => [r.id, parseAspectChoice((r as { aspect_ratio?: unknown }).aspect_ratio)]));
-  const { data: coverFrameRows } = await supabase.from("post_assets").select("post_id, frame_transform").in("post_id", orderedPostIds).eq("position", 0);
-  const coverFrameByPostId = new Map(
-    ((coverFrameRows ?? []) as { post_id: string; frame_transform: CoverTransform | null }[]).map((r) => [r.post_id, r.frame_transform]),
+  // Every item's own frame (a carousel's slides have theirs too), by position.
+  const { data: frameRows } = await supabase.from("post_assets").select("post_id, position, frame_transform").in("post_id", orderedPostIds);
+  const frameByPostPosition = new Map(
+    ((frameRows ?? []) as { post_id: string; position: number; frame_transform: CoverTransform | null }[]).map((r) => [
+      `${r.post_id}:${r.position}`,
+      r.frame_transform,
+    ]),
   );
+  const coverFrameByPostId = new Map(orderedPostIds.map((id) => [id, frameByPostPosition.get(`${id}:0`) ?? null]));
   const coverTransformByPostId = new Map(
     orderedPostIds.map((id) => {
       const choice = aspectByPostId.get(id) ?? null;
@@ -174,6 +180,8 @@ export async function GET(
   // index 0 is always the post's real cover (the only position its
   // cover_transform belongs to) and the length is the post's real item count.
   const imagePathsByPostId = new Map<string, (string | null)[]>();
+  // Parallel to imagePathsByPostId: each item's position and media type.
+  const itemsByPostId = new Map<string, { position: number; mediaType: string }[]>();
   for (const pa of postAssets ?? []) {
     const media = pa.media_assets as { id: string; storage_path: string; media_type: string } | null;
     if (!media) continue;
@@ -187,6 +195,7 @@ export async function GET(
     const list = imagePathsByPostId.get(pa.post_id) ?? [];
     list.push(path);
     imagePathsByPostId.set(pa.post_id, list);
+    itemsByPostId.set(pa.post_id, [...(itemsByPostId.get(pa.post_id) ?? []), { position: pa.position, mediaType: media.media_type }]);
   }
 
   const pdfDoc = await PDFDocument.create();
@@ -213,16 +222,50 @@ export async function GET(
   // two different renders (a carousel's own slides reuse this same cache,
   // and only the cover position ever gets a non-null transform).
   const imageCache = new Map<string, Uint8Array | null>();
+  const sourceCache = new Map<string, Promise<Buffer | null>>();
+  function downloadSource(path: string): Promise<Buffer | null> {
+    if (!sourceCache.has(path)) {
+      sourceCache.set(
+        path,
+        supabase.storage
+          .from("project-media")
+          .download(path)
+          .then(async ({ data, error }) => (error || !data ? null : Buffer.from(await data.arrayBuffer())))
+          .catch(() => null),
+      );
+    }
+    return sourceCache.get(path)!;
+  }
+
+  // A carousel slide (position > 0) of a post with a chosen ratio: its own
+  // export framing's centred 3:4 window -- the same framing its download
+  // uses, at the post's shared ratio ("Original" = the FIRST item's
+  // displayed ratio, as the export resolves it). Legacy posts and video
+  // slides stay unframed, as before.
+  async function slideTransform(postId: string, index: number): Promise<CoverTransform | null> {
+    const choice = aspectByPostId.get(postId) ?? null;
+    const item = itemsByPostId.get(postId)?.[index];
+    if (!choice || !item || item.mediaType !== "image") return null;
+    let firstAspect: number | null = null;
+    if (choice === "original") {
+      const first = imagePathsByPostId.get(postId)?.[0];
+      const buf = first ? await downloadSource(first) : null;
+      const shown = buf ? (await sharp(buf).metadata().catch(() => null))?.autoOrient : null;
+      firstAspect = shown?.width && shown?.height ? shown.width / shown.height : null;
+    }
+    const framing = slideExportFraming(choice, item.mediaType, frameByPostPosition.get(`${postId}:${item.position}`), firstAspect);
+    return framing as CoverTransform | null;
+  }
+
   async function embedThumb(path: string | null | undefined, transform: CoverTransform | null) {
     if (!path) return null;
     const cacheKey = `${path}:${transform ? JSON.stringify(transform) : "none"}`;
     if (!imageCache.has(cacheKey)) {
       try {
-        const { data, error } = await supabase.storage.from("project-media").download(path);
-        if (error || !data) {
+        const buf = await downloadSource(path);
+        if (!buf) {
           imageCache.set(cacheKey, null);
         } else {
-          const buf = Buffer.from(await data.arrayBuffer());
           const pipeline = await applyCoverTransform(buf, transform, 360, Math.round(360 / GRID_COVER_ASPECT_RATIO));
           const jpegBuf = await pipeline.jpeg({ quality: 90 }).toBuffer();
           imageCache.set(cacheKey, jpegBuf);
@@ -277,10 +320,10 @@ export async function GET(
     } else {
       for (let i = 0; i < paths.length; i++) {
         const x = MARGIN + i * (thumbW + THUMB_GAP);
-        // Only the cover (index 0) has a meaningful cover_transform -- every
-        // other carousel slide's own crop is already baked into its own
-        // preview_storage_path image (see imagePathsByPostId above).
-        const image = await embedThumb(paths[i], i === 0 ? (coverTransformByPostId.get(postId) ?? null) : null);
+        // The cover gets its Grid framing; another slide its own export
+        // framing when the post has a ratio (slideTransform). An Edit Image
+        // crop is baked into the slide's preview_storage_path image either way.
+        const image = await embedThumb(paths[i], i === 0 ? (coverTransformByPostId.get(postId) ?? null) : await slideTransform(postId, i));
         if (image) {
           page.drawImage(image, { x, y: imageY, width: thumbW, height: thumbH });
         } else {
