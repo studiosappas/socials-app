@@ -7,16 +7,21 @@ import { effectivePostType } from "@/lib/post-type";
 import { exportCoverFraming, exportFraming, slideExportFraming } from "@/lib/cover-framing";
 import { aspectValue, parseAspectChoice } from "@/lib/aspect-ratio";
 import { GRID_COVER_ASPECT_RATIO } from "../grid-constants";
+import { clientPdfThumbSize } from "@/lib/client-pdf-layout";
 
 const PAGE_W = 612; // US Letter, points
 const PAGE_H = 792;
 const MARGIN = 40;
 const CONTENT_W = PAGE_W - MARGIN * 2;
 const THUMB_GAP = 4;
-// A single-image post's thumbnail at this size; a carousel's images shrink
-// uniformly (keeping the Grid cover's 3:4 ratio) only as far as needed to
-// still all fit across one row, however many there are.
+// A legacy (no ratio) single-image post's thumbnail at this size; a post
+// with a chosen ratio gets the same height at its own ratio. A carousel's
+// images shrink uniformly (keeping the ratio) only as far as needed to still
+// all fit across one row, however many there are (lib/client-pdf-layout.ts).
 const IDEAL_THUMB_W = 90;
+const IDEAL_THUMB_H = IDEAL_THUMB_W / GRID_COVER_ASPECT_RATIO;
+// Rendered pixel height of each embedded thumb (width follows its ratio).
+const THUMB_PX_H = 480;
 const TEXT_BLOCK_H = 46; // caption (up to 2 lines) + type tag
 const ROW_GAP = 16;
 
@@ -237,36 +242,41 @@ export async function GET(
     return sourceCache.get(path)!;
   }
 
-  // A carousel slide (position > 0) of a post with a chosen ratio: its own
-  // export framing's centred 3:4 window -- the same framing its download
-  // uses, at the post's shared ratio ("Original" = the FIRST item's
-  // displayed ratio, as the export resolves it). Legacy posts and video
-  // slides stay unframed, as before.
-  async function slideTransform(postId: string, index: number): Promise<CoverTransform | null> {
+  // A post with a chosen ratio is shown AT that ratio, like Client Review:
+  // "Original" is the FIRST item's displayed ratio (as the download resolves
+  // it). Null = legacy (no ratio, or an Original whose first item can't be
+  // read): the 3:4 Grid tile as before.
+  async function postAspect(postId: string): Promise<number | null> {
     const choice = aspectByPostId.get(postId) ?? null;
-    const item = itemsByPostId.get(postId)?.[index];
-    if (!choice || !item || item.mediaType !== "image") return null;
-    let firstAspect: number | null = null;
-    if (choice === "original") {
-      const first = imagePathsByPostId.get(postId)?.[0];
-      const buf = first ? await downloadSource(first) : null;
-      const shown = buf ? (await sharp(buf).metadata().catch(() => null))?.autoOrient : null;
-      firstAspect = shown?.width && shown?.height ? shown.width / shown.height : null;
-    }
-    const framing = slideExportFraming(choice, item.mediaType, frameByPostPosition.get(`${postId}:${item.position}`), firstAspect);
-    return framing as CoverTransform | null;
+    if (!choice) return null;
+    if (choice !== "original") return aspectValue(choice, null);
+    const first = imagePathsByPostId.get(postId)?.[0];
+    const buf = first ? await downloadSource(first) : null;
+    const shown = buf ? (await sharp(buf).metadata().catch(() => null))?.autoOrient : null;
+    return shown?.width && shown?.height ? shown.width / shown.height : null;
   }
 
-  async function embedThumb(path: string | null | undefined, transform: CoverTransform | null) {
+  // Each item's framing in a post shown at its ratio: the cover its own
+  // frame, every other IMAGE slide its own frame at the shared ratio, video
+  // slides unframed -- exactly Client Review's rule (lib/data/share-preview.ts).
+  function itemFraming(postId: string, index: number, aspect: number): CoverTransform | null {
+    const item = itemsByPostId.get(postId)?.[index];
+    const frame = item ? frameByPostPosition.get(`${postId}:${item.position}`) : null;
+    if (index === 0) return exportFraming(aspect, frame) as CoverTransform;
+    return (item ? slideExportFraming(aspectByPostId.get(postId) ?? null, item.mediaType, frame, aspect) : null) as CoverTransform | null;
+  }
+
+  // aspect: the thumb's box ratio (the post's, or the Grid's 3:4).
+  async function embedThumb(path: string | null | undefined, transform: CoverTransform | null, aspect: number) {
     if (!path) return null;
-    const cacheKey = `${path}:${transform ? JSON.stringify(transform) : "none"}`;
+    const cacheKey = `${path}:${aspect}:${transform ? JSON.stringify(transform) : "none"}`;
     if (!imageCache.has(cacheKey)) {
       try {
         const buf = await downloadSource(path);
         if (!buf) {
           imageCache.set(cacheKey, null);
         } else {
-          const pipeline = await applyCoverTransform(buf, transform, 360, Math.round(360 / GRID_COVER_ASPECT_RATIO));
+          const pipeline = await applyCoverTransform(buf, transform, Math.round(THUMB_PX_H * aspect), THUMB_PX_H);
           const jpegBuf = await pipeline.jpeg({ quality: 90 }).toBuffer();
           imageCache.set(cacheKey, jpegBuf);
         }
@@ -296,15 +306,11 @@ export async function GET(
     const paths = postType === "carousel" ? allPaths : allPaths.slice(0, 1);
     const count = Math.max(paths.length, 1);
 
-    let thumbW = IDEAL_THUMB_W;
-    if (count * IDEAL_THUMB_W + (count - 1) * THUMB_GAP > CONTENT_W) {
-      thumbW = (CONTENT_W - (count - 1) * THUMB_GAP) / count;
-    }
-    // 1/GRID_COVER_ASPECT_RATIO -- this row shows each post primarily via
-    // its cover (a carousel's other slides ride along at the same box
-    // shape for a uniform-looking row), so it uses the Grid's own
-    // canonical cover ratio rather than a separate literal.
-    const thumbH = thumbW / GRID_COVER_ASPECT_RATIO;
+    // The post's own ratio when it has one (every slide shares it), else the
+    // Grid's canonical 3:4 cover ratio, as before.
+    const aspect = await postAspect(postId);
+    const boxAspect = aspect ?? GRID_COVER_ASPECT_RATIO;
+    const { w: thumbW, h: thumbH } = clientPdfThumbSize(count, boxAspect, CONTENT_W, THUMB_GAP, IDEAL_THUMB_H);
     const rowH = thumbH + ROW_GAP + TEXT_BLOCK_H;
 
     if (cursorY - rowH < MARGIN) {
@@ -320,10 +326,11 @@ export async function GET(
     } else {
       for (let i = 0; i < paths.length; i++) {
         const x = MARGIN + i * (thumbW + THUMB_GAP);
-        // The cover gets its Grid framing; another slide its own export
-        // framing when the post has a ratio (slideTransform). An Edit Image
-        // crop is baked into the slide's preview_storage_path image either way.
-        const image = await embedThumb(paths[i], i === 0 ? (coverTransformByPostId.get(postId) ?? null) : await slideTransform(postId, i));
+        // At its ratio: each item's own whole frame (itemFraming). Legacy: the
+        // cover's Grid framing, other slides unframed, as before. An Edit
+        // Image crop is baked into the item's preview_storage_path image.
+        const transform = aspect ? itemFraming(postId, i, aspect) : i === 0 ? (coverTransformByPostId.get(postId) ?? null) : null;
+        const image = await embedThumb(paths[i], transform, boxAspect);
         if (image) {
           page.drawImage(image, { x, y: imageY, width: thumbW, height: thumbH });
         } else {

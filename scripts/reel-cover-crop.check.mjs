@@ -113,7 +113,7 @@ export async function GET(request: Request) {
   const poster = "p/" + (url.searchParams.get("poster") ?? "reel-edited.jpg");
   // the PDF / Full Feed PNG path: a 3:4 cell
   if (url.searchParams.get("cell")) {
-    const pipeline = await applyCoverTransform(files.get(poster)!, t, 360, 480);
+    const pipeline = await applyCoverTransform(files.get(poster)!, t, Number(url.searchParams.get("cw") ?? 360), Number(url.searchParams.get("ch") ?? 480));
     return new Response(new Uint8Array(await pipeline.png().toBuffer()), { headers: { "content-type": "image/png" } });
   }
   const V: PostExportAsset = { postAssetId: "pa-v", mediaType: "video", storagePath: "p/reel.mp4", previewPath: null, posterPath: poster, coverEdited: true };
@@ -760,29 +760,39 @@ async function partE() {
     const { width, height } = await sharp(z.files["cover.jpg"]).metadata();
     assert.deepEqual([width, height], [300, 400]);
   });
-  // Client PDF: a carousel slide's 3:4 thumb (applyCoverTransform at 360x480 with
-  // slideExportFraming) = the centred 3:4 window of that slide's download
-  const centre34 = async (buf) => {
+  // Client PDF: each thumb is the item's WHOLE saved frame at the post's ratio
+  // (export-pdf/route.ts: applyCoverTransform(source, framing, 480 * ratio, 480))
+  // -- the same picture as its download; a legacy post keeps its 3:4 Grid tile.
+  const pdfThumb = async (poster, framing, ratio) => {
+    const buf = (await route(`cell=1&poster=${poster}${tq(framing)}&cw=${Math.round(480 * ratio)}&ch=480`)).buf;
     const [w, h] = await dims(buf);
-    const ww = Math.min(w, Math.round(h * 0.75));
-    const hh = Math.min(h, Math.round(ww / 0.75));
-    return sharp(buf).extract({ left: Math.round((w - ww) / 2), top: Math.round((h - hh) / 2), width: ww, height: hh }).png().toBuffer();
+    return { buf, ratio: w / h };
   };
-  for (const [label, aspect, frameAspect] of [["4:5", "4:5", 0.8], ["Original (first item 1280x720)", "original", 1280 / 720]]) {
-    await check(`E. Client PDF, ${label} carousel: slide 3's 3:4 thumb shows its OWN saved framing, same as its download`, async () => {
-      const t3 = { scale: 1.4, x: 0.15, y: -0.1 };
-      const z = await zipOf(`assets=carousel3&aspect=${aspect}${fr({ "pa-3": t3 })}`);
-      const thumb = (await route(`cell=1&poster=auto-square.jpg${tq(ef(t3, frameAspect))}`)).buf;
-      const d = await meanDiff(thumb, await centre34(z.files["slide-3.jpg"]));
+  const t = { scale: 1.3, x: 0.12, y: -0.08 };
+  for (const [label, choice, ratio] of [["16:9", "16:9", 16 / 9], ["4:5", "4:5", 4 / 5]]) {
+    await check(`E. Client PDF, ${label} post: the thumb is ${label} and shows exactly its download's framing`, async () => {
+      const z = await zipOf(`assets=post&poster=img-768x480.jpg&aspect=${choice}${fr({ "pa-i": t })}`);
+      const th = await pdfThumb("img-768x480.jpg", ef(t, ratio), ratio);
+      assert.ok(Math.abs(th.ratio / ratio - 1) < 0.01, `thumb ratio ${th.ratio}`);
+      const d = await meanDiff(th.buf, z.files["cover.jpg"]);
       assert.ok(d < 2.5, `mean diff ${d.toFixed(2)}`);
-      const unframed = (await route("cell=1&poster=auto-square.jpg")).buf;
-      assert.ok((await meanDiff(unframed, await centre34(z.files["slide-3.jpg"]))) > 5, "the old unframed thumb would differ");
-      if (aspect === "original") {
-        const ownRatio = (await route(`cell=1&poster=auto-square.jpg${tq(ef(t3, "original"))}`)).buf;
-        assert.ok((await meanDiff(ownRatio, await centre34(z.files["slide-3.jpg"]))) > 5, "framing at the slide's own ratio would differ");
-      }
     });
   }
+  await check("E. Client PDF, Original carousel (first item 1280x720): every thumb has the FIRST item's ratio; slide 3 keeps its own framing", async () => {
+    const t3 = { scale: 1.4, x: 0.15, y: -0.1 };
+    const first = 1280 / 720;
+    const z = await zipOf(`assets=carousel3&aspect=original${fr({ "pa-3": t3 })}`);
+    const cover = await pdfThumb("auto-landscape.jpg", ef({ scale: 1, x: 0, y: 0 }, first), first);
+    const slide3 = await pdfThumb("auto-square.jpg", ef(t3, first), first);
+    for (const th of [cover, slide3]) assert.ok(Math.abs(th.ratio / first - 1) < 0.01, `thumb ratio ${th.ratio}`);
+    assert.ok((await meanDiff(cover.buf, z.files["cover.jpg"])) < 2.5, "cover");
+    assert.ok((await meanDiff(slide3.buf, z.files["slide-3.jpg"])) < 2.5, "slide 3");
+  });
+  await check("E. Client PDF, legacy post (no ratio): still the 3:4 Grid tile, 360x480, same as the Grid cell", async () => {
+    const th = await pdfThumb("img-768x480.jpg", null, 3 / 4);
+    assert.deepEqual(await dims(th.buf), [360, 480]);
+    assert.ok((await meanDiff(th.buf, (await route("cell=1&poster=img-768x480.jpg")).buf)) < 0.5);
+  });
   await check("E. the Grid's 3:4 tile of a 1:1 post = the centred 3:4 window of the exported square (Grid stays 3:4)", async () => {
     const t = { scale: 1.2, x: 0.05, y: 0 };
     const z = await zipOf(`assets=post&poster=auto-square.jpg&aspect=1:1${fr({ "pa-i": t })}`);
