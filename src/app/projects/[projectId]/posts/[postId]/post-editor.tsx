@@ -693,18 +693,6 @@ export function PostEditor({
             >
               <UndoIcon redo />
             </button>
-            {isTouchDevice && (
-              <button
-                type="button"
-                onClick={() => setReorderUnlocked((v) => !v)}
-                aria-pressed={reorderUnlocked}
-                className={`ml-auto rounded px-2 py-1 text-xs transition-colors duration-150 ${
-                  reorderUnlocked ? "bg-foreground text-background" : "text-muted hover:bg-black/[.06] hover:text-foreground"
-                }`}
-              >
-                {reorderUnlocked ? "🔓 Done reordering" : "🔒 Reorder"}
-              </button>
-            )}
           </div>
         )}
         <DndContext
@@ -815,6 +803,20 @@ export function PostEditor({
             >
               {saveFilesLabel(pendingShare)}
             </Button>
+          )}
+          {isTouchDevice && canManage && orderedAssets.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setReorderUnlocked((v) => !v)}
+              aria-pressed={reorderUnlocked}
+              aria-label={reorderUnlocked ? "Lock reordering" : "Unlock reordering"}
+              title={reorderUnlocked ? "Lock reordering" : "Unlock to reorder"}
+              className={`ml-auto flex h-9 w-9 items-center justify-center rounded transition-colors duration-150 ${
+                reorderUnlocked ? "bg-foreground text-background" : "text-muted hover:bg-black/[.06] hover:text-foreground"
+              }`}
+            >
+              <LockIcon open={reorderUnlocked} />
+            </button>
           )}
         </div>
       ) : (
@@ -1331,6 +1333,26 @@ function AspectRatioSelector({
       </div>
       {warning && <p className="text-[11px] text-amber-700 dark:text-amber-400">{warning}</p>}
     </div>
+  );
+}
+
+// Lucide's lock / lock-open, inlined like the editor's other icons.
+function LockIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+      <path d={open ? "M7 11V7a5 5 0 0 1 9.9-1" : "M7 11V7a5 5 0 0 1 10 0v4"} />
+    </svg>
   );
 }
 
