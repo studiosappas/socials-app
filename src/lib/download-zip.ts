@@ -2,6 +2,7 @@
 
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
+import { shareFiles, type ShareOutcome } from "./share-sheet";
 
 export type ZipAsset = { url: string; filename: string };
 
@@ -249,7 +250,18 @@ export async function shareOrDownloadAsset(url: string, filename: string, prefer
 // support canShare({files}), so capability detection alone isn't enough
 // to keep the OS share dialog off desktop "Save Media"/"Download" clicks.
 export async function shareOriginalAssets(assets: { url: string; filename: string }[], preferMobileUx: boolean): Promise<boolean> {
-  if (assets.length === 0 || !preferMobileUx) return false;
+  return (await prepareAndShareFiles(assets, preferMobileUx)).outcome === "shared";
+}
+
+// shareOriginalAssets with the share sheet's full outcome (lib/share-sheet.ts).
+// "needs-tap" comes with the fetched files: iOS refused the share because
+// fetching took longer than the tap's activation, so the caller keeps `files`
+// and calls shareFiles(files) from a second tap instead of zipping.
+export async function prepareAndShareFiles(
+  assets: { url: string; filename: string }[],
+  preferMobileUx: boolean,
+): Promise<{ outcome: ShareOutcome; files: File[] }> {
+  if (assets.length === 0 || !preferMobileUx) return { outcome: "unavailable", files: [] };
   const diag = {
     preferMobileUx,
     shareAvailable: typeof navigator !== "undefined" && typeof navigator.share === "function",
@@ -261,32 +273,24 @@ export async function shareOriginalAssets(assets: { url: string; filename: strin
     shareError: null as string | null,
     fallbackUsed: false,
   };
+  let files: File[];
   try {
-    const files = await Promise.all(assets.map((a) => fetchAsFile(a.url, a.filename)));
-    diag.fileTypes = files.map((f) => f.type);
-    diag.canShareResult = await canShareFiles(files);
-    if (diag.canShareResult) {
-      diag.shareAttempted = true;
-      await navigator.share({ files });
-      logShareDiagnostic(diag);
-      return true;
-    }
+    files = await Promise.all(assets.map((a) => fetchAsFile(a.url, a.filename)));
   } catch (error) {
     diag.shareError = error instanceof Error ? error.name || error.message : String(error);
-    if (error instanceof DOMException && error.name === "AbortError") {
-      logShareDiagnostic(diag);
-      return true;
-    }
+    diag.fallbackUsed = true;
+    logShareDiagnostic(diag);
+    return { outcome: "unavailable", files: [] };
   }
-  diag.fallbackUsed = true;
+  diag.fileTypes = files.map((f) => f.type);
+  diag.canShareResult = await canShareFiles(files);
+  diag.shareAttempted = diag.canShareResult;
+  const outcome = diag.canShareResult ? await shareFiles(files) : "unavailable";
+  if (outcome === "needs-tap") diag.shareError = "NotAllowedError";
+  diag.fallbackUsed = outcome === "unavailable";
   logShareDiagnostic(diag);
-  return false;
+  return { outcome, files: outcome === "needs-tap" ? files : [] };
 }
-
-// shareOriginalAssets above was named for its first use; it shares whatever
-// URLs it is given. Post Editor's "Save Media" now passes each asset's
-// EDITED result through the very same path, under this name.
-export const shareAssetFiles = shareOriginalAssets;
 
 const GENERIC_EXPORT_ERROR = "Couldn't prepare the download. Please try again.";
 

@@ -33,7 +33,8 @@ import { probeVideoFile, uploadFilesAndSummarize } from "@/lib/video-poster";
 import { checkFile, problemMessage, serverUploadProblem, UNSUPPORTED_VIDEO } from "@/lib/upload-validation";
 import { uploadFileDirect, newStoragePath } from "@/lib/direct-upload";
 import { DROP_ANIMATION, SORTABLE_TRANSITION } from "@/lib/dnd-motion";
-import { downloadFromExportRoute, filenameFromUrl, shareAssetFiles, shareOrDownloadAsset } from "@/lib/download-zip";
+import { downloadFromExportRoute, filenameFromUrl, prepareAndShareFiles, shareOrDownloadAsset } from "@/lib/download-zip";
+import { saveFilesLabel, shareFiles } from "@/lib/share-sheet";
 import {
   editedDownloadSource,
   postExportUrl,
@@ -561,6 +562,10 @@ export function PostEditor({
 
   // Which whole-post download is in flight, if any -- one at a time.
   const [downloading, setDownloading] = useState<"edited" | null>(null);
+  // Files fetched for the share sheet that iOS refused to share because the
+  // tap's activation ran out while they rendered (lib/share-sheet.ts). The
+  // "Save N Images / Videos" button shares exactly these on its own tap.
+  const [pendingShare, setPendingShare] = useState<File[] | null>(null);
 
   // "Download Media" / "Save Media": the post's EDITED media -- what the app
   // shows. Every image exports its saved edit (crop, adjustments, text,
@@ -572,6 +577,7 @@ export function PostEditor({
   async function handleDownloadAll() {
     if (downloading) return;
     setDownloading("edited");
+    setPendingShare(null);
     try {
       // Touch devices: individual Files in ONE native share sheet (so they
       // can go straight to Photos), same UX as before. Each file is fetched
@@ -582,7 +588,7 @@ export function PostEditor({
       // session doesn't revalidate the editor's props.
       //
       // Gated on isTouchDevice -- some desktop browsers do support
-      // canShare({files}), so shareAssetFiles' own preferMobileUx parameter
+      // canShare({files}), so prepareAndShareFiles' own preferMobileUx parameter
       // is what keeps the OS share dialog off desktop clicks.
       // A standalone Reel whose cover was explicitly changed contributes its
       // cover image as a second file, same rule as the export route's zip.
@@ -608,10 +614,35 @@ export function PostEditor({
       // isTouchDevice, but must get the zip, never the Windows Share dialog
       // (lib/native-share-device.ts).
       const useShareSheet = isTouchDevice && currentDeviceIsPhoneOrTablet();
-      if (shareable.length === sources.length && (await shareAssetFiles(shareable, useShareSheet))) return;
+      if (shareable.length === sources.length) {
+        const { outcome, files } = await prepareAndShareFiles(shareable, useShareSheet);
+        if (outcome === "shared") return;
+        if (outcome === "needs-tap") {
+          setPendingShare(files);
+          return;
+        }
+      }
 
       // Desktop, and the fallback whenever native file sharing isn't
       // available: the same edited media as one zip from the export route.
+      const result = await downloadFromExportRoute(postExportUrl(projectId, post.id), `post-${post.id}-export.zip`);
+      if (!result.ok) showError(result.message);
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  // Must reach navigator.share() with no await in between, so the share runs
+  // inside this click's activation.
+  async function handleSavePending() {
+    const files = pendingShare;
+    if (!files) return;
+    const outcome = await shareFiles(files);
+    if (outcome === "needs-tap") return;
+    setPendingShare(null);
+    if (outcome === "shared") return;
+    setDownloading("edited");
+    try {
       const result = await downloadFromExportRoute(postExportUrl(projectId, post.id), `post-${post.id}-export.zip`);
       if (!result.ok) showError(result.message);
     } finally {
@@ -753,6 +784,18 @@ export function PostEditor({
           >
             {downloading === "edited" ? "Preparing…" : isTouchDevice ? "Save Media" : "Download Media"}
           </Button>
+          {pendingShare && (
+            <Button
+              type="button"
+              variant="primary"
+              radius="none"
+              onClick={handleSavePending}
+              data-post-save-pending=""
+              className="w-fit px-6 py-3 text-xs tracking-wide uppercase"
+            >
+              {saveFilesLabel(pendingShare)}
+            </Button>
+          )}
         </div>
       ) : (
         <p className="text-xs text-muted">No images yet — upload one or add from the library below.</p>
