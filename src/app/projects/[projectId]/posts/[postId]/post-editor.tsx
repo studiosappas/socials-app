@@ -517,8 +517,15 @@ export function PostEditor({
     setOrderedAssets(assets);
   }
 
+  // Touch devices: reordering starts locked so a horizontal swipe scrolls
+  // the carousel strip instead of starting a drag; the Reorder toggle
+  // unlocks a long-press drag (same activation as Grid). Desktop unchanged.
+  const [reorderUnlocked, setReorderUnlocked] = useState(false);
+  const dragEnabled = canManage && (!isTouchDevice || reorderUnlocked);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(PointerSensor, {
+      activationConstraint: isTouchDevice ? { delay: 200, tolerance: 8 } : { distance: 4 },
+    }),
   );
 
   // Its own history stack, separate from Grid's -- the carousel only exists
@@ -686,6 +693,18 @@ export function PostEditor({
             >
               <UndoIcon redo />
             </button>
+            {isTouchDevice && (
+              <button
+                type="button"
+                onClick={() => setReorderUnlocked((v) => !v)}
+                aria-pressed={reorderUnlocked}
+                className={`ml-auto rounded px-2 py-1 text-xs transition-colors duration-150 ${
+                  reorderUnlocked ? "bg-foreground text-background" : "text-muted hover:bg-black/[.06] hover:text-foreground"
+                }`}
+              >
+                {reorderUnlocked ? "🔓 Done reordering" : "🔒 Reorder"}
+              </button>
+            )}
           </div>
         )}
         <DndContext
@@ -716,6 +735,7 @@ export function PostEditor({
                   key={asset.postAssetId}
                   asset={asset}
                   canManage={canManage}
+                  dragEnabled={dragEnabled}
                   isCover={index === 0}
                   itemCount={orderedAssets.length}
                   coverTransform={effectiveCoverTransform}
@@ -1317,6 +1337,7 @@ function AspectRatioSelector({
 function SortableAsset({
   asset,
   canManage,
+  dragEnabled,
   isCover,
   itemCount,
   coverTransform,
@@ -1332,6 +1353,8 @@ function SortableAsset({
 }: {
   asset: PostAssetItem;
   canManage: boolean;
+  // canManage, minus a touch device's locked reorder (see PostEditor).
+  dragEnabled: boolean;
   isCover: boolean;
   // The post's total media count -- a video's separate cover image only
   // exists for a standalone Reel (see includesVideoCover).
@@ -1362,6 +1385,7 @@ function SortableAsset({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: asset.postAssetId,
     transition: SORTABLE_TRANSITION,
+    disabled: !dragEnabled,
   });
   // Kept alongside dnd-kit's own setNodeRef so ReplaceAssetPopover can
   // compute a fixed portal position from this tile's rect even after the
@@ -1532,9 +1556,12 @@ function SortableAsset({
     <div
       ref={combinedTileRef}
       style={tileAspect ? { ...style, aspectRatio: tileAspect } : style}
-      {...(canManage ? { ...attributes, ...listeners } : {})}
-      className={`relative ${tileAspect ? "self-start" : "aspect-[3/4]"} w-24 shrink-0 touch-none rounded-none border border-border transition-opacity duration-150 ${
-        canManage ? "cursor-grab" : ""
+      {...(dragEnabled ? { ...attributes, ...listeners } : {})}
+      // touch-none only while draggable: a locked tile lets the browser pan
+      // the strip. select-none + no touch callout keep iOS's long-press
+      // menu from competing with the long-press drag.
+      className={`relative ${tileAspect ? "self-start" : "aspect-[3/4]"} w-24 shrink-0 rounded-none border border-border transition-opacity duration-150 ${
+        dragEnabled ? "cursor-grab touch-none select-none [-webkit-touch-callout:none]" : ""
       } ${isDragging ? "opacity-30" : ""}`}
     >
       {/* overflow-hidden lives on this inner wrapper, not the slot's root --
