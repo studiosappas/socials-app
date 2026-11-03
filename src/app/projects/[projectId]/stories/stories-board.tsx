@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   bulkDeleteStories,
@@ -13,8 +13,14 @@ import {
   type ActionResult,
 } from "@/lib/actions/stories";
 import { createShareLink } from "@/lib/actions/share-links";
-import { uploadFilesAndSummarize } from "@/lib/video-poster";
-import { problemMessage, serverUploadProblem } from "@/lib/upload-validation";
+import { uploadFilesConcurrently } from "@/lib/video-poster";
+import {
+  failureSummary,
+  serverUploadProblem,
+  uploadServerProblem,
+  type UploadProblem,
+} from "@/lib/upload-validation";
+import { createUploadBatchRunner, type UploadBatchProgress } from "@/lib/upload-batch";
 import { useToast } from "@/lib/hooks/use-toast";
 import { StoryCard } from "./story-card";
 import { ShareMenuButton } from "../share-menu";
@@ -717,34 +723,61 @@ function UploadAssetsZone({
   onUploaded: () => void;
   children: React.ReactNode;
 }) {
-  const [state, action, pending] = useActionState(
-    uploadContentAsset.bind(null, projectId, folderId),
-    undefined,
-  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragDepth = useRef(0);
   // Every upload failure -- each file rejected before the Server Action
-  // runs (named in one summary) and the save step's own failure -- is ONE
-  // dismissible upload-error toast; no inline copy.
+  // runs and each save that failed -- is named in ONE dismissible
+  // upload-error toast at the end of the batch; no inline copy.
   const { showUploadError } = useToast();
+  // One batch at a time (see lib/upload-batch.ts for why this replaced the
+  // shared useActionState hook): the tile and the drop target ignore new
+  // files until every file of the current batch has a result.
+  const [batchRunner] = useState(createUploadBatchRunner);
+  const [progress, setProgress] = useState<UploadBatchProgress | null>(null);
+  const uploading = progress !== null;
 
-  useEffect(() => {
-    if (state?.success) onUploaded();
-    else if (state?.message) showUploadError(problemMessage(serverUploadProblem(state.message)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
-
-  // Picker and drag-and-drop alike. Unsupported files used to be filtered
-  // out of a drop silently; the shared "content" rules now reject and name
-  // them while the rest upload.
+  // Picker and drag-and-drop alike. Unsupported files are rejected and
+  // named by the shared "content" rules while the rest upload.
+  //
+  // Concurrency 1 keeps the order the files always had: each file is saved
+  // (and gets its created_at/position) in the order picked. Each save is
+  // called directly, so one that throws becomes that file's own failure
+  // (uploadFilesConcurrently's per-file catch) instead of breaking the rest.
+  // The folder is the one open when the batch started.
   function handleFiles(fileList: FileList | File[]) {
     const files = Array.from(fileList);
-    if (files.length > 0) {
-      void uploadFilesAndSummarize(projectId, action, files, "content").then((summary) => {
+    if (files.length === 0 || batchRunner.isRunning()) return;
+    const targetFolderId = folderId;
+    void batchRunner
+      .run<UploadProblem>(
+        files.map((file) => file.name),
+        (report) =>
+          uploadFilesConcurrently(
+            projectId,
+            files.map((file) => ({ file, tempId: crypto.randomUUID() })),
+            (formData) => uploadContentAsset(projectId, targetFolderId, undefined, formData),
+            (outcome) => {
+              if (outcome.status === "error") report(outcome.fileName, outcome.problem);
+              else if (outcome.result?.success) report(outcome.fileName, null);
+              else {
+                // The save step's own text is never shown -- see serverUploadProblem.
+                if (outcome.result?.message) console.error("[content] upload save failed", { fileName: outcome.fileName });
+                report(outcome.fileName, serverUploadProblem(outcome.result?.message));
+              }
+            },
+            1,
+            "content",
+          ),
+        { fallbackProblem: uploadServerProblem(), onProgress: setProgress },
+      )
+      .then((result) => {
+        if (!result) return;
+        // One refresh for the whole batch, not one per file.
+        if (result.saved > 0) onUploaded();
+        const summary = failureSummary(result.failures, "content");
         if (summary) showUploadError(summary);
       });
-    }
   }
 
   if (!canManage) {
@@ -760,7 +793,8 @@ function UploadAssetsZone({
         if (!Array.from(e.dataTransfer.types).includes("Files")) return;
         e.preventDefault();
         dragDepth.current += 1;
-        setIsDraggingOver(true);
+        // No drop highlight mid-batch -- a drop then is ignored (handleFiles).
+        setIsDraggingOver(!uploading);
       }}
       onDragLeave={() => {
         dragDepth.current = Math.max(0, dragDepth.current - 1);
@@ -799,13 +833,18 @@ function UploadAssetsZone({
       <button
         type="button"
         onClick={() => fileInputRef.current?.click()}
-        disabled={pending}
+        disabled={uploading}
+        aria-busy={uploading}
         title="Upload assets — each file becomes its own content item"
         className="flex aspect-[3/4] w-full flex-col items-center justify-center gap-1.5 rounded-2xl border border-dashed border-border text-muted transition-colors duration-150 hover:border-foreground/30 hover:bg-black/[.03] disabled:opacity-60"
       >
         <UploadIcon className="h-5 w-5" />
         <span className="px-2 text-center text-[10px] tracking-wide uppercase">
-          {pending ? "Uploading…" : "Drop or Upload"}
+          {progress
+            ? progress.total > 1
+              ? `Uploading ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
+              : "Uploading…"
+            : "Drop or Upload"}
         </span>
       </button>
       {children}
