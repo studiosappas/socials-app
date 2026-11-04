@@ -809,13 +809,13 @@ export function PostEditor({
               type="button"
               onClick={() => setReorderUnlocked((v) => !v)}
               aria-pressed={reorderUnlocked}
-              aria-label={reorderUnlocked ? "Lock reordering" : "Unlock reordering"}
               title={reorderUnlocked ? "Lock reordering" : "Unlock to reorder"}
-              className={`ml-auto flex h-9 w-9 items-center justify-center rounded transition-colors duration-150 ${
+              className={`ml-auto flex h-9 items-center gap-1.5 rounded px-2.5 text-xs transition-colors duration-150 ${
                 reorderUnlocked ? "bg-foreground text-background" : "text-muted hover:bg-black/[.06] hover:text-foreground"
               }`}
             >
               <LockIcon open={reorderUnlocked} />
+              {reorderUnlocked ? "Done" : "Reorder"}
             </button>
           )}
         </div>
