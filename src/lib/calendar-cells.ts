@@ -5,7 +5,21 @@
 
 import { eachDayOfInterval, endOfMonth, endOfWeek, format, startOfMonth, startOfWeek } from "date-fns";
 import type { CalendarItemType } from "@/lib/actions/calendar";
-import type { PostStatus, StoryStatus } from "@/types/database";
+import type { MediaType, PostStatus, StoryStatus } from "@/types/database";
+
+// Which stored file a calendar chip/tile shows as its <img>. A plain <img>
+// can never decode a video or PDF, so those use their generated poster --
+// or nothing (the chip's icon fallback) until one exists, never the raw
+// file, which renders as a broken image. Images keep their original.
+// Same video/pdf rule as stories/page.tsx's coverUrl.
+export function calendarThumbnailPath(media: {
+  storage_path: string;
+  media_type?: MediaType | null;
+  poster_storage_path?: string | null;
+}): string | null {
+  if (media.media_type === "video" || media.media_type === "pdf") return media.poster_storage_path ?? null;
+  return media.storage_path;
+}
 
 export type CalendarItem = {
   itemType: CalendarItemType;

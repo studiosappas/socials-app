@@ -3,7 +3,7 @@
 //   node --experimental-strip-types src/lib/calendar-cells.test.ts
 
 import assert from "node:assert/strict";
-import { buildCalendarCells, calendarGridRange, type CalendarItem } from "./calendar-cells.ts";
+import { buildCalendarCells, calendarGridRange, calendarThumbnailPath, type CalendarItem } from "./calendar-cells.ts";
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -104,6 +104,15 @@ test("items dated outside the grid are dropped, not misplaced", () => {
   });
   assert.equal(cells.flatMap((c) => c.items).length, 0);
   assert.equal(cells.filter((c) => c.note).length, 0);
+});
+
+test("video/pdf chips use the poster, never the raw file; images keep the original", () => {
+  assert.equal(calendarThumbnailPath({ storage_path: "a.mp4", media_type: "video", poster_storage_path: "a.jpg" }), "a.jpg");
+  assert.equal(calendarThumbnailPath({ storage_path: "d.pdf", media_type: "pdf", poster_storage_path: "d.jpg" }), "d.jpg");
+  // No poster yet: null -> the chip's icon fallback, not a broken <img>.
+  assert.equal(calendarThumbnailPath({ storage_path: "a.mp4", media_type: "video", poster_storage_path: null }), null);
+  assert.equal(calendarThumbnailPath({ storage_path: "a.mp4", media_type: "video" }), null);
+  assert.equal(calendarThumbnailPath({ storage_path: "i.jpg", media_type: "image", poster_storage_path: null }), "i.jpg");
 });
 
 console.log(`\n${passed} passed`);

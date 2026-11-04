@@ -1,13 +1,14 @@
 import { addMonths, endOfMonth, format, startOfMonth, subMonths } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
 import { CalendarBoard } from "./calendar-board";
-import { buildCalendarCells, calendarGridRange, type CalendarItem } from "@/lib/calendar-cells";
+import { buildCalendarCells, calendarGridRange, calendarThumbnailPath, type CalendarItem } from "@/lib/calendar-cells";
 import { getProjectMemberOptions } from "@/lib/data/post-comments";
 import { mergeWorkspaceSettings } from "@/lib/account-settings";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { AccessRestricted } from "../access-restricted";
 import { effectivePostType } from "@/lib/post-type";
+import type { MediaType } from "@/types/database";
 
 export default async function CalendarPage({
   params,
@@ -139,14 +140,14 @@ export default async function CalendarPage({
     allPostIds.length
       ? supabase
           .from("post_assets")
-          .select("post_id, position, media_assets(storage_path)")
+          .select("post_id, position, media_assets(storage_path, media_type, poster_storage_path)")
           .in("post_id", allPostIds)
           .order("position")
       : Promise.resolve({ data: [] }),
     allStoryIds.length
       ? supabase
           .from("story_frames")
-          .select("story_id, position, media_assets(storage_path)")
+          .select("story_id, position, media_assets(storage_path, media_type, poster_storage_path)")
           .in("story_id", allStoryIds)
           .order("position")
       : Promise.resolve({ data: [] }),
@@ -158,14 +159,13 @@ export default async function CalendarPage({
     noteByDate.set(note.date, note.body);
   }
 
+  type ItemMedia = { storage_path: string; media_type: MediaType; poster_storage_path: string | null };
   const pathSet = new Set<string>();
-  for (const a of postAssets ?? []) {
-    const p = (a.media_assets as { storage_path: string } | null)?.storage_path;
-    if (p) pathSet.add(p);
-  }
-  for (const f of storyFrames ?? []) {
-    const p = (f.media_assets as { storage_path: string } | null)?.storage_path;
-    if (p) pathSet.add(p);
+  for (const row of [...(postAssets ?? []), ...(storyFrames ?? [])]) {
+    const m = row.media_assets as ItemMedia | null;
+    if (!m) continue;
+    pathSet.add(m.storage_path);
+    if (m.poster_storage_path) pathSet.add(m.poster_storage_path);
   }
 
   const urlByPath = await getCachedSignedUrls(supabase, "project-media", Array.from(pathSet));
@@ -180,18 +180,20 @@ export default async function CalendarPage({
     if (a.media_assets) itemCountByPost.set(a.post_id, (itemCountByPost.get(a.post_id) ?? 0) + 1);
   }
   for (const a of postAssets ?? []) {
-    const path = (a.media_assets as { storage_path: string } | null)?.storage_path;
-    const url = path ? urlByPath.get(path) ?? null : null;
-    if (!thumbnailByPost.has(a.post_id)) thumbnailByPost.set(a.post_id, url);
+    const media = a.media_assets as ItemMedia | null;
+    const url = media ? urlByPath.get(media.storage_path) ?? null : null;
+    const thumbPath = media ? calendarThumbnailPath(media) : null;
+    if (!thumbnailByPost.has(a.post_id)) thumbnailByPost.set(a.post_id, thumbPath ? urlByPath.get(thumbPath) ?? null : null);
     if (url) assetsByPost.set(a.post_id, [...(assetsByPost.get(a.post_id) ?? []), url]);
   }
 
   const thumbnailByStory = new Map<string, string | null>();
   const assetsByStory = new Map<string, string[]>();
   for (const f of storyFrames ?? []) {
-    const path = (f.media_assets as { storage_path: string } | null)?.storage_path;
-    const url = path ? urlByPath.get(path) ?? null : null;
-    if (!thumbnailByStory.has(f.story_id)) thumbnailByStory.set(f.story_id, url);
+    const media = f.media_assets as ItemMedia | null;
+    const url = media ? urlByPath.get(media.storage_path) ?? null : null;
+    const thumbPath = media ? calendarThumbnailPath(media) : null;
+    if (!thumbnailByStory.has(f.story_id)) thumbnailByStory.set(f.story_id, thumbPath ? urlByPath.get(thumbPath) ?? null : null);
     if (url) assetsByStory.set(f.story_id, [...(assetsByStory.get(f.story_id) ?? []), url]);
   }
 
