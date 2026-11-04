@@ -1,6 +1,16 @@
 "use client";
 
-import { memo, useCallback, useRef, useState, useSyncExternalStore, useTransition } from "react";
+import {
+  createContext,
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -33,43 +43,42 @@ import { Button } from "@/components/ui/button";
 import { MentionField } from "@/components/ui/mention-input";
 import { useOutsideClick } from "@/lib/hooks/use-outside-click";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
-import type { PostStatus, StoryStatus } from "@/types/database";
+import type { CalendarCell, CalendarItem } from "@/lib/calendar-cells";
+import {
+  CalendarView,
+  DayNote,
+  ITEM_CHIP_CLASS,
+  ItemChipBody,
+  ItemTileBody,
+  contentTypeLabel,
+  itemTileClassName,
+  type CalendarDayDrop,
+  type CalendarItemVariant,
+  type CalendarViewSlots,
+} from "./calendar-view";
 
-export type CalendarItem = {
-  itemType: CalendarItemType;
-  itemId: string;
-  label: string;
-  thumbnailUrl: string | null;
-  assetUrls: string[];
-  href: string;
-  status: PostStatus | StoryStatus;
-};
-
-export type CalendarCell = {
-  date: string;
-  dayNumber: number;
-  isCurrentMonth: boolean;
-  isToday: boolean;
-  items: CalendarItem[];
-  note: string | null;
-};
+export type { CalendarCell, CalendarItem } from "@/lib/calendar-cells";
 
 type LibraryDialogState = { date: string; itemType: CalendarItemType } | null;
 
-const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const UNSCHEDULED_PAGE_SIZE = 6; // 3 rows x 2 columns before "+ Load more"
-const DOUBLE_CLICK_WINDOW_MS = 220; // same value as Grid's identical slot disambiguation
 
-// Post items already carry their post_type ("post"|"reel"|"carousel") as
-// `label` (see calendar/page.tsx) -- stories don't have a type field, so
-// they're always "Story". This is what every chip/tile shows now instead of
-// a filename or a story's custom name, per the "text next to it is the
-// content type" request.
-function contentTypeLabel(item: CalendarItem): string {
-  if (item.itemType === "story") return "Story";
-  const raw = item.label || "post";
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
-}
+// What the board's CalendarView slots (BOARD_SLOTS below) read -- context
+// rather than props so the slots stay one stable module-level object and
+// CalendarView's memoized day cells don't all re-render on every change.
+// Split in two so starting a note edit doesn't re-render every item tile.
+const BoardItemContext = createContext<{ projectId: string; canManage: boolean }>({
+  projectId: "",
+  canManage: false,
+});
+const BoardNoteContext = createContext<{
+  canManage: boolean;
+  members: ProjectMemberOption[];
+  editingNoteDate: string | null;
+  onStartEditNote: (date: string) => void;
+  onCancelEditNote: () => void;
+  onSaveNote: (date: string, body: string) => void;
+} | null>(null);
 
 // dnd-kit's own DragOverlay always sizes and positions its wrapper to match
 // the ORIGINAL dragged element's rect (see PositionedOverlay in
@@ -118,30 +127,19 @@ export function CalendarBoard({
   unscheduled: CalendarItem[];
   canManage: boolean;
   members: ProjectMemberOption[];
-  // Account > Workspace's Week Starts On (0=Sunday, 1=Monday) -- rotates the
-  // header row to match; `cells` itself is already built starting from the
-  // matching day server-side (calendar/page.tsx passes the same value into
-  // date-fns' startOfWeek/endOfWeek), so only the label row needs rotating
-  // here. showWeekends isn't wired into an actual column-hide yet -- doing
-  // that safely means also updating the row-expand math a few lines down
+  // Account > Workspace's Week Starts On (0=Sunday, 1=Monday) -- see
+  // CalendarView. showWeekends isn't wired into an actual column-hide yet --
+  // doing that safely means also updating CalendarView's row-expand math
   // (Math.floor(index / 7), hardcoded to a 7-wide week) and drag-and-drop's
   // own per-row grouping, not just the grid's column count -- left as a
   // saved-but-not-yet-applied preference rather than risk that regressing
   // without being able to test drag-and-drop interactively.
   weekStartsOn?: 0 | 1;
 }) {
-  const weekdayLabels = [...WEEKDAY_LABELS.slice(weekStartsOn), ...WEEKDAY_LABELS.slice(0, weekStartsOn)];
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [libraryDialog, setLibraryDialog] = useState<LibraryDialogState>(null);
   const [dayDetailDate, setDayDetailDate] = useState<string | null>(null);
-  // Single click unfolds the whole week (row) a clicked day belongs to --
-  // every day in that row grows together via CSS Grid's own row-track
-  // sizing (all 7 cells share one implicit grid row, so giving them all the
-  // same taller min-height stretches the row as a unit, no per-week wrapper
-  // markup needed). Double-click still opens the full day-detail popup for
-  // creating/adding/notes, same disambiguation pattern as Grid's slots.
-  const [expandedRowIndex, setExpandedRowIndex] = useState<number | null>(null);
   // Right-click quick-actions menu: add a draft item, create new, add a
   // note, or remove whatever's scheduled -- a faster path to the same
   // actions DayDetailDialog already offers, without opening the full modal.
@@ -150,24 +148,6 @@ export function CalendarBoard({
   // Which cell (if any) is showing its inline note editor -- notes no
   // longer open a popup; the textarea lives directly in the cell instead.
   const [editingNoteDate, setEditingNoteDate] = useState<string | null>(null);
-  // Mobile only (see the mini calendar below the month nav) -- which day's
-  // strip is currently highlighted/scrolled-to. Not used on desktop at all.
-  const [selectedMobileDate, setSelectedMobileDate] = useState<string | null>(null);
-  // Measured, not a fixed offset -- the sticky panel's real height varies
-  // (a 5-week vs. 6-week month changes the mini calendar's row count), so a
-  // plain scrollIntoView({block:"start"}) lands the target's top edge at
-  // y=0, exactly where the sticky panel sits -- it scrolls to the right
-  // place, but the sticky panel then covers it, which is what actually
-  // looked like "the wrong date."
-  const stickyRef = useRef<HTMLDivElement>(null);
-  function handleSelectMobileDate(date: string) {
-    setSelectedMobileDate(date);
-    const target = document.getElementById(`cal-day-${date}`);
-    if (!target) return;
-    const stickyHeight = stickyRef.current?.getBoundingClientRect().height ?? 0;
-    const targetTop = target.getBoundingClientRect().top + window.scrollY;
-    window.scrollTo({ top: targetTop - stickyHeight - 8, behavior: "smooth" });
-  }
   // Touch needs a long-press (not a tiny movement threshold) to activate a
   // drag, same reasoning and same values as Grid's own board -- a bare
   // distance-based activator fires on the first pixel of a scroll swipe on
@@ -284,15 +264,25 @@ export function CalendarBoard({
     [effectiveCells, projectId, router, startTransition, setOverrideCells],
   );
 
-  // Stable references for the rest of DayCell's callback props, same
+  // Stable references for the rest of the day cells' callbacks, same
   // reasoning as handleSaveNote above.
-  const handleToggleRow = useCallback((rowIndex: number) => {
-    setExpandedRowIndex((current) => (current === rowIndex ? null : rowIndex));
-  }, []);
   const handleCancelEditNote = useCallback(() => setEditingNoteDate(null), []);
   const handleOpenContextMenu = useCallback(
     (date: string, x: number, y: number) => setContextMenu({ date, x, y }),
     [],
+  );
+
+  const itemContext = useMemo(() => ({ projectId, canManage }), [projectId, canManage]);
+  const noteContext = useMemo(
+    () => ({
+      canManage,
+      members,
+      editingNoteDate,
+      onStartEditNote: setEditingNoteDate,
+      onCancelEditNote: handleCancelEditNote,
+      onSaveNote: handleSaveNote,
+    }),
+    [canManage, members, editingNoteDate, handleCancelEditNote, handleSaveNote],
   );
 
   const libraryCell = libraryDialog ? effectiveCells.find((c) => c.date === libraryDialog.date) : undefined;
@@ -350,119 +340,27 @@ export function CalendarBoard({
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveItem(null)}
       >
-        <div className="flex flex-col gap-10 lg:flex-row">
-          <div className="flex-1">
-            {/* Sticky on mobile only -- the month nav + mini calendar act as
-                a fixed "screen" that never moves, with the day-strip list
-                below scrolling underneath it like a separate pane (Asana's
-                mobile calendar does the same split). Desktop is untouched
-                (sm:static cancels the sticky positioning entirely there). */}
-            <div
-              ref={stickyRef}
-              className="sticky top-0 z-20 bg-background pb-4 sm:static sm:z-auto sm:bg-transparent sm:pb-0"
-            >
-              <div className="relative flex items-center gap-4 sm:mb-6 sm:gap-8">
-                <Link
-                  href={`?month=${prevMonthParam}`}
-                  className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
-                >
-                  ‹ Prev
-                </Link>
-                <div className="hidden flex-1 items-center justify-center gap-10 text-border sm:flex">
-                  {Array.from({ length: 4 }).map((_, i) => (
-                    <span key={i} className="h-1 w-1 shrink-0 rounded-full bg-current" />
-                  ))}
-                </div>
-                <Link
-                  href={`?month=${nextMonthParam}`}
-                  className="shrink-0 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
-                >
-                  Next ›
-                </Link>
-                <h2 className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-xs font-semibold tracking-wide uppercase sm:text-sm">
-                  {monthLabel}
-                </h2>
-              </div>
-
-              <div className="sm:hidden">
-                {/* Asana-style mobile layout: a compact month grid up top
-                    (date numbers + a content dot, not full tiles -- a
-                    7-column grid can't show a post at a usable size, same
-                    reasoning as the agenda list below it), and tapping a
-                    date scrolls straight to that day's already-expanded
-                    strip rather than opening a separate popup -- the strip
-                    IS the "detail view" here. */}
-                <MiniCalendarGrid
-                  weekdayLabels={weekdayLabels}
-                  cells={effectiveCells}
-                  selectedDate={selectedMobileDate}
-                  onSelectDate={handleSelectMobileDate}
-                />
-              </div>
-            </div>
-
-            {/* Below sm:, a 7-column grid caps every cell at viewport/7 wide
-                no matter what, which can't show a post at a usable size on a
-                phone -- that's a structural ceiling, not something more CSS
-                tuning fixes, so mobile gets its own agenda-list presentation
-                instead of a shrunk copy of this grid. */}
-            <div className="hidden sm:block">
-              <div className="grid grid-cols-7 text-center text-[10px] font-semibold tracking-wide uppercase sm:text-xs">
-                {weekdayLabels.map((d) => (
-                  <div key={d} className="py-2">
-                    {d.slice(0, 3)}
+        <BoardItemContext.Provider value={itemContext}>
+          <BoardNoteContext.Provider value={noteContext}>
+            <CalendarView
+              monthLabel={monthLabel}
+              prevMonthParam={prevMonthParam}
+              nextMonthParam={nextMonthParam}
+              cells={effectiveCells}
+              weekStartsOn={weekStartsOn}
+              slots={BOARD_SLOTS}
+              onOpenDayDetail={setDayDetailDate}
+              onDayMenu={canManage ? handleOpenContextMenu : undefined}
+              aside={
+                canManage && (
+                  <div className="w-full lg:w-64 lg:shrink-0">
+                    <UnscheduledPanel projectId={projectId} items={effectiveUnscheduled} />
                   </div>
-                ))}
-              </div>
-              <div className="grid grid-cols-7 gap-1 sm:gap-2">
-                {effectiveCells.map((cell, index) => (
-                  <DayCell
-                    key={cell.date}
-                    projectId={projectId}
-                    cell={cell}
-                    rowIndex={Math.floor(index / 7)}
-                    isExpanded={Math.floor(index / 7) === expandedRowIndex}
-                    onToggleRow={handleToggleRow}
-                    onOpenDetail={setDayDetailDate}
-                    onContextMenu={canManage ? handleOpenContextMenu : undefined}
-                    canManage={canManage}
-                    members={members}
-                    isEditingNote={editingNoteDate === cell.date}
-                    onStartEditNote={setEditingNoteDate}
-                    onCancelEditNote={handleCancelEditNote}
-                    onSaveNote={handleSaveNote}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="sm:hidden border-t border-border">
-              {effectiveCells
-                .filter((cell) => cell.isCurrentMonth)
-                .map((cell) => (
-                  <MobileDayRow
-                    key={cell.date}
-                    projectId={projectId}
-                    cell={cell}
-                    canManage={canManage}
-                    members={members}
-                    highlighted={selectedMobileDate === cell.date}
-                    onContextMenu={canManage ? handleOpenContextMenu : undefined}
-                    isEditingNote={editingNoteDate === cell.date}
-                    onStartEditNote={setEditingNoteDate}
-                    onCancelEditNote={handleCancelEditNote}
-                    onSaveNote={handleSaveNote}
-                  />
-                ))}
-            </div>
-          </div>
-
-          {canManage && (
-            <div className="w-full lg:w-64 lg:shrink-0">
-              <UnscheduledPanel projectId={projectId} items={effectiveUnscheduled} />
-            </div>
-          )}
-        </div>
+                )
+              }
+            />
+          </BoardNoteContext.Provider>
+        </BoardItemContext.Provider>
 
         <DragOverlay dropAnimation={null}>
           {activeItem && (
@@ -568,43 +466,54 @@ export function CalendarBoard({
   );
 }
 
-// memo: one of these renders per visible day (30-42+ per month), and
-// without it every cell re-rendered whenever CalendarBoard re-rendered for
-// ANY reason (starting a drag anywhere on the month, an unrelated menu
-// opening on a different day, etc.) -- see the perf investigation this was
-// added for. Every callback prop below is a stable reference from
-// CalendarBoard (useCallback / a raw setState function) rather than a
-// fresh per-cell closure, which is what actually lets memo skip cells
-// whose own data didn't change.
-const DayCell = memo(function DayCell({
-  projectId,
-  cell,
-  rowIndex,
-  isExpanded,
-  onToggleRow,
-  onOpenDetail,
-  onContextMenu,
-  canManage,
-  members,
-  isEditingNote,
-  onStartEditNote,
-  onCancelEditNote,
-  onSaveNote,
+// The board's CalendarView slots: draggable/linked items with the publish
+// toggle, inline-editable notes, and droppable day cells. One stable
+// module-level object -- see BoardItemContext for where their state comes
+// from.
+function BoardCalendarItem({
+  item,
+  variant,
+  onDarkCell,
 }: {
-  projectId: string;
-  cell: CalendarCell;
-  rowIndex: number;
-  isExpanded: boolean;
-  onToggleRow: (rowIndex: number) => void;
-  onOpenDetail: (date: string) => void;
-  onContextMenu?: (date: string, x: number, y: number) => void;
-  canManage: boolean;
-  members: ProjectMemberOption[];
-  isEditingNote: boolean;
-  onStartEditNote: (date: string) => void;
-  onCancelEditNote: () => void;
-  onSaveNote: (date: string, body: string) => void;
+  item: CalendarItem;
+  variant: CalendarItemVariant;
+  onDarkCell: boolean;
 }) {
+  const { projectId, canManage } = useContext(BoardItemContext);
+  if (variant === "chip") return <CompactItemChip item={item} />;
+  if (variant === "strip") {
+    return (
+      <ExpandedItemTile
+        projectId={projectId}
+        item={item}
+        canManage={canManage}
+        widthClassName="w-28 shrink-0"
+        draggable={false}
+      />
+    );
+  }
+  return <ExpandedItemTile projectId={projectId} item={item} canManage={canManage} onDarkCell={onDarkCell} />;
+}
+
+// Notes no longer open a popup -- an inline textarea appears right here in
+// the cell/row (a "live bubble"), and a saved note renders as DayNote.
+// Always mounted per day (CalendarView renders the Note slot whether or not
+// the day has a note), so the draft text below lives exactly as long as it
+// did when this was part of DayCell/MobileDayRow themselves.
+function BoardDayNote({
+  cell,
+  variant,
+  allPublished,
+  isExpanded,
+}: {
+  cell: CalendarCell;
+  variant: "cell" | "row";
+  allPublished: boolean;
+  isExpanded: boolean;
+}) {
+  const { canManage, members, editingNoteDate, onStartEditNote, onCancelEditNote, onSaveNote } =
+    useContext(BoardNoteContext)!;
+  const isEditingNote = editingNoteDate === cell.date;
   const [noteText, setNoteText] = useState(cell.note ?? "");
   // Adjust state during render (this codebase's own convention, see
   // post-editor.tsx's prevAssets) rather than an effect -- only reset on the
@@ -616,50 +525,11 @@ const DayCell = memo(function DayCell({
     setPrevIsEditingNote(isEditingNote);
     if (isEditingNote) setNoteText(cell.note ?? "");
   }
-  const { isOver, setNodeRef } = useDroppable({
-    id: `day-${cell.date}`,
-    data: { date: cell.date },
-  });
-  const hasContent = cell.items.length > 0 || Boolean(cell.note);
-  // Expanded now stacks every item vertically (see the container below)
-  // instead of capping at 2 side-by-side -- the cell's own height grows to
-  // fit instead of hiding extras behind a "+N" count. Compact mode's small
-  // pill-chip cap is unrelated (that's not the layout this changed) and
-  // stays as-is.
-  const PREVIEW_ITEMS = isExpanded ? cell.items.length : 3;
-  const previewItems = cell.items.slice(0, PREVIEW_ITEMS);
-  const hiddenCount = cell.items.length - previewItems.length;
-  const allPublished = cell.items.length > 0 && cell.items.every((item) => item.status === "published");
-
-  // Same single/double-click disambiguation as Grid's slots (dnd-kit's
-  // PointerSensor suppresses native dblclick synthesis, so this is done by
-  // hand): a single click unfolds the row, a double-click still opens the
-  // full day-detail popup for creating content / adding from library.
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastClickAtRef = useRef(0);
-
-  function handleClick() {
-    const now = Date.now();
-    const isDoubleClick = now - lastClickAtRef.current < DOUBLE_CLICK_WINDOW_MS;
-    lastClickAtRef.current = now;
-
-    if (isDoubleClick) {
-      if (clickTimerRef.current) {
-        clearTimeout(clickTimerRef.current);
-        clickTimerRef.current = null;
-      }
-      onOpenDetail(cell.date);
-      return;
-    }
-
-    clickTimerRef.current = setTimeout(() => {
-      clickTimerRef.current = null;
-      onToggleRow(rowIndex);
-    }, DOUBLE_CLICK_WINDOW_MS);
-  }
 
   function handleNoteKeyDown(e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) {
-    e.stopPropagation();
+    // The desktop cell sits inside DayCell's own <button> -- keep its keys
+    // from reaching it.
+    if (variant === "cell") e.stopPropagation();
     // MentionField already consumed this key for its own dropdown
     // (navigating/selecting a mention, or dismissing it) -- don't also
     // save/cancel the note on the same keystroke.
@@ -672,358 +542,61 @@ const DayCell = memo(function DayCell({
     }
   }
 
+  if (isEditingNote) {
+    return variant === "cell" ? (
+      <MentionField
+        multiline
+        autoFocus
+        value={noteText}
+        onChange={setNoteText}
+        members={members}
+        rows={2}
+        placeholder="Note... (@ to mention)"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleNoteKeyDown}
+        onBlur={() => onSaveNote(cell.date, noteText)}
+        className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] text-foreground focus:outline-none sm:text-[10px]"
+      />
+    ) : (
+      <MentionField
+        multiline
+        autoFocus
+        value={noteText}
+        onChange={setNoteText}
+        members={members}
+        rows={2}
+        placeholder="Note... (@ to mention)"
+        onKeyDown={handleNoteKeyDown}
+        onBlur={() => onSaveNote(cell.date, noteText)}
+        className="w-full resize-none rounded-none border border-foreground bg-background px-2 py-1 text-xs focus:outline-none"
+      />
+    );
+  }
+
   return (
-    <button
-      type="button"
-      ref={setNodeRef}
-      onClick={handleClick}
-      onContextMenu={
-        onContextMenu
-          ? (e) => {
-              e.preventDefault();
-              onContextMenu(cell.date, e.clientX, e.clientY);
-            }
-          : undefined
-      }
-      title="Click to expand this week, double-click for day options, right-click for quick actions"
-      className={`flex min-w-0 flex-col items-start gap-1 overflow-hidden border p-1 text-left text-xs transition-[background-color,border-color,min-height] duration-200 sm:p-2 ${
-        isExpanded ? "min-h-40 sm:min-h-56" : "min-h-16 sm:min-h-24"
-      } ${
-        // Every item in the day is Published -- the "completed day" dark
-        // read-at-a-glance state. A mix of published/unpublished items keeps
-        // the cell's normal border/background; each tile still shows its own
-        // published state individually (see ExpandedItemTile). Exclusive of
-        // the normal branches below rather than appended after them: an
-        // outside-the-month day used to get BOTH text-muted and
-        // text-background, two conflicting color utilities, and which one won
-        // depended on stylesheet order, not on this class string. Outside the
-        // month it is softened (bg-foreground/80) instead of muted, which
-        // keeps its text readable.
-        allPublished
-          ? cell.isCurrentMonth
-            ? "border-foreground bg-foreground text-background"
-            : "border-foreground/80 bg-foreground/80 text-background"
-          : `${
-              hasContent
-                ? cell.isCurrentMonth
-                  ? "border-border"
-                  : "border-black/5 text-muted"
-                : cell.isCurrentMonth
-                  ? "border-dashed border-border"
-                  : "border-dashed border-black/5 text-muted"
-            } ${isOver ? "bg-black/[.04]" : "hover:bg-black/[.02]"}`
-      } ${
-        // Inset outline -- drawn inside the cell, so on a published day's
-        // bg-foreground it has to invert too or today's ring disappears.
-        cell.isToday
-          ? `outline outline-2 outline-offset-[-2px] ${allPublished ? "outline-background/70" : "outline-foreground"}`
-          : ""
-      }`}
-    >
-      <div className="flex w-full shrink-0 items-center justify-between">
-        <span className="text-[11px] font-semibold sm:text-xs">{cell.dayNumber}</span>
-        {canManage && onContextMenu && (
-          // Right-click (DayContextMenu's only other trigger) generally
-          // doesn't fire from a long-press on touch devices, so this gives
-          // mobile an explicit, discoverable way to reach the exact same
-          // menu -- sm:hidden since desktop already has right-click.
-          // A <span role="button">, not a real <button>, for the same
-          // nested-<button> HTML-validity reason as the publish-toggle
-          // below (this already sits inside DayCell's own outer <button>).
-          <span
-            role="button"
-            tabIndex={0}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              const rect = e.currentTarget.getBoundingClientRect();
-              onContextMenu(cell.date, rect.right, rect.bottom);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                e.stopPropagation();
-                const rect = e.currentTarget.getBoundingClientRect();
-                onContextMenu(cell.date, rect.right, rect.bottom);
-              }
-            }}
-            title="Day options"
-            className={`relative flex h-5 w-5 shrink-0 items-center justify-center rounded before:absolute before:-inset-2 before:content-[''] sm:hidden ${
-              allPublished ? "text-background/70" : "text-muted"
-            }`}
-          >
-            ⋮
-          </span>
-        )}
-      </div>
-
-      {/* Notes no longer open a popup -- an inline textarea appears right
-          here in the cell (a "live bubble"), and a saved note renders in
-          the same bordered-frame language as the content chips/tiles below
-          it, not a separate emoji indicator. */}
-      {isEditingNote ? (
-        <MentionField
-          multiline
-          autoFocus
-          value={noteText}
-          onChange={setNoteText}
-          members={members}
-          rows={2}
-          placeholder="Note... (@ to mention)"
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={handleNoteKeyDown}
-          onBlur={() => onSaveNote(cell.date, noteText)}
-          className="w-full shrink-0 resize-none rounded-none border border-foreground bg-background px-1 py-0.5 text-[9px] text-foreground focus:outline-none sm:text-[10px]"
-        />
-      ) : (
-        cell.note && (
-          // A div, not a <button> -- this already sits inside DayCell's own
-          // outer <button>, and a <button> nested in a <button> is invalid
-          // HTML that the browser's parser silently un-nests, causing a
-          // React hydration mismatch (confirmed live: "cannot be a
-          // descendant of <button>").
-          <div
-            role={canManage ? "button" : undefined}
-            tabIndex={canManage ? 0 : undefined}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (canManage) onStartEditNote(cell.date);
-            }}
-            onKeyDown={(e) => {
-              if (canManage && (e.key === "Enter" || e.key === " ")) {
-                e.preventDefault();
-                e.stopPropagation();
-                onStartEditNote(cell.date);
-              }
-            }}
-            title={cell.note}
-            className={`w-full shrink-0 rounded-none border px-1 py-0.5 text-left text-[9px] sm:text-[10px] ${
-              allPublished ? "border-background/30 bg-background/10 text-background/80" : "border-border bg-black/[.02] text-muted"
-            } ${isExpanded ? "line-clamp-3 whitespace-pre-wrap" : "truncate"}`}
-          >
-            {cell.note}
-          </div>
-        )
-      )}
-
-      {previewItems.length > 0 && (
-        <div className={isExpanded ? "flex w-full flex-col gap-1" : "flex w-full flex-wrap gap-1"}>
-          {previewItems.map((item) =>
-            isExpanded ? (
-              <ExpandedItemTile
-                key={`${item.itemType}-${item.itemId}`}
-                projectId={projectId}
-                item={item}
-                canManage={canManage}
-                onDarkCell={allPublished}
-              />
-            ) : (
-              <CompactItemChip key={`${item.itemType}-${item.itemId}`} item={item} />
-            ),
-          )}
-          {hiddenCount > 0 && (
-            <span className={`text-[9px] ${allPublished ? "text-background/70" : "text-muted"}`}>+{hiddenCount}</span>
-          )}
-        </div>
-      )}
-    </button>
-  );
-});
-
-// The compact month grid at the top of the mobile layout -- date numbers and
-// a small content dot only, never tiles/thumbnails (a 7-column grid caps
-// each cell at viewport/7 wide, the same structural ceiling that ruled out
-// reusing the desktop DayCell for mobile in the first place). Purely a date
-// picker/wayfinder for the day-strip list below it -- tapping a date doesn't
-// show content here, it scrolls to that day's already-real strip.
-function MiniCalendarGrid({
-  weekdayLabels,
-  cells,
-  selectedDate,
-  onSelectDate,
-}: {
-  weekdayLabels: string[];
-  cells: CalendarCell[];
-  selectedDate: string | null;
-  onSelectDate: (date: string) => void;
-}) {
-  return (
-    <div>
-      <div className="grid grid-cols-7 text-center text-[9px] font-semibold tracking-wide uppercase text-muted">
-        {weekdayLabels.map((d) => (
-          <div key={d} className="py-1">
-            {d.slice(0, 1)}
-          </div>
-        ))}
-      </div>
-      <div className="grid grid-cols-7 gap-y-1">
-        {cells.map((cell) => {
-          const hasContent = cell.items.length > 0;
-          const isSelected = cell.date === selectedDate;
-          return (
-            <button
-              key={cell.date}
-              type="button"
-              disabled={!cell.isCurrentMonth}
-              onClick={() => onSelectDate(cell.date)}
-              className={`mx-auto flex aspect-square w-8 flex-col items-center justify-center gap-0.5 rounded-full text-xs transition-colors duration-150 ${
-                !cell.isCurrentMonth
-                  ? "text-muted/30"
-                  : isSelected
-                    ? "bg-foreground text-background"
-                    : cell.isToday
-                      ? "outline outline-1 outline-offset-[-1px] outline-foreground"
-                      : "hover:bg-black/[.04]"
-              }`}
-            >
-              <span>{cell.dayNumber}</span>
-              <span
-                className={`h-1 w-1 rounded-full ${
-                  hasContent ? (isSelected ? "bg-background" : "bg-foreground") : "bg-transparent"
-                }`}
-              />
-            </button>
-          );
-        })}
-      </div>
-    </div>
+    <DayNote
+      cell={cell}
+      variant={variant}
+      allPublished={allPublished}
+      isExpanded={isExpanded}
+      onActivate={canManage ? () => onStartEditNote(cell.date) : undefined}
+    />
   );
 }
 
-// Mobile's own presentation, swapped in below sm: instead of a shrunk copy
-// of the 7-column grid above (see the "structural ceiling" comment at its
-// call site) -- one row per day, date on the left, a horizontally
-// scrollable strip of real-sized ExpandedItemTiles on the right (no
-// expand/collapse state needed, unlike the grid: a horizontal strip already
-// holds any number of items without a week-toggle or "+N" cap). Reuses
-// ExpandedItemTile itself (not a rebuilt lookalike) so the visual language
-// -- image, content-type badge, publish-toggle circle -- stays identical to
-// desktop, and reuses the same ⋮ day-options menu DayCell already wires up
-// for touch, so no new server actions or menu component were needed.
-// memo, same reasoning as DayCell above.
-const MobileDayRow = memo(function MobileDayRow({
-  projectId,
-  cell,
-  canManage,
-  members,
-  highlighted = false,
-  onContextMenu,
-  isEditingNote,
-  onStartEditNote,
-  onCancelEditNote,
-  onSaveNote,
-}: {
-  projectId: string;
-  cell: CalendarCell;
-  canManage: boolean;
-  members: ProjectMemberOption[];
-  // Set when this row's date was just tapped in the mini calendar above --
-  // scrollIntoView already gets the viewport there, this is just the visual
-  // confirmation that it landed on the right day.
-  highlighted?: boolean;
-  onContextMenu?: (date: string, x: number, y: number) => void;
-  isEditingNote: boolean;
-  onStartEditNote: (date: string) => void;
-  onCancelEditNote: () => void;
-  onSaveNote: (date: string, body: string) => void;
-}) {
-  const [noteText, setNoteText] = useState(cell.note ?? "");
-  const [prevIsEditingNote, setPrevIsEditingNote] = useState(isEditingNote);
-  if (isEditingNote !== prevIsEditingNote) {
-    setPrevIsEditingNote(isEditingNote);
-    if (isEditingNote) setNoteText(cell.note ?? "");
-  }
-  const weekdayLabel = new Date(`${cell.date}T00:00:00`).toLocaleDateString("en-US", { weekday: "short" });
+function BoardDayDropTarget({ date, children }: { date: string; children: (drop: CalendarDayDrop) => ReactNode }) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: `day-${date}`,
+    data: { date },
+  });
+  return children({ ref: setNodeRef, isOver });
+}
 
-  function handleNoteKeyDown(e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) {
-    if (e.defaultPrevented) return;
-    if (e.key === "Escape") {
-      onCancelEditNote();
-    } else if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      onSaveNote(cell.date, noteText);
-    }
-  }
-
-  return (
-    <div
-      id={`cal-day-${cell.date}`}
-      className={`flex gap-3 border-b border-border px-1 py-3 transition-colors duration-500 first:pt-0 ${
-        highlighted ? "bg-black/[.05]" : cell.isToday ? "bg-black/[.02]" : ""
-      }`}
-    >
-      <div className="flex w-9 shrink-0 flex-col items-center pt-0.5">
-        <span
-          className={`flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold ${
-            cell.isToday ? "bg-foreground text-background" : ""
-          }`}
-        >
-          {cell.dayNumber}
-        </span>
-        <span className="mt-0.5 text-[9px] tracking-wide text-muted uppercase">{weekdayLabel}</span>
-      </div>
-
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        {isEditingNote ? (
-          <MentionField
-            multiline
-            autoFocus
-            value={noteText}
-            onChange={setNoteText}
-            members={members}
-            rows={2}
-            placeholder="Note... (@ to mention)"
-            onKeyDown={handleNoteKeyDown}
-            onBlur={() => onSaveNote(cell.date, noteText)}
-            className="w-full resize-none rounded-none border border-foreground bg-background px-2 py-1 text-xs focus:outline-none"
-          />
-        ) : (
-          cell.note && (
-            <div
-              role={canManage ? "button" : undefined}
-              tabIndex={canManage ? 0 : undefined}
-              onClick={() => canManage && onStartEditNote(cell.date)}
-              className="w-full rounded-none border border-border bg-black/[.02] px-2 py-1 text-left text-xs text-muted"
-            >
-              {cell.note}
-            </div>
-          )
-        )}
-
-        {cell.items.length > 0 ? (
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {cell.items.map((item) => (
-              <ExpandedItemTile
-                key={`${item.itemType}-${item.itemId}`}
-                projectId={projectId}
-                item={item}
-                canManage={canManage}
-                widthClassName="w-28 shrink-0"
-                draggable={false}
-              />
-            ))}
-          </div>
-        ) : (
-          !cell.note && <span className="text-xs text-muted/50">—</span>
-        )}
-      </div>
-
-      {canManage && onContextMenu && (
-        <button
-          type="button"
-          onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            onContextMenu(cell.date, rect.right, rect.bottom);
-          }}
-          title="Day options"
-          className="h-7 w-7 shrink-0 self-start rounded text-muted transition-colors duration-150 hover:bg-black/[.06] hover:text-foreground"
-        >
-          ⋮
-        </button>
-      )}
-    </div>
-  );
-});
+const BOARD_SLOTS: CalendarViewSlots = {
+  Item: BoardCalendarItem,
+  Note: BoardDayNote,
+  DropTarget: BoardDayDropTarget,
+};
 
 // Matches Brief's image-chip language (rounded-full pill, small circular
 // thumbnail, label text) -- draggable so an already-scheduled item can be
@@ -1057,23 +630,9 @@ const CompactItemChip = memo(function CompactItemChip({ item }: { item: Calendar
         // cursor. draggable={false} turns the native one off; dnd-kit's own
         // drag (via the wrapper's listeners) is unaffected.
         draggable={false}
-        // text-foreground is explicit, not inherited: this chip paints its
-        // own bg-background, and a fully published day's cell sets
-        // text-background -- inheriting that drew the label in the chip's
-        // own background color, invisible in both themes.
-        className="flex max-w-full items-center gap-1 rounded-full border border-border bg-background py-0.5 pr-1.5 pl-0.5 text-[9px] text-foreground transition-colors duration-150 hover:border-foreground/30 sm:text-[10px]"
+        className={ITEM_CHIP_CLASS}
       >
-        <span className="h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full bg-black/10 sm:h-4 sm:w-4">
-          {item.thumbnailUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover" draggable={false} />
-          ) : (
-            <span className="flex h-full w-full items-center justify-center text-[7px]">
-              {item.itemType === "story" ? "📖" : "🖼"}
-            </span>
-          )}
-        </span>
-        <span className="truncate">{contentTypeLabel(item)}</span>
+        <ItemChipBody item={item} />
       </Link>
     </div>
   );
@@ -1081,7 +640,7 @@ const CompactItemChip = memo(function CompactItemChip({ item }: { item: Calendar
 
 // The expanded-row tile: a real, readable image (not a small icon) at a
 // fixed 3:4 ratio, full width of the cell -- these now stack vertically
-// (see DayCell's container above) rather than sharing a row, so this is
+// (see DayCell's container in calendar-view.tsx) rather than sharing a row, so this is
 // `w-full` instead of the old `flex-1` row-sharing width. Content-type tag
 // stays a small corner badge (the same "minimal tag" language as Grid's
 // asset-count/video badges). Draggable for the same reason as CompactItemChip.
@@ -1105,7 +664,7 @@ const ExpandedItemTile = memo(function ExpandedItemTile({
   // pass fixes, and drag-to-reschedule isn't essential there since tapping
   // into the post/story to change its date already works.
   draggable?: boolean;
-  // Set by DayCell when every item in the day is published, so the cell
+  // Set by CalendarView's DayCell when every item in the day is published, so the cell
   // itself is bg-foreground -- the published border (foreground/60) would
   // vanish against it, so it inverts instead.
   onDarkCell?: boolean;
@@ -1149,88 +708,66 @@ const ExpandedItemTile = memo(function ExpandedItemTile({
         // Same native-link-drag-vs-dnd-kit-drag conflict as CompactItemChip's
         // own Link above -- see its comment for why.
         draggable={false}
-        className={`group relative block aspect-[3/4] w-full overflow-hidden border transition-colors duration-150 ${
-          published
-            ? onDarkCell
-              ? "border-background/50 bg-black/[.03]"
-              : "border-foreground/60 bg-black/[.03]"
-            : "border-border bg-black/[.03] hover:border-foreground/30"
-        }`}
+        className={itemTileClassName(published, onDarkCell)}
       >
-        {item.thumbnailUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={item.thumbnailUrl}
-            alt=""
-            loading="lazy"
-            className={`h-full w-full object-cover ${published ? "opacity-70" : ""}`}
-            draggable={false}
-          />
-        ) : (
-          <span className="flex h-full w-full items-center justify-center text-2xl">
-            {item.itemType === "story" ? "📖" : "🖼"}
-          </span>
-        )}
-        {published && <div className="absolute inset-0 bg-black/40" />}
-        <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">
-          {contentTypeLabel(item)}
-        </span>
-        {/* Comments live on the post/story editor itself (see ItemComments
-            there) -- this is just a discoverable affordance pointing at the
-            same destination the whole tile already links to, not a second
-            comment UI. Hover-only: it doesn't indicate an actual comment
-            count, so forcing it always-on for touch (no hover state) just
-            put an unclear icon over every tile with no way to dismiss it --
-            tapping the tile already reaches the same place. */}
-        <span
-          title="Comments"
-          className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
-        >
-          💬
-        </span>
-        {canManage && (
-          // A <span role="button">, not a real <button> -- this already sits
-          // inside a <Link> (an <a>) which itself sits inside DayCell's own
-          // outer <button>, and a <button> nested in a <button> is invalid
-          // HTML the browser's parser silently un-nests, causing a React
-          // hydration mismatch (confirmed live: "cannot contain a nested
-          // <button>") -- same reasoning as DayCell's own note-edit div above.
+        <ItemTileBody item={item} published={published}>
+          {/* Comments live on the post/story editor itself (see ItemComments
+              there) -- this is just a discoverable affordance pointing at the
+              same destination the whole tile already links to, not a second
+              comment UI. Hover-only: it doesn't indicate an actual comment
+              count, so forcing it always-on for touch (no hover state) just
+              put an unclear icon over every tile with no way to dismiss it --
+              tapping the tile already reaches the same place. */}
           <span
-            role="button"
-            tabIndex={0}
-            aria-disabled={pending}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              togglePublished();
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
+            title="Comments"
+            className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          >
+            💬
+          </span>
+          {canManage && (
+            // A <span role="button">, not a real <button> -- this already sits
+            // inside a <Link> (an <a>) which itself sits inside DayCell's own
+            // outer <button>, and a <button> nested in a <button> is invalid
+            // HTML the browser's parser silently un-nests, causing a React
+            // hydration mismatch (confirmed live: "cannot contain a nested
+            // <button>") -- same reasoning as DayCell's own note-edit div above.
+            <span
+              role="button"
+              tabIndex={0}
+              aria-disabled={pending}
+              onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 togglePublished();
-              }
-            }}
-            title={published ? "Mark not published" : "Mark published"}
-            // The visible glyph stays exactly 18x18 on every device -- the
-            // pointer-coarse:before: rule only adds an invisible, larger hit
-            // area around it (closer to the ~44px touch-target minimum)
-            // without changing anything about how this looks or sits on
-            // desktop, where a mouse doesn't need the extra margin.
-            className={`absolute right-1 top-1 rounded-full pointer-coarse:before:absolute pointer-coarse:before:-inset-3 pointer-coarse:before:content-[''] ${pending ? "opacity-50" : ""}`}
-          >
-            {published ? (
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <circle cx="9" cy="9" r="8" fill="white" />
-                <path d="M5.5 9.2 7.7 11.3 12.5 6.5" stroke="black" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <circle cx="9" cy="9" r="8" className="fill-black/40" stroke="white" strokeWidth="1.4" />
-              </svg>
-            )}
-          </span>
-        )}
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  togglePublished();
+                }
+              }}
+              title={published ? "Mark not published" : "Mark published"}
+              // The visible glyph stays exactly 18x18 on every device -- the
+              // pointer-coarse:before: rule only adds an invisible, larger hit
+              // area around it (closer to the ~44px touch-target minimum)
+              // without changing anything about how this looks or sits on
+              // desktop, where a mouse doesn't need the extra margin.
+              className={`absolute right-1 top-1 rounded-full pointer-coarse:before:absolute pointer-coarse:before:-inset-3 pointer-coarse:before:content-[''] ${pending ? "opacity-50" : ""}`}
+            >
+              {published ? (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <circle cx="9" cy="9" r="8" fill="white" />
+                  <path d="M5.5 9.2 7.7 11.3 12.5 6.5" stroke="black" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <circle cx="9" cy="9" r="8" className="fill-black/40" stroke="white" strokeWidth="1.4" />
+                </svg>
+              )}
+            </span>
+          )}
+        </ItemTileBody>
       </Link>
     </div>
   );

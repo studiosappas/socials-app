@@ -1,15 +1,7 @@
-import {
-  addMonths,
-  eachDayOfInterval,
-  endOfMonth,
-  endOfWeek,
-  format,
-  startOfMonth,
-  startOfWeek,
-  subMonths,
-} from "date-fns";
+import { addMonths, endOfMonth, format, startOfMonth, subMonths } from "date-fns";
 import { createClient } from "@/lib/supabase/server";
-import { CalendarBoard, type CalendarCell, type CalendarItem } from "./calendar-board";
+import { CalendarBoard } from "./calendar-board";
+import { buildCalendarCells, calendarGridRange, type CalendarItem } from "@/lib/calendar-cells";
 import { getProjectMemberOptions } from "@/lib/data/post-comments";
 import { mergeWorkspaceSettings } from "@/lib/account-settings";
 import { getCachedSignedUrls } from "@/lib/signed-url-cache";
@@ -115,10 +107,7 @@ export default async function CalendarPage({
   // Weekends -- fetched here (not just at Account) since this is the one
   // place they actually change anything.
   const { week_starts_on: weekStartsOn } = mergeWorkspaceSettings(profile?.workspace_settings);
-  const gridStart = startOfWeek(monthStart, { weekStartsOn });
-  const gridEnd = endOfWeek(monthEnd, { weekStartsOn });
-  const gridStartStr = format(gridStart, "yyyy-MM-dd");
-  const gridEndStr = format(gridEnd, "yyyy-MM-dd");
+  const { gridStartStr, gridEndStr } = calendarGridRange(anchor, weekStartsOn);
 
   if (!membership || !hasPagePermission(membership.role, membership.custom_permissions, "calendar")) {
     return <AccessRestricted />;
@@ -206,47 +195,45 @@ export default async function CalendarPage({
     if (url) assetsByStory.set(f.story_id, [...(assetsByStory.get(f.story_id) ?? []), url]);
   }
 
-  const itemsByDate = new Map<string, CalendarItem[]>();
+  // Posts before stories within a day -- buildCalendarCells keeps this order.
+  const scheduledItems: { date: string; item: CalendarItem }[] = [];
   for (const post of scheduledPosts ?? []) {
     if (!post.scheduled_date) continue;
-    const list = itemsByDate.get(post.scheduled_date) ?? [];
-    list.push({
-      itemType: "post",
-      itemId: post.id,
-      label: effectivePostType(post.post_type, itemCountByPost.get(post.id) ?? 0),
-      thumbnailUrl: thumbnailByPost.get(post.id) ?? null,
-      assetUrls: assetsByPost.get(post.id) ?? [],
-      href: `/projects/${projectId}/posts/${post.id}`,
-      status: post.status,
+    scheduledItems.push({
+      date: post.scheduled_date,
+      item: {
+        itemType: "post",
+        itemId: post.id,
+        label: effectivePostType(post.post_type, itemCountByPost.get(post.id) ?? 0),
+        thumbnailUrl: thumbnailByPost.get(post.id) ?? null,
+        assetUrls: assetsByPost.get(post.id) ?? [],
+        href: `/projects/${projectId}/posts/${post.id}`,
+        status: post.status,
+      },
     });
-    itemsByDate.set(post.scheduled_date, list);
   }
   for (const story of scheduledStories ?? []) {
     if (!story.scheduled_date) continue;
-    const list = itemsByDate.get(story.scheduled_date) ?? [];
-    list.push({
-      itemType: "story",
-      itemId: story.id,
-      label: story.name,
-      thumbnailUrl: thumbnailByStory.get(story.id) ?? null,
-      assetUrls: assetsByStory.get(story.id) ?? [],
-      href: `/projects/${projectId}/stories/${story.id}`,
-      status: story.status,
+    scheduledItems.push({
+      date: story.scheduled_date,
+      item: {
+        itemType: "story",
+        itemId: story.id,
+        label: story.name,
+        thumbnailUrl: thumbnailByStory.get(story.id) ?? null,
+        assetUrls: assetsByStory.get(story.id) ?? [],
+        href: `/projects/${projectId}/stories/${story.id}`,
+        status: story.status,
+      },
     });
-    itemsByDate.set(story.scheduled_date, list);
   }
 
-  const days = eachDayOfInterval({ start: gridStart, end: gridEnd });
-  const cells: CalendarCell[] = days.map((day) => {
-    const dateStr = format(day, "yyyy-MM-dd");
-    return {
-      date: dateStr,
-      dayNumber: day.getDate(),
-      isCurrentMonth: day.getMonth() === anchor.getMonth(),
-      isToday: dateStr === format(new Date(), "yyyy-MM-dd"),
-      items: itemsByDate.get(dateStr) ?? [],
-      note: noteByDate.get(dateStr) ?? null,
-    };
+  const cells = buildCalendarCells({
+    anchor,
+    weekStartsOn,
+    todayStr: format(new Date(), "yyyy-MM-dd"),
+    items: scheduledItems,
+    noteByDate,
   });
 
   const unscheduled: CalendarItem[] = [
