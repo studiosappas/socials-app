@@ -1,3 +1,5 @@
+import type { SharedCalendarRpc } from "@/lib/calendar-share-model";
+
 // landing_demo_content.value can hold any JSON-serializable shape (a plain
 // string, an array, or an object, depending on the content key) -- unlike
 // every other jsonb column in this app (annotation_json, cover_transform,
@@ -1033,6 +1035,25 @@ export interface Database {
         Update: { position?: number };
         Relationships: [];
       };
+      // supabase/add_calendar_share_links.sql -- owner/admin only (RLS).
+      calendar_share_links: {
+        Row: {
+          id: string;
+          project_id: string;
+          token: string;
+          week_starts_on: number;
+          created_by: string;
+          created_at: string;
+        };
+        Insert: {
+          project_id: string;
+          token: string;
+          week_starts_on?: number;
+          created_by: string;
+        };
+        Update: Record<string, never>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -1047,6 +1068,10 @@ export interface Database {
       get_shared_preview: {
         Args: { p_token: string };
         Returns: SharedPreviewPayload | null;
+      };
+      get_shared_calendar: {
+        Args: { p_token: string; p_month: string };
+        Returns: SharedCalendarRpc | null;
       };
       set_post_review_status: {
         Args: { p_post_id: string; p_status: ReviewStatus };

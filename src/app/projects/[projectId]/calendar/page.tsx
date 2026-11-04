@@ -9,6 +9,8 @@ import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
 import { AccessRestricted } from "../access-restricted";
 import { effectivePostType } from "@/lib/post-type";
 import type { MediaType } from "@/types/database";
+import { getCalendarShareLinks } from "@/lib/data/calendar-share-links";
+import { ShareCalendarButton } from "./share-calendar-button";
 
 export default async function CalendarPage({
   params,
@@ -117,6 +119,9 @@ export default async function CalendarPage({
   // Ordinary content-editing capability, not "genuinely privileged" -- see
   // grid/page.tsx's identical comment.
   const canManage = canEditContent(membership.role);
+  // Share Calendar exposes the whole calendar, so it's owner/admin only
+  // (same as calendar_share_links' RLS), not every content editor.
+  const canShareCalendar = membership.role === "owner" || membership.role === "admin";
 
   const allPostIds = [
     ...(scheduledPosts ?? []).map((p) => p.id),
@@ -130,7 +135,7 @@ export default async function CalendarPage({
   // calendarNotes (needs gridStartStr/gridEndStr, just derived above),
   // postAssets/storyFrames (need allPostIds/allStoryIds, just derived
   // above), and members are all independent of each other -- one wave.
-  const [{ data: calendarNotes }, { data: postAssets }, { data: storyFrames }, members] = await Promise.all([
+  const [{ data: calendarNotes }, { data: postAssets }, { data: storyFrames }, members, calendarShare] = await Promise.all([
     supabase
       .from("calendar_notes")
       .select("date, body")
@@ -152,6 +157,7 @@ export default async function CalendarPage({
           .order("position")
       : Promise.resolve({ data: [] }),
     getProjectMemberOptions(supabase, projectId),
+    canShareCalendar ? getCalendarShareLinks(supabase, projectId) : null,
   ]);
 
   const noteByDate = new Map<string, string>();
@@ -260,16 +266,23 @@ export default async function CalendarPage({
   ];
 
   return (
-    <CalendarBoard
-      projectId={projectId}
-      monthLabel={format(anchor, "MMMM yyyy")}
-      prevMonthParam={format(subMonths(anchor, 1), "yyyy-MM")}
-      nextMonthParam={format(addMonths(anchor, 1), "yyyy-MM")}
-      cells={cells}
-      unscheduled={unscheduled}
-      canManage={canManage}
-      members={members}
-      weekStartsOn={weekStartsOn}
-    />
+    <>
+      {calendarShare && (
+        <div className="mb-4 flex justify-end">
+          <ShareCalendarButton projectId={projectId} links={calendarShare.links} tableMissing={calendarShare.tableMissing} />
+        </div>
+      )}
+      <CalendarBoard
+        projectId={projectId}
+        monthLabel={format(anchor, "MMMM yyyy")}
+        prevMonthParam={format(subMonths(anchor, 1), "yyyy-MM")}
+        nextMonthParam={format(addMonths(anchor, 1), "yyyy-MM")}
+        cells={cells}
+        unscheduled={unscheduled}
+        canManage={canManage}
+        members={members}
+        weekStartsOn={weekStartsOn}
+      />
+    </>
   );
 }
