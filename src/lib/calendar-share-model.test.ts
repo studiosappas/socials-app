@@ -44,6 +44,7 @@ function rpc(): SharedCalendarRpc {
         postType: "reel",
         status: "draft",
         caption: "Launch reel",
+        notes: "Approved by client @Sam",
         media: [{ mediaType: "video", storagePath: `${P}/v.mp4`, posterStoragePath: `${P}/v-poster.jpg` }],
       },
       {
@@ -63,6 +64,7 @@ function rpc(): SharedCalendarRpc {
         postType: "reel",
         status: "draft",
         caption: "",
+        notes: null,
         media: [{ mediaType: "video", storagePath: `${P}/n.mp4`, posterStoragePath: null }],
       },
     ],
@@ -71,6 +73,7 @@ function rpc(): SharedCalendarRpc {
         id: "s1",
         date: "2026-11-03",
         status: "published",
+        notes: "Story note\nline 2",
         media: [{ mediaType: "image", storagePath: `${P}/s.jpg`, posterStoragePath: null }],
       },
     ],
@@ -177,6 +180,7 @@ test("previews: caption for posts, none for stories, every signed media item in 
   assert.deepEqual(previews["post:p-video"], {
     itemType: "post",
     caption: "Launch reel",
+    notes: "Approved by client @Sam",
     media: [{ url: `https://signed/${P}/v.mp4`, posterUrl: `https://signed/${P}/v-poster.jpg`, mediaType: "video" }],
   });
   assert.equal(previews["post:p-carousel"].caption, "");
@@ -185,6 +189,9 @@ test("previews: caption for posts, none for stories, every signed media item in 
     [`https://signed/${P}/a.jpg`, `https://signed/${P}/b.jpg`],
   );
   assert.equal(previews["story:s1"].caption, "");
+  assert.equal(previews["story:s1"].notes, "Story note\nline 2", "story notes kept as written");
+  assert.equal(previews["post:p-carousel"].notes, "", "notes absent (pre-migration RPC) -> empty");
+  assert.equal(previews["post:p-noposter"].notes, "", "null notes -> empty");
   assert.equal(guestPreviewKey(items[3].item), "story:s1");
   assert.equal(noteByDate.get("2026-11-05"), "Shoot day");
 });
@@ -218,21 +225,41 @@ test("migration: no anon table access, no storage policy, RLS on, owner/admin on
   assert.match(sql, /token text not null unique check \(token ~ '\^\[A-Za-z0-9_-\]\{43\}\$'\)/);
 });
 
-test("migration: RPC is definer-safe and returns display fields only", () => {
-  const fn = sql.slice(sql.indexOf("create or replace function public.get_shared_calendar"));
-  assert.match(fn, /security definer/);
-  assert.match(fn, /set search_path = public/);
-  assert.match(fn, /revoke all on function public\.get_shared_calendar\(text, date\) from public/);
-  assert.match(fn, /grant execute on function public\.get_shared_calendar\(text, date\) to anon, authenticated/);
-  assert.match(fn, /p\.archived = false/);
-  // Every content query is scoped to the token's project.
-  assert.equal((fn.match(/project_id = v_link\.project_id/g) ?? []).length, 3);
-  // Internal fields never selected.
-  for (const field of ["notes", "review_status", "st.name", "comments", "project_members", "created_by", "annotation_json"]) {
-    assert.ok(!new RegExp(`\\b${field.replace(".", "\\.")}\\b`).test(fn.replace(/'notes'|calendar_notes|n\.date|n\.body/g, "")), field);
-  }
-  // No writes from the guest path.
-  assert.doesNotMatch(fn, /\b(update|insert|delete)\b/i);
+const notesSql = readFileSync(new URL("../../supabase/add_calendar_share_notes.sql", import.meta.url), "utf8")
+  .split("\n")
+  .filter((l) => !l.trim().startsWith("--"))
+  .join("\n");
+const fnOf = (text: string) => text.slice(text.indexOf("create or replace function public.get_shared_calendar")).replace(/\r/g, "");
+
+for (const [name, text] of [["add_calendar_share_links.sql", sql], ["add_calendar_share_notes.sql", notesSql]] as const) {
+  test(`${name}: RPC is definer-safe and returns display fields only`, () => {
+    const fn = fnOf(text);
+    assert.match(fn, /security definer/);
+    assert.match(fn, /set search_path = public/);
+    assert.match(fn, /revoke all on function public\.get_shared_calendar\(text, date\) from public/);
+    assert.match(fn, /grant execute on function public\.get_shared_calendar\(text, date\) to anon, authenticated/);
+    assert.match(fn, /p\.archived = false/);
+    // Every content query is scoped to the token's project.
+    assert.equal((fn.match(/project_id = v_link\.project_id/g) ?? []).length, 3);
+    // Internal fields never selected. "notes" only ever as the approved
+    // post/story Notes and the day notes (calendar_notes).
+    const withoutApproved = fn.replace(/'notes', po\.notes|'notes', st\.notes|'notes', \(|calendar_notes|n\.date|n\.body/g, "");
+    for (const field of ["notes", "review_status", "st.name", "comments", "project_members", "created_by", "annotation_json", "preview_storage_path"]) {
+      assert.ok(!new RegExp(`\\b${field.replace(".", "\\.")}\\b`).test(withoutApproved), field);
+    }
+    // No writes from the guest path.
+    assert.doesNotMatch(fn, /\b(update|insert|delete)\b/i);
+  });
+}
+
+test("add_calendar_share_notes.sql = the reviewed function plus exactly post/story notes, nothing else", () => {
+  const lines = fnOf(notesSql).split("\n");
+  const withoutNotes = lines.filter((l) => !/^\s*'notes', (po|st)\.notes,$/.test(l));
+  assert.equal(lines.length - withoutNotes.length, 2);
+  assert.deepEqual(withoutNotes, fnOf(sql).split("\n"));
+  // Only the function -- no table, policy, table grant or storage change.
+  assert.equal(notesSql.slice(0, notesSql.indexOf("create or replace function")).trim(), "");
+  assert.doesNotMatch(notesSql, /create table|alter table|create policy|storage\.objects|on public\.calendar_share_links/i);
 });
 
 const guestSource = readFileSync(new URL("../app/preview-calendar/[token]/guest-calendar.tsx", import.meta.url), "utf8");

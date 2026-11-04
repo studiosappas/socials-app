@@ -43,12 +43,14 @@ const ITEMS = [
   { date: "2026-11-03", item: it("post", "carousel", "scheduled", "carousel", IMG_A) },
   { date: "2026-11-04", item: it("post", "noposter", "draft", "reel", null) },
   { date: "2026-11-05", item: it("story", "s1", "published", "", IMG_B) },
+  { date: "2026-11-06", item: it("post", "single", "draft", "post", IMG_A) },
 ];
 const PREVIEWS: Record<string, GuestPreview> = {
-  "post:reel": { itemType: "post", caption: "Launch reel caption", media: [{ url: "/no-such-video.mp4", posterUrl: POSTER, mediaType: "video" }] },
-  "post:carousel": { itemType: "post", caption: "Carousel caption", media: [{ url: IMG_A, posterUrl: null, mediaType: "image" }, { url: IMG_B, posterUrl: null, mediaType: "image" }] },
-  "post:noposter": { itemType: "post", caption: "", media: [] },
-  "story:s1": { itemType: "story", caption: "", media: [{ url: IMG_B, posterUrl: null, mediaType: "image" }] },
+  "post:reel": { itemType: "post", caption: "Launch reel caption", notes: "", media: [{ url: "/no-such-video.mp4", posterUrl: POSTER, mediaType: "video" }] },
+  "post:carousel": { itemType: "post", caption: "Carousel caption", notes: "Client: swap slide 2 @Sam", media: [{ url: IMG_A, posterUrl: null, mediaType: "image" }, { url: IMG_B, posterUrl: null, mediaType: "image" }] },
+  "post:single": { itemType: "post", caption: "Single caption", notes: "   ", media: [{ url: IMG_A, posterUrl: null, mediaType: "image" }] },
+  "post:noposter": { itemType: "post", caption: "", notes: "", media: [] },
+  "story:s1": { itemType: "story", caption: "", notes: "Story notes text", media: [{ url: IMG_B, posterUrl: null, mediaType: "image" }] },
 };
 
 export default async function Harness({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
@@ -124,6 +126,8 @@ async function open(browser, { mobile = false, query = "" } = {}) {
   return { ctx, page, actions, errors };
 }
 
+// SHOTS=<dir> also saves screenshots of the open previews, for a visual look.
+const shot = async (page, name) => process.env.SHOTS && page.screenshot({ path: path.join(process.env.SHOTS, `${name}.png`) });
 const dialog = (page) => page.locator("[role=dialog]");
 // The app's own Dialog (components/ui/dialog.tsx) has no role attribute.
 const appDialog = (page) => page.locator("div.fixed.inset-0.z-50");
@@ -192,6 +196,67 @@ async function run(browser) {
       assert.equal(await dialog(page).count(), 0);
     });
 
+    const headings = async () => page.locator("[data-guest-preview-text] h3").allInnerTexts();
+    const openChip = async (title, nth = 0) => {
+      await page.locator(`div.hidden.sm\\:block [role=button][title='${title}']`).nth(nth).click();
+      await dialog(page).waitFor();
+    };
+    const closePreview = async () => {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(200);
+      assert.equal(await dialog(page).count(), 0);
+    };
+
+    await check("desktop: single image with caption -> Caption section only (blank notes hidden)", async () => {
+      await openChip("Post");
+      assert.deepEqual(await headings(), ["CAPTION"]);
+      assert.match(await page.locator("[data-guest-preview-text]").innerText(), /Single caption/);
+      await closePreview();
+    });
+
+    await check("desktop: carousel with caption + notes beside the media; slides keep the text", async () => {
+      await openChip("Carousel");
+      assert.deepEqual(await headings(), ["CAPTION", "NOTES"]);
+      const panel = page.locator("[data-guest-preview-text]");
+      const text = await panel.innerText();
+      assert.match(text, /Carousel caption/);
+      assert.match(text, /Client: swap slide 2 @Sam/);
+      const media = await dialog(page).locator(".animate-settle-in").boundingBox();
+      const box = await panel.boundingBox();
+      assert.ok(box.x >= media.x + media.width - 1, `panel beside media: panel.x=${box.x} media.right=${media.x + media.width}`);
+      assert.ok(box.y < media.y + media.height && box.y + box.height > media.y, "same row");
+      assert.ok(media.width * media.height > box.width * 200, "media stays the larger element");
+      await shot(page, "desktop-carousel");
+      await dialog(page).getByLabel("Next").click();
+      assert.match(await dialog(page).innerText(), /2 \/ 2/);
+      assert.equal(await panel.innerText(), text, "unchanged after slide change");
+      await page.keyboard.press("ArrowLeft");
+      assert.match(await dialog(page).innerText(), /1 \/ 2/);
+      assert.equal(await panel.innerText(), text);
+      await closePreview();
+    });
+
+    await check("desktop: story with notes only -> Notes section only", async () => {
+      await openChip("Story");
+      assert.deepEqual(await headings(), ["NOTES"]);
+      assert.match(await page.locator("[data-guest-preview-text]").innerText(), /Story notes text/);
+      await closePreview();
+    });
+
+    await check("desktop: neither caption nor notes -> no text panel at all", async () => {
+      await openChip("Reel", 1);
+      assert.equal(await page.locator("[data-guest-preview-text]").count(), 0);
+      assert.equal(await dialog(page).getByText(/^(Caption|Notes)$/i).count(), 0);
+      await closePreview();
+    });
+
+    await check("desktop: text panel is read-only (no controls, links or editable fields)", async () => {
+      await openChip("Carousel");
+      const panel = page.locator("[data-guest-preview-text]");
+      assert.equal(await panel.locator("button, a, input, textarea, select, [contenteditable=true], [role=button]").count(), 0);
+      await closePreview();
+    });
+
     await check("desktop: clicking a day expands its week; expanded tiles open the preview", async () => {
       await page.locator("div.hidden.sm\\:block button[title='Click to expand this week']").filter({ has: page.locator("span:text-is('5')") }).first().click();
       await page.waitForTimeout(500);
@@ -227,6 +292,38 @@ async function run(browser) {
       await dialog(page).getByLabel("Close").last().tap();
       await page.waitForTimeout(200);
       assert.equal(await dialog(page).count(), 0);
+    });
+    await check("mobile: caption + notes below the media; slides keep the text", async () => {
+      await page.locator("div.sticky button").filter({ hasText: /^3$/ }).first().tap();
+      await page.waitForTimeout(500);
+      await page.locator("#cal-day-2026-11-03 [role=button][title='Carousel']").tap();
+      await dialog(page).waitFor();
+      const panel = page.locator("[data-guest-preview-text]");
+      assert.deepEqual(await panel.locator("h3").allInnerTexts(), ["CAPTION", "NOTES"]);
+      const media = await dialog(page).locator(".animate-settle-in").boundingBox();
+      const box = await panel.boundingBox();
+      assert.ok(box.y >= media.y + media.height, `panel below media: panel.y=${box.y} media.bottom=${media.y + media.height}`);
+      assert.ok(box.width <= 390 && media.width <= 390, "no horizontal overflow");
+      await shot(page, "mobile-carousel-top");
+      const text = await panel.innerText();
+      await dialog(page).getByLabel("Next").tap();
+      assert.match(await dialog(page).innerText(), /2 \/ 2/);
+      assert.equal(await panel.innerText(), text);
+      await panel.scrollIntoViewIfNeeded();
+      assert.ok(await panel.getByText("Client: swap slide 2 @Sam").isVisible());
+      await shot(page, "mobile-carousel-text");
+      await dialog(page).getByLabel("Close").last().tap();
+      await page.waitForTimeout(200);
+      assert.equal(await dialog(page).count(), 0);
+    });
+    await check("mobile: item with neither -> media only, no text panel", async () => {
+      await page.locator("div.sticky button").filter({ hasText: /^4$/ }).first().tap();
+      await page.waitForTimeout(500);
+      await page.locator("#cal-day-2026-11-04 [role=button][title='Reel']").tap();
+      await dialog(page).waitFor();
+      assert.equal(await page.locator("[data-guest-preview-text]").count(), 0);
+      await dialog(page).getByLabel("Close").last().tap();
+      await page.waitForTimeout(200);
     });
     await check("mobile: no server actions, no console/hydration errors", async () => {
       assert.deepEqual(actions, []);

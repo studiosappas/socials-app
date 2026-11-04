@@ -30,18 +30,22 @@ export type SharedCalendarRpcMedia = {
   posterStoragePath: string | null;
 };
 
-// get_shared_calendar's response (supabase/add_calendar_share_links.sql).
+// get_shared_calendar's response (supabase/add_calendar_share_links.sql,
+// plus add_calendar_share_notes.sql's post/story `notes` -- absent until
+// that runs, so optional).
 export type SharedCalendarRpc = {
   projectId: string;
   projectName: string;
   weekStartsOn: number;
-  posts: { id: string; date: string; postType: PostType; status: PostStatus; caption: string | null; media: SharedCalendarRpcMedia[] }[];
-  stories: { id: string; date: string; status: StoryStatus; media: SharedCalendarRpcMedia[] }[];
+  posts: { id: string; date: string; postType: PostType; status: PostStatus; caption: string | null; notes?: string | null; media: SharedCalendarRpcMedia[] }[];
+  stories: { id: string; date: string; status: StoryStatus; notes?: string | null; media: SharedCalendarRpcMedia[] }[];
   notes: { date: string; body: string }[];
 };
 
 export type GuestPreviewMedia = { url: string; posterUrl: string | null; mediaType: MediaType };
-export type GuestPreview = { itemType: "post" | "story"; caption: string; media: GuestPreviewMedia[] };
+// Post-level, not per slide. Stories have no caption field, so theirs is
+// always "". Notes are shared as written (approved), not filtered.
+export type GuestPreview = { itemType: "post" | "story"; caption: string; notes: string; media: GuestPreviewMedia[] };
 
 export function guestPreviewKey(item: Pick<CalendarItem, "itemType" | "itemId">): string {
   return `${item.itemType}:${item.itemId}`;
@@ -119,7 +123,7 @@ export function buildSharedCalendarItems(
       status: post.status,
     };
     items.push({ date: post.date, item });
-    previews[guestPreviewKey(item)] = { itemType: "post", caption: post.caption ?? "", media };
+    previews[guestPreviewKey(item)] = { itemType: "post", caption: post.caption ?? "", notes: post.notes ?? "", media };
   }
   for (const story of data.stories) {
     const { thumbnailUrl, media } = mediaOf(story.media);
@@ -133,7 +137,7 @@ export function buildSharedCalendarItems(
       status: story.status,
     };
     items.push({ date: story.date, item });
-    previews[guestPreviewKey(item)] = { itemType: "story", caption: "", media };
+    previews[guestPreviewKey(item)] = { itemType: "story", caption: "", notes: story.notes ?? "", media };
   }
 
   const noteByDate = new Map<string, string>();

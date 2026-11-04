@@ -113,12 +113,19 @@ export function GuestCalendar({
 }
 
 // One post/story: its media one at a time (arrows/counter for a carousel)
-// with the caption underneath. Media is shown whole (object-contain), not
-// cropped to a tile.
+// plus its Caption and Notes as read-only text -- beside the media on
+// desktop, below it on mobile. The text is post-level, so changing slides
+// never touches it. Media is shown whole (object-contain), not cropped to a
+// tile. With neither caption nor notes, the media takes the whole screen.
 function GuestItemPreview({ preview, onClose }: { preview: GuestPreview; onClose: () => void }) {
   const [index, setIndex] = useState(0);
   const count = preview.media.length;
   const current = preview.media[index];
+  const sections = [
+    { label: "Caption", text: preview.caption },
+    { label: "Notes", text: preview.notes },
+  ].filter((section) => section.text.trim() !== "");
+  const hasText = sections.length > 0;
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -136,57 +143,81 @@ function GuestItemPreview({ preview, onClose }: { preview: GuestPreview; onClose
   }, [count, onClose]);
 
   return (
-    <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex flex-col bg-background/98 backdrop-blur-sm">
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 overflow-y-auto bg-background/98 backdrop-blur-sm lg:overflow-hidden"
+    >
       <button type="button" aria-label="Close" onClick={onClose} className="fixed inset-0 -z-10 cursor-default" />
       <button
         type="button"
         onClick={onClose}
         aria-label="Close"
-        className="absolute right-4 top-4 z-10 flex h-9 w-9 items-center justify-center rounded-full text-foreground/60 transition-colors duration-150 hover:text-foreground"
+        className="fixed right-4 top-4 z-20 flex h-9 w-9 items-center justify-center rounded-full bg-background/80 text-foreground/60 transition-colors duration-150 hover:text-foreground"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
           <path d="M6 6l12 12M18 6L6 18" />
         </svg>
       </button>
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center px-4 pt-14 sm:px-16">
-        {count > 1 && (
-          <>
-            <PreviewArrow direction="prev" onClick={() => setIndex((i) => (i - 1 + count) % count)} />
-            <PreviewArrow direction="next" onClick={() => setIndex((i) => (i + 1) % count)} />
-          </>
-        )}
-        {current ? (
+      <div className={`flex flex-col lg:h-full lg:flex-row ${hasText ? "min-h-full" : "h-full"}`}>
+        <div className={`flex flex-col lg:min-h-0 lg:flex-1 ${hasText ? "" : "min-h-0 flex-1"}`}>
           <div
-            key={index}
-            className={`animate-settle-in h-full max-h-full overflow-hidden bg-black/[.03] ${
-              preview.itemType === "story" ? "aspect-[9/16]" : "aspect-[3/4]"
-            } max-w-full`}
+            className={`relative flex items-center justify-center px-4 pt-14 sm:px-16 lg:min-h-0 lg:flex-1 ${
+              hasText ? "h-[70dvh] shrink-0 lg:h-auto" : "min-h-0 flex-1"
+            }`}
           >
-            {current.mediaType === "video" ? (
-              <VideoCoverPlayer url={current.url} posterUrl={current.posterUrl} coverTransform={null} />
+            {count > 1 && (
+              <>
+                <PreviewArrow direction="prev" onClick={() => setIndex((i) => (i - 1 + count) % count)} />
+                <PreviewArrow direction="next" onClick={() => setIndex((i) => (i + 1) % count)} />
+              </>
+            )}
+            {current ? (
+              <div
+                key={index}
+                className={`animate-settle-in h-full max-h-full overflow-hidden bg-black/[.03] ${
+                  preview.itemType === "story" ? "aspect-[9/16]" : "aspect-[3/4]"
+                } max-w-full`}
+              >
+                {current.mediaType === "video" ? (
+                  <VideoCoverPlayer url={current.url} posterUrl={current.posterUrl} coverTransform={null} />
+                ) : (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={current.mediaType === "pdf" ? (current.posterUrl ?? current.url) : current.url}
+                    alt=""
+                    className="h-full w-full object-contain"
+                    draggable={false}
+                  />
+                )}
+              </div>
             ) : (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={current.mediaType === "pdf" ? (current.posterUrl ?? current.url) : current.url}
-                alt=""
-                className="h-full w-full object-contain"
-                draggable={false}
-              />
+              <p className="text-xs tracking-wide text-muted uppercase">No media yet</p>
             )}
           </div>
-        ) : (
-          <p className="text-xs tracking-wide text-muted uppercase">No media yet</p>
-        )}
-      </div>
+          <div className="flex shrink-0 justify-center pt-3 pb-5">
+            {count > 1 && (
+              <span className="text-xs tracking-wide text-muted uppercase">
+                {index + 1} / {count}
+              </span>
+            )}
+          </div>
+        </div>
 
-      <div className="flex max-h-[30dvh] shrink-0 flex-col items-center gap-2 overflow-y-auto px-4 pt-4 pb-6">
-        {count > 1 && (
-          <span className="text-xs tracking-wide text-muted uppercase">
-            {index + 1} / {count}
-          </span>
+        {hasText && (
+          <aside
+            data-guest-preview-text
+            className="flex w-full flex-col gap-6 border-t border-border bg-background px-6 pt-6 pb-10 lg:w-96 lg:shrink-0 lg:overflow-y-auto lg:border-t-0 lg:border-l lg:pt-16"
+          >
+            {sections.map((section) => (
+              <section key={section.label} className="flex flex-col gap-1.5">
+                <h3 className="text-[10px] tracking-wide text-muted uppercase">{section.label}</h3>
+                <p className="whitespace-pre-wrap break-words text-sm text-foreground">{section.text}</p>
+              </section>
+            ))}
+          </aside>
         )}
-        {preview.caption && <p className="w-full max-w-md whitespace-pre-wrap text-center text-sm text-muted">{preview.caption}</p>}
       </div>
     </div>
   );
