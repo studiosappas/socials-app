@@ -6,6 +6,7 @@ import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { logSystemEvent } from "@/lib/system-event-log";
 import type { MediaType } from "@/types/database";
 import { sameBaseFraming } from "@/lib/annotation-frame";
+import { isolatePostUsageForEdit } from "@/lib/post-usage-isolation";
 
 // TEMPORARY DIAGNOSTIC -- added specifically to trace a real, Supabase-
 // backed Adjustments Paste failure a local/stubbed environment could not
@@ -271,12 +272,13 @@ export async function saveMediaAssetAnnotation(
     // positional parameter so this still satisfies the shared
     // AnnotationSaveAction signature every caller (including Brief, which
     // has no post concept at all and never sets this) uses unmodified.
-    // Only clones when mediaAssetId is CURRENTLY someone else's cover too --
-    // a post editing its own exclusively-owned asset keeps writing directly
-    // to it, exactly as before.
+    // Only clones when ANY other post also uses mediaAssetId, at any
+    // position (lib/post-usage-isolation.ts) -- a post editing its own
+    // exclusively-owned asset keeps writing directly to it, exactly as
+    // before.
     //
     // FAIL CLOSED, not open: if this save WAS determined to need its own
-    // copy (sharedWithAnotherPost) and the clone/repoint step fails for ANY
+    // copy (shared with another post) and the clone/re-link step fails for ANY
     // reason, this must refuse the save rather than fall back to writing
     // directly onto the still-shared row -- that fallback is exactly what
     // let one post's edit silently leak onto every other post sharing the
@@ -290,41 +292,23 @@ export async function saveMediaAssetAnnotation(
     let targetAssetId = mediaAssetId;
     let clonedAssetId: string | null = null;
     if (editingPostId) {
-      const { data: coverUsers } = await supabase
-        .from("post_assets")
-        .select("post_id")
-        .eq("media_asset_id", mediaAssetId)
-        .eq("position", 0);
-      const sharedWithAnotherPost = (coverUsers ?? []).some((r) => r.post_id !== editingPostId);
-      mediaMutationLog({
-        action: "saveMediaAssetAnnotation",
-        postId: editingPostId,
-        sourceAssetId: mediaAssetId,
-        stage: "shared-check",
-        extra: { coverUserPostIds: (coverUsers ?? []).map((r) => r.post_id), sharedWithAnotherPost },
+      const isolation = await isolatePostUsageForEdit(supabase, {
+        mediaAssetId,
+        editingPostId,
+        clone: (id) => cloneMediaAssetForDivergence(supabase, id),
       });
-      if (sharedWithAnotherPost) {
-        const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
-        if (!cloneId) {
-          diagLogFail(opId, "divergence-clone-failed", new Error("cloneMediaAssetForDivergence returned null"), { mediaAssetId, editingPostId });
-          mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, stage: "divergence-clone-failed-refusing-save" });
-          return { message: "Couldn't save this edit independently. Please try again." };
-        }
-        const { error: repointError } = await supabase
-          .from("post_assets")
-          .update({ media_asset_id: cloneId })
-          .eq("post_id", editingPostId)
-          .eq("media_asset_id", mediaAssetId)
-          .eq("position", 0);
-        if (repointError) {
-          diagLogFail(opId, "divergence-repoint-failed", repointError, { mediaAssetId, cloneId, editingPostId });
-          mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId: cloneId, stage: "divergence-repoint-failed-refusing-save" });
-          return { message: "Couldn't save this edit independently. Please try again." };
-        }
-        targetAssetId = cloneId;
-        clonedAssetId = cloneId;
-        diagLog(opId, "cloned-for-divergence", { from: mediaAssetId, to: cloneId });
-        mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId: cloneId, stage: "diverged-repointed" });
+      if (isolation.kind === "failed") {
+        diagLogFail(opId, `divergence-${isolation.stage}-failed`, new Error(isolation.stage), { mediaAssetId, editingPostId, ...isolation.detail });
+        mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, stage: `divergence-${isolation.stage}-refusing-save`, extra: isolation.detail });
+        return { message: "Couldn't save this edit independently. Please try again." };
+      }
+      if (isolation.kind === "isolated") {
+        targetAssetId = isolation.cloneId;
+        clonedAssetId = isolation.cloneId;
+        diagLog(opId, "cloned-for-divergence", { from: mediaAssetId, to: isolation.cloneId });
+        mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId: isolation.cloneId, stage: "diverged-relinked", extra: { usageRowId: isolation.usageRowId, otherPostIds: isolation.otherPostIds } });
+      } else {
+        mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, stage: "not-shared" });
       }
     }
     mediaMutationLog({ action: "saveMediaAssetAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId, stage: "resolved-write-target" });
@@ -463,41 +447,23 @@ export async function saveMediaAssetPosterAnnotation(
     let targetAssetId = mediaAssetId;
     let clonedAssetId: string | null = null;
     if (editingPostId) {
-      const { data: coverUsers } = await supabase
-        .from("post_assets")
-        .select("post_id")
-        .eq("media_asset_id", mediaAssetId)
-        .eq("position", 0);
-      const sharedWithAnotherPost = (coverUsers ?? []).some((r) => r.post_id !== editingPostId);
-      mediaMutationLog({
-        action: "saveMediaAssetPosterAnnotation",
-        postId: editingPostId,
-        sourceAssetId: mediaAssetId,
-        stage: "shared-check",
-        extra: { coverUserPostIds: (coverUsers ?? []).map((r) => r.post_id), sharedWithAnotherPost },
+      const isolation = await isolatePostUsageForEdit(supabase, {
+        mediaAssetId,
+        editingPostId,
+        clone: (id) => cloneMediaAssetForDivergence(supabase, id),
       });
-      if (sharedWithAnotherPost) {
-        const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
-        if (!cloneId) {
-          diagLogFail(opId, "divergence-clone-failed", new Error("cloneMediaAssetForDivergence returned null"), { mediaAssetId, editingPostId });
-          mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, stage: "divergence-clone-failed-refusing-save" });
-          return { message: "Couldn't save this edit independently. Please try again." };
-        }
-        const { error: repointError } = await supabase
-          .from("post_assets")
-          .update({ media_asset_id: cloneId })
-          .eq("post_id", editingPostId)
-          .eq("media_asset_id", mediaAssetId)
-          .eq("position", 0);
-        if (repointError) {
-          diagLogFail(opId, "divergence-repoint-failed", repointError, { mediaAssetId, cloneId, editingPostId });
-          mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId: cloneId, stage: "divergence-repoint-failed-refusing-save" });
-          return { message: "Couldn't save this edit independently. Please try again." };
-        }
-        targetAssetId = cloneId;
-        clonedAssetId = cloneId;
-        diagLog(opId, "cloned-for-divergence", { from: mediaAssetId, to: cloneId });
-        mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId: cloneId, stage: "diverged-repointed" });
+      if (isolation.kind === "failed") {
+        diagLogFail(opId, `divergence-${isolation.stage}-failed`, new Error(isolation.stage), { mediaAssetId, editingPostId, ...isolation.detail });
+        mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, stage: `divergence-${isolation.stage}-refusing-save`, extra: isolation.detail });
+        return { message: "Couldn't save this edit independently. Please try again." };
+      }
+      if (isolation.kind === "isolated") {
+        targetAssetId = isolation.cloneId;
+        clonedAssetId = isolation.cloneId;
+        diagLog(opId, "cloned-for-divergence", { from: mediaAssetId, to: isolation.cloneId });
+        mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId: isolation.cloneId, stage: "diverged-relinked", extra: { usageRowId: isolation.usageRowId, otherPostIds: isolation.otherPostIds } });
+      } else {
+        mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, stage: "not-shared" });
       }
     }
     mediaMutationLog({ action: "saveMediaAssetPosterAnnotation", postId: editingPostId, sourceAssetId: mediaAssetId, targetAssetId, stage: "resolved-write-target" });
