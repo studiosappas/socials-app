@@ -2,7 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { uploadPosterIfPresent, setMediaAssetPoster, cloneMediaAssetForDivergence } from "@/lib/actions/media";
+import {
+  uploadPosterIfPresent,
+  setMediaAssetPoster,
+  setMediaAssetUploadSource,
+  cloneMediaAssetForDivergence,
+} from "@/lib/actions/media";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { ensureAutoTaskForPost, completeAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
@@ -376,7 +381,10 @@ export async function uploadPostAsset(
     return { message: insertError?.message ?? "Failed to save media." };
   }
 
-  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
+  await Promise.all([
+    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+    setMediaAssetUploadSource(supabase, mediaAsset.id, "grid"),
+  ]);
 
   const { error: assetError } = await supabase
     .from("post_assets")
@@ -477,7 +485,10 @@ export async function replacePostAsset(
       .single();
     if (insertError || !mediaAsset) return { message: insertError?.message ?? "Failed to save media." };
 
-    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
+    await Promise.all([
+      setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+      setMediaAssetUploadSource(supabase, mediaAsset.id, "grid"),
+    ]);
     newMediaAssetId = mediaAsset.id;
   } else {
     return { message: "Choose a file or select from the library." };

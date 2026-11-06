@@ -37,7 +37,7 @@ import {
   saveMediaAssetAnnotation,
   saveMediaAssetPosterAnnotation,
 } from "@/lib/actions/media";
-import { MediaLibrary, MediaThumbPreview } from "./media-library";
+import { LIBRARY_TAB_EMPTY_TEXT, LibrarySourceTabs, MediaLibrary, MediaThumbPreview } from "./media-library";
 import { BrandPanel } from "./brand-panel";
 import { CroppedCoverImage, GridCropOverlay, useNaturalSize } from "./grid-crop-overlay";
 import { CopyStyleDialog } from "./copy-style-dialog";
@@ -101,6 +101,7 @@ import {
 import { aspectValue } from "@/lib/aspect-ratio";
 import { setPostAspectRatio, updatePostAssetFrameTransform } from "@/lib/actions/posts";
 import { useMediaTiming } from "@/lib/media-diagnostics";
+import { countLibraryTabs, filterLibraryTab, type LibraryTab, type UploadSource } from "@/lib/media-upload-source";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -324,6 +325,10 @@ export type MediaLibraryItem = {
   // only Grid's own page.tsx populates it. null/undefined both mean
   // "unfoldered," shown in the library's root view.
   folderId?: string | null;
+  // Where the asset was originally uploaded -- drives the Library's
+  // Uploaded / From Content tabs (see lib/media-upload-source.ts). Only
+  // Grid's own page.tsx populates it; null/undefined both mean Uploaded.
+  uploadSource?: UploadSource | null;
   // True only for an optimistic placeholder shown the instant a file is
   // picked, before uploadMedia's insert has actually resolved (see
   // media-library.tsx/grid-board.tsx's MediaPickerDialog, both of which set
@@ -3106,6 +3111,11 @@ function MediaPickerDialog({
   const formRef = useRef<HTMLFormElement>(null);
   const [, startDeleteTransition] = useTransition();
   const { effectiveItems, uploadBatch, uploadFiles, deleteItem } = library;
+  // Same Uploaded / From Content split as the sidebar (and, like it, off in
+  // demoMode). This picker has never shown folders, so each tab is flat.
+  const showTabs = !demoMode;
+  const [tab, setTab] = useState<LibraryTab>("uploaded");
+  const tabItems = showTabs ? filterLibraryTab(effectiveItems, tab) : effectiveItems;
 
   function handleDelete(e: React.MouseEvent, mediaAssetId: string) {
     e.stopPropagation();
@@ -3131,6 +3141,8 @@ function MediaPickerDialog({
               onChange={(e) => {
                 const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
+                // New uploads always land on Uploaded -- show them there.
+                if (files.length > 0) setTab("uploaded");
                 uploadFiles(files);
               }}
             />
@@ -3146,6 +3158,8 @@ function MediaPickerDialog({
             </Button>
           </form>
         )}
+
+        {showTabs && <LibrarySourceTabs tab={tab} counts={countLibraryTabs(effectiveItems)} onChange={setTab} />}
 
         {/* Capped to roughly 9 rows (grid-cols-3, ~155px square cells at
             this dialog's max-w-lg width) but also bounded by 70% of the
@@ -3165,7 +3179,7 @@ function MediaPickerDialog({
             155px measured against this dialog's own max-w-lg width (three
             columns, gap-2, minus the Dialog's own padding). */}
         <div className="grid max-h-[min(1400px,70vh)] grid-cols-3 gap-2 [--tile-row-h:155px] auto-rows-[var(--tile-row-h)] overflow-y-auto">
-          {effectiveItems.map((item) => (
+          {tabItems.map((item) => (
             <div key={item.clientKey ?? item.id} className="relative min-w-0">
               <button
                 type="button"
@@ -3191,7 +3205,9 @@ function MediaPickerDialog({
             </div>
           ))}
         </div>
-        {effectiveItems.length === 0 && <p className="text-sm text-muted">No media uploaded yet.</p>}
+        {tabItems.length === 0 && (
+          <p className="text-sm text-muted">{showTabs ? LIBRARY_TAB_EMPTY_TEXT[tab] : "No media uploaded yet."}</p>
+        )}
       </div>
     </Dialog>
   );

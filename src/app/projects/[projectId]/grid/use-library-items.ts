@@ -184,6 +184,7 @@ export function useLibraryItems(
               storagePath: realStoragePath,
               mediaType,
               posterStoragePath: realPosterStoragePath,
+              uploadSource: "grid",
             });
             if ("message" in restored) throw new Error(restored.message);
             currentRef.id = restored.id;
@@ -238,6 +239,9 @@ export function useLibraryItems(
             clientKey: tempId,
             url,
             mediaType: (file.type.startsWith("video/") ? "video" : "image") as MediaLibraryItem["mediaType"],
+            // Same value uploadMedia records -- the placeholder shows on the
+            // Uploaded tab from the start.
+            uploadSource: "grid",
             pending: true,
           } satisfies MediaLibraryItem,
         };
@@ -338,6 +342,7 @@ export function useLibraryItems(
         if (!item.storagePath) continue;
         const storagePath = item.storagePath;
         const posterStoragePath = item.posterStoragePath ?? null;
+        const uploadSource = item.uploadSource ?? null;
         const current = { id: item.id };
         pushCommand({
           label: "Add media",
@@ -355,7 +360,12 @@ export function useLibraryItems(
             beginMutation();
             try {
               suppressAutoTrackRef.current = true;
-              const result = await restoreMediaAsset(projectId, { storagePath, mediaType: item.mediaType, posterStoragePath });
+              const result = await restoreMediaAsset(projectId, {
+                storagePath,
+                mediaType: item.mediaType,
+                posterStoragePath,
+                uploadSource,
+              });
               if ("message" in result) throw new Error(result.message);
               current.id = result.id;
               router.refresh();

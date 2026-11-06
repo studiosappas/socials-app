@@ -53,6 +53,7 @@
     "src/lib/aspect-ratio.test.ts",
     "src/lib/calendar-cells.test.ts",
     "src/lib/calendar-share-model.test.ts",
+    "src/lib/media-upload-source.test.ts",
     "src/app/projects/[projectId]/posts/[postId]/post-media-viewer-model.test.ts"
   ]
 }

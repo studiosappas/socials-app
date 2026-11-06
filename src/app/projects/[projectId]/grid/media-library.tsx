@@ -11,6 +11,7 @@ import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { RecoverableImg } from "@/components/recoverable-img";
 import { isFileDrag } from "@/lib/media-drop";
+import { countLibraryTabs, filterLibraryTab, type LibraryTab } from "@/lib/media-upload-source";
 
 export function MediaThumbPreview({
   item,
@@ -84,6 +85,47 @@ export function GridUsageIcon({ className }: { className?: string }) {
   );
 }
 
+// Uploaded / From Content -- shared by the sidebar below and Grid's touch
+// MediaPickerDialog so both read identically. Counts come from the caller's
+// already-loaded items (optimistic uploads/deletes included).
+export function LibrarySourceTabs({
+  tab,
+  counts,
+  onChange,
+}: {
+  tab: LibraryTab;
+  counts: Record<LibraryTab, number>;
+  onChange: (tab: LibraryTab) => void;
+}) {
+  const tabs: { id: LibraryTab; label: string }[] = [
+    { id: "uploaded", label: "Uploaded" },
+    { id: "content", label: "From Content" },
+  ];
+  return (
+    <div role="tablist" aria-label="Media source" className="flex border-b border-border">
+      {tabs.map(({ id, label }) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          aria-selected={tab === id}
+          onClick={() => onChange(id)}
+          className={`-mb-px flex-1 border-b-2 px-2 py-2 text-xs tracking-wide uppercase transition-colors duration-150 ${
+            tab === id ? "border-foreground text-foreground" : "border-transparent text-muted hover:text-foreground"
+          }`}
+        >
+          {label} <span className="text-muted tabular-nums">({counts[id]})</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export const LIBRARY_TAB_EMPTY_TEXT: Record<LibraryTab, string> = {
+  uploaded: "No uploads yet.",
+  content: "Nothing from Content yet. Media uploaded on the Content page appears here.",
+};
+
 export function MediaLibrary({
   projectId,
   items,
@@ -148,13 +190,23 @@ export function MediaLibrary({
   const ownLibrary = useLibraryItems(projectId, items, pushCommand, demoMode);
   const { effectiveItems, uploadBatch, uploadFiles, bulkDeleteItems } = sharedLibrary ?? ownLibrary;
 
+  // Uploaded / From Content. Off entirely in demoMode -- the landing page's
+  // Chapter 01 demo renders exactly as before. From Content is one flat
+  // list (Content has its own folders); Library folders stay on Uploaded.
+  const showTabs = !demoMode;
+  const [tab, setTab] = useState<LibraryTab>("uploaded");
+  const onContentTab = showTabs && tab === "content";
+  const tabCounts = countLibraryTabs(effectiveItems);
+  const tabItems = showTabs ? filterLibraryTab(effectiveItems, tab) : effectiveItems;
+
   // null = root view (folder tiles + unfoldered assets). Non-null = browsing
   // one folder's assets, with a "back" affordance to return to root.
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
-  const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null;
-  const visibleItems = effectiveItems.filter((item) =>
-    activeFolderId ? item.folderId === activeFolderId : !item.folderId,
-  );
+  const activeFolder = onContentTab ? null : (folders.find((f) => f.id === activeFolderId) ?? null);
+  const visibleItems = onContentTab
+    ? tabItems
+    : tabItems.filter((item) => (activeFolder ? item.folderId === activeFolder.id : !item.folderId));
+  const showFolders = !activeFolder && !onContentTab;
 
   // Every upload entry point (Upload Assets, the "+" tile, drag-and-drop)
   // goes through here -> the ONE shared useLibraryItems pipeline, so drops
@@ -162,10 +214,12 @@ export function MediaLibrary({
   // and optimistic placeholders as the picker. New uploads land at the top
   // of the ROOT view (they're never foldered), so this returns there and
   // scrolls the tile list up -- otherwise a user browsing a folder, or
-  // scrolled down a long library, wouldn't see them appear.
+  // scrolled down a long library, wouldn't see them appear. Same for the
+  // From Content tab: uploads here always land on Uploaded.
   const tileListRef = useRef<HTMLDivElement>(null);
   function startUpload(files: File[]) {
     if (files.length === 0) return;
+    if (tab !== "uploaded") changeTab("uploaded");
     setActiveFolderId(null);
     tileListRef.current?.scrollTo({ top: 0 });
     uploadFiles(files);
@@ -254,6 +308,14 @@ export function MediaLibrary({
       else next.add(id);
       return next;
     });
+  }
+
+  // Selection never carries across tabs -- Delete/Move must only ever act
+  // on tiles the user can currently see.
+  function changeTab(next: LibraryTab) {
+    setTab(next);
+    setActiveFolderId(null);
+    setSelectedIds(new Set());
   }
 
   useEffect(() => {
@@ -346,6 +408,8 @@ export function MediaLibrary({
         </form>
       )}
 
+      {showTabs && <LibrarySourceTabs tab={tab} counts={tabCounts} onChange={changeTab} />}
+
       {activeFolder ? (
         <button
           type="button"
@@ -393,7 +457,7 @@ export function MediaLibrary({
             : "83px",
         }}
       >
-        {!activeFolderId &&
+        {showFolders &&
           folders.map((folder) => (
             <button
               key={folder.id}
@@ -416,7 +480,7 @@ export function MediaLibrary({
             onToggleSelect={() => toggleSelected(item.id)}
           />
         ))}
-        {!demoMode && (
+        {!demoMode && !onContentTab && (
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -428,19 +492,28 @@ export function MediaLibrary({
         )}
       </div>
 
+      {showTabs && tabItems.length === 0 && !(showFolders && folders.length > 0) && (
+        <p className="text-xs text-muted">{LIBRARY_TAB_EMPTY_TEXT[tab]}</p>
+      )}
+
       {!demoMode && selectedIds.size > 0 && (
         <div className="sticky bottom-0 z-10 flex items-center justify-between gap-2 border border-border bg-card px-3 py-2 shadow-[0_2px_10px_rgba(0,0,0,0.1)]">
           <span className="text-xs tracking-wide text-muted uppercase">{selectedIds.size} selected</span>
           <div className="flex items-center gap-1.5">
-            <Button
-              type="button"
-              variant="secondary"
-              radius="none"
-              onClick={() => setMoveDialogOpen(true)}
-              className="px-2 py-1 text-xs"
-            >
-              Move to Folder
-            </Button>
+            {/* Library folders belong to the Uploaded tab only -- From
+                Content is always flat, so moving one of its assets into a
+                folder would have no visible effect anywhere. */}
+            {!onContentTab && (
+              <Button
+                type="button"
+                variant="secondary"
+                radius="none"
+                onClick={() => setMoveDialogOpen(true)}
+                className="px-2 py-1 text-xs"
+              >
+                Move to Folder
+              </Button>
+            )}
             <Button
               type="button"
               variant="primary"

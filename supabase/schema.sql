@@ -247,6 +247,11 @@ create table public.media_assets (
   -- using it keep working. A truly unused asset (zero references) is still
   -- actually deleted, never just archived. See deleteMedia/bulkDeleteMedia.
   archived boolean not null default false,
+  -- Where the asset was originally uploaded -- 'grid' or 'content' -- for
+  -- the Grid Media Library's Uploaded / From Content tabs. NULL (older
+  -- rows, Brief's generated designs) shows under Uploaded. See
+  -- add_media_upload_source.sql.
+  upload_source text check (upload_source in ('grid', 'content')),
   created_at timestamptz not null default now()
 );
 

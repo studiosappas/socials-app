@@ -3,6 +3,7 @@ import { getGridRowsWithCoverPaths } from "@/lib/grid-data";
 import { getShareLinksData } from "@/lib/data/share-links";
 import { getCachedSignedUrl, getCachedSignedUrls } from "@/lib/signed-url-cache";
 import { canEditContent, hasPagePermission } from "@/lib/role-permissions";
+import { uploadSourceMap } from "@/lib/media-upload-source";
 import { GridBoard, type GridBoardRow, type MediaFolder, type MediaLibraryItem } from "./grid-board";
 import { AccessRestricted } from "../access-restricted";
 
@@ -106,6 +107,12 @@ export default async function GridPage({
     // lookup here just means the library sidebar shows full originals
     // until the migration runs, never a broken page.
     { data: thumbnailRows },
+    // Isolated the same way -- upload_source (add_media_upload_source.sql)
+    // drives the Library's Uploaded / From Content tabs. Kept as the WHOLE
+    // result (not just `data`): on a not-yet-migrated database this select
+    // returns an error, never rows with a null field, and uploadSourceMap
+    // turns that into "no sources known" -- everything shows under Uploaded.
+    uploadSourceResult,
     { data: gridAssetRows },
   ] = await Promise.all([
     supabase
@@ -124,6 +131,9 @@ export default async function GridPage({
     assetIds.length
       ? supabase.from("media_assets").select("id, thumbnail_storage_path").in("id", assetIds)
       : Promise.resolve({ data: [] }),
+    assetIds.length
+      ? supabase.from("media_assets").select("id, upload_source").in("id", assetIds)
+      : Promise.resolve({ data: [], error: null }),
     gridPostIds.length
       ? supabase.from("post_assets").select("media_asset_id").in("post_id", gridPostIds)
       : Promise.resolve({ data: [] }),
@@ -146,6 +156,8 @@ export default async function GridPage({
   const thumbnailPathByAssetId = new Map(
     (thumbnailRows ?? []).map((r) => [r.id, (r as { thumbnail_storage_path: string | null }).thumbnail_storage_path]),
   );
+
+  const uploadSourceByAssetId = uploadSourceMap(uploadSourceResult);
 
   const usedInGridIds = new Set((gridAssetRows ?? []).map((r) => r.media_asset_id));
 
@@ -226,6 +238,7 @@ export default async function GridPage({
       asset.media_type === "video" && asset.poster_storage_path ? urlByPath.get(asset.poster_storage_path) ?? null : null,
     usedInGrid: usedInGridIds.has(asset.id),
     folderId: folderIdByAssetId.get(asset.id) ?? null,
+    uploadSource: uploadSourceByAssetId.get(asset.id) ?? null,
     };
   });
 

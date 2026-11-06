@@ -7,6 +7,7 @@ import { logSystemEvent } from "@/lib/system-event-log";
 import type { MediaType } from "@/types/database";
 import { sameBaseFraming } from "@/lib/annotation-frame";
 import { isolatePostUsageForEdit } from "@/lib/post-usage-isolation";
+import { parseUploadSource, type UploadSource } from "@/lib/media-upload-source";
 
 // TEMPORARY DIAGNOSTIC -- added specifically to trace a real, Supabase-
 // backed Adjustments Paste failure a local/stubbed environment could not
@@ -136,7 +137,19 @@ export async function cloneMediaAssetForDivergence(
     extra: error ? { errorMessage: error.message, actingUser: user.id.slice(0, 8) } : { actingUser: user.id.slice(0, 8) },
   });
 
-  return error || !clone ? null : clone.id;
+  if (error || !clone) return null;
+
+  // The clone keeps its source's origin. Its own read, not part of the
+  // select above: upload_source may not exist yet, and a failed lookup
+  // must never fail the clone itself.
+  const { data: sourceOrigin } = await supabase
+    .from("media_assets")
+    .select("upload_source")
+    .eq("id", sourceAssetId)
+    .maybeSingle();
+  await setMediaAssetUploadSource(supabase, clone.id, parseUploadSource(sourceOrigin?.upload_source));
+
+  return clone.id;
 }
 
 // If this asset is the cover (position 0) of any post, that post's saved
@@ -203,6 +216,21 @@ export async function setMediaAssetPoster(
 ): Promise<void> {
   if (!posterStoragePath) return;
   await supabase.from("media_assets").update({ poster_storage_path: posterStoragePath }).eq("id", mediaAssetId);
+}
+
+// Same isolation as setMediaAssetPoster above, for upload_source (the Grid
+// Media Library's Uploaded / From Content tabs). Before
+// add_media_upload_source.sql runs, this update returns an error and
+// changes nothing -- the asset just shows under Uploaded, the upload itself
+// is unaffected. Never thrown: a missed stamp only means the wrong tab.
+export async function setMediaAssetUploadSource(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mediaAssetId: string,
+  uploadSource: UploadSource | null,
+): Promise<void> {
+  if (!uploadSource) return;
+  const { error } = await supabase.from("media_assets").update({ upload_source: uploadSource }).eq("id", mediaAssetId);
+  if (error) console.warn(`[upload-source] not recorded for ${mediaAssetId.slice(0, 8)}: ${error.message}`);
 }
 
 // Read-only lookup for Grid's Copy Style feature -- Text and Adjustments

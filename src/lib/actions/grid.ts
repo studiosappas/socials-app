@@ -2,7 +2,13 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { uploadPosterIfPresent, setMediaAssetPoster, cloneMediaAssetForDivergence } from "@/lib/actions/media";
+import {
+  uploadPosterIfPresent,
+  setMediaAssetPoster,
+  setMediaAssetUploadSource,
+  cloneMediaAssetForDivergence,
+} from "@/lib/actions/media";
+import type { UploadSource } from "@/lib/media-upload-source";
 import { logActivity } from "@/lib/activity-log";
 import { logSystemEvent } from "@/lib/system-event-log";
 import { notifyProjectMembers } from "@/lib/notifications";
@@ -197,7 +203,10 @@ export async function uploadMedia(
     return { message: insertError?.message ?? "Failed to save media." };
   }
 
-  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
+  await Promise.all([
+    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
+    setMediaAssetUploadSource(supabase, mediaAsset.id, "grid"),
+  ]);
 
   // Independent of each other (activity log vs. member notifications) --
   // run concurrently rather than one after another. Neither blocks the
@@ -285,7 +294,7 @@ export async function deleteMedia(projectId: string, mediaAssetId: string) {
 // good), which is fine -- visually and functionally identical either way.
 export async function restoreMediaAsset(
   projectId: string,
-  data: { storagePath: string; mediaType: MediaType; posterStoragePath: string | null },
+  data: { storagePath: string; mediaType: MediaType; posterStoragePath: string | null; uploadSource?: UploadSource | null },
 ): Promise<{ id: string } | { message: string }> {
   const supabase = await createClient();
   const {
@@ -323,6 +332,9 @@ export async function restoreMediaAsset(
   if (error || !mediaAsset) {
     return { message: error?.message ?? "Failed to restore media." };
   }
+
+  // A restored asset keeps the tab it had (a redo of an undone upload).
+  await setMediaAssetUploadSource(supabase, mediaAsset.id, data.uploadSource ?? null);
 
   // Not revalidating /grid -- both callers (undo of a delete, redo of an
   // undone upload; see media-library.tsx's pushCommand) already call

@@ -278,8 +278,14 @@ export interface Database {
           folder_id: string | null;
           generated_by_ai: boolean;
           archived: boolean;
+          // 'grid' | 'content' | null -- see lib/media-upload-source.ts.
+          upload_source: string | null;
           created_at: string;
         };
+        // No upload_source here on purpose: it's written by its own
+        // follow-up update (setMediaAssetUploadSource), never folded into
+        // an insert -- a not-yet-migrated database rejects the WHOLE insert
+        // for an unknown column.
         Insert: {
           project_id: string;
           storage_path: string;
@@ -302,6 +308,7 @@ export interface Database {
           folder_id?: string | null;
           generated_by_ai?: boolean;
           archived?: boolean;
+          upload_source?: string | null;
         };
         Relationships: [];
       };
