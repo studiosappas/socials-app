@@ -2255,14 +2255,19 @@ const GridSlot = memo(function GridSlot({
   // null` (an asset that had never been annotated before this paste)
   // correctly takes buildAnnotationCanvas's own fresh-load branch, which
   // produces the same neutral state as never having pasted anything.
+  // postId is the post whose usage is being edited -- the server isolates
+  // a media asset shared with any other post onto this post's own copy
+  // (lib/post-usage-isolation.ts) and returns that copy's id as
+  // `mediaAssetId`, which the caller must follow for every later save.
   const persistAnnotationState = useCallback(
     async (
       annotationJson: object | null,
       imageUrl: string,
       mediaAssetId: string,
+      postId: string,
       saveAction: AnnotationSaveAction,
       targetAspect: { w: number; h: number },
-    ): Promise<{ previewUrl: string } | { error: string }> => {
+    ): Promise<{ previewUrl: string; mediaAssetId?: string } | { error: string }> => {
       const built = await buildAnnotationCanvas({ imageUrl, annotationJson, targetAspect });
       try {
         return await exportAndSaveAnnotation({
@@ -2270,6 +2275,7 @@ const GridSlot = memo(function GridSlot({
           exportScale: built.exportScale,
           projectId,
           attachmentId: mediaAssetId,
+          postId,
           saveAction,
         });
       } finally {
@@ -2360,6 +2366,19 @@ const GridSlot = memo(function GridSlot({
 
     if (wantsAssetPaste && slot.coverMediaAssetId && slot.coverOriginalUrl) {
       const mediaAssetId = slot.coverMediaAssetId;
+      const postId = slot.postId;
+      // The asset this post's cover CURRENTLY points at -- starts as the
+      // tile's, then follows whatever copy the server isolates this post
+      // onto (a save returns `mediaAssetId` only when it cloned). Mutable,
+      // same idiom as handleAssign's assignedPostId: the paste, its Undo
+      // and its Redo must each save onto, and set the tile to, the id from
+      // the LATEST save, never the one captured here -- after a clone the
+      // post no longer uses `mediaAssetId`, so a save aimed at it would be
+      // refused (or, before isolation, edit every other post sharing it).
+      const owned = { assetId: mediaAssetId };
+      const followSavedAsset = (saved: { mediaAssetId?: string }) => {
+        if (saved.mediaAssetId) owned.assetId = saved.mediaAssetId;
+      };
       const imageUrl = slot.coverOriginalUrl;
       const saveAction = slot.coverMediaType === "video" ? saveMediaAssetPosterAnnotation : saveMediaAssetAnnotation;
       setPasteBusy(true);
@@ -2472,12 +2491,14 @@ const GridSlot = memo(function GridSlot({
             canvas,
             exportScale: built.exportScale,
             projectId,
-            attachmentId: mediaAssetId,
+            attachmentId: owned.assetId,
+            postId,
             saveAction,
             opId,
           });
 
           if ("previewUrl" in result) {
+            followSavedAsset(result);
             // Applied AFTER the asset save resolves, never before/in
             // parallel -- saveMediaAssetAnnotation/saveMediaAssetPoster
             // Annotation both call resetCoverTransformForAsset internally,
@@ -2486,14 +2507,19 @@ const GridSlot = memo(function GridSlot({
             // silently clobber it a moment later.
             let cropOk = true;
             if (wantsCrop) {
-              cropOk = await persistCropOnly(targetSlot.postId!, nextTransform);
+              cropOk = await persistCropOnly(postId, nextTransform);
               if (!cropOk) showError("Pasted, but the crop couldn't be saved. Please try again.");
             }
             const appliedTransform = wantsCrop && cropOk ? nextTransform : targetSlot.coverTransform;
+            // coverMediaAssetId in BOTH the optimistic value and the commit
+            // patch: targetSlot still carries the pre-paste id, and a Grid
+            // refresh landing between the save and this commit would
+            // otherwise be overwritten back to it.
+            const pastedAssetId = owned.assetId;
             const reconcileOk = await mutateSlot(
               targetSlotId,
-              { ...targetSlot, thumbnailUrl: result.previewUrl, coverTransform: appliedTransform },
-              async () => ({ thumbnailUrl: result.previewUrl, coverTransform: appliedTransform }),
+              { ...targetSlot, coverMediaAssetId: pastedAssetId, thumbnailUrl: result.previewUrl, coverTransform: appliedTransform },
+              async () => ({ coverMediaAssetId: pastedAssetId, thumbnailUrl: result.previewUrl, coverTransform: appliedTransform }),
             );
             if (!reconcileOk) {
               showError("Pasted, but the Grid preview couldn't refresh. Reloading…");
@@ -2512,47 +2538,63 @@ const GridSlot = memo(function GridSlot({
             if (!demoMode) {
               pushCommand({
                 label: "Paste style",
+                // Both save onto owned.assetId -- this post's own copy
+                // once the paste above isolated it -- so Undo restores the
+                // prior look onto that copy rather than touching the shared
+                // original. A failed save changed nothing server-side: throw
+                // (the undo stack reports it and keeps this entry where it
+                // was) instead of showing a tile that looks undone/redone
+                // when it isn't, and skip the crop write so a paste is never
+                // left half-applied.
                 undo: async () => {
                   const beforeResult = await persistAnnotationState(
                     beforeAnnotationJson,
                     imageUrl,
-                    mediaAssetId,
+                    owned.assetId,
+                    postId,
                     saveAction,
                     pasteTargetAspect(targetSlot),
                   );
+                  if (!("previewUrl" in beforeResult)) throw new Error(beforeResult.error);
+                  followSavedAsset(beforeResult);
                   let cropUndoOk = true;
                   if (wantsCrop && cropOk) {
-                    cropUndoOk = await persistCropOnly(targetSlot.postId!, previousTransform);
+                    cropUndoOk = await persistCropOnly(postId, previousTransform);
                   }
-                  const previewUrl = "previewUrl" in beforeResult ? beforeResult.previewUrl : targetSlot.thumbnailUrl;
+                  const previewUrl = beforeResult.previewUrl;
                   const restoredTransform = wantsCrop && cropOk ? previousTransform : targetSlot.coverTransform;
+                  const assetId = owned.assetId;
                   const undoOk = await mutateSlot(
                     targetSlotId,
-                    { ...targetSlot, thumbnailUrl: previewUrl, coverTransform: restoredTransform },
-                    async () => ({ thumbnailUrl: previewUrl, coverTransform: restoredTransform }),
+                    { ...targetSlot, coverMediaAssetId: assetId, thumbnailUrl: previewUrl, coverTransform: restoredTransform },
+                    async () => ({ coverMediaAssetId: assetId, thumbnailUrl: previewUrl, coverTransform: restoredTransform }),
                   );
-                  if (!undoOk || !("previewUrl" in beforeResult) || !cropUndoOk) requestIdleRefresh();
+                  if (!undoOk || !cropUndoOk) requestIdleRefresh();
                 },
                 redo: async () => {
                   const afterResult = await persistAnnotationState(
                     afterAnnotationJson,
                     imageUrl,
-                    mediaAssetId,
+                    owned.assetId,
+                    postId,
                     saveAction,
                     pasteTargetAspect(targetSlot),
                   );
+                  if (!("previewUrl" in afterResult)) throw new Error(afterResult.error);
+                  followSavedAsset(afterResult);
                   let cropRedoOk = true;
                   if (wantsCrop && cropOk) {
-                    cropRedoOk = await persistCropOnly(targetSlot.postId!, nextTransform);
+                    cropRedoOk = await persistCropOnly(postId, nextTransform);
                   }
-                  const previewUrl = "previewUrl" in afterResult ? afterResult.previewUrl : result.previewUrl;
+                  const previewUrl = afterResult.previewUrl;
                   const reappliedTransform = wantsCrop && cropOk ? nextTransform : targetSlot.coverTransform;
+                  const assetId = owned.assetId;
                   const redoOk = await mutateSlot(
                     targetSlotId,
-                    { ...targetSlot, thumbnailUrl: previewUrl, coverTransform: reappliedTransform },
-                    async () => ({ thumbnailUrl: previewUrl, coverTransform: reappliedTransform }),
+                    { ...targetSlot, coverMediaAssetId: assetId, thumbnailUrl: previewUrl, coverTransform: reappliedTransform },
+                    async () => ({ coverMediaAssetId: assetId, thumbnailUrl: previewUrl, coverTransform: reappliedTransform }),
                   );
-                  if (!redoOk || !("previewUrl" in afterResult) || !cropRedoOk) requestIdleRefresh();
+                  if (!redoOk || !cropRedoOk) requestIdleRefresh();
                 },
               });
             }

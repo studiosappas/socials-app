@@ -474,4 +474,73 @@ test("SERVER_ROWS_RECEIVED adopts the snapshot's own order once no reorder is pe
   assert.deepEqual(state.rowIds, ["row2", "row1"]);
 });
 
+// ---------------------------------------------------------------------------
+// Paste Style onto a shared cover: the save isolates this post onto its own
+// copy ("asset-clone"), then grid-board.tsx's handlePasteStyle commits the
+// tile from a slot value captured BEFORE the save (still "asset-p1"). A Grid
+// refresh can land in between, since the save itself isn't a pending slot
+// op. The tile must end on the copy, or the next Paste/Undo/Copy Style
+// targets an asset this post no longer uses.
+// ---------------------------------------------------------------------------
+function rowsWithPost(): GridBoardRow[] {
+  const rows = baseRows();
+  rows[0].slots[0] = makeSlot("s1", "p1");
+  return rows;
+}
+
+function pasteCommit(state: GridState, captured: GridBoardSlot, patch: Partial<GridBoardSlot>, value: Partial<GridBoardSlot>) {
+  const opId = newOpId();
+  state = gridReducer(state, { type: "SLOT_BEGIN", opId, slotId: "s1", value: { ...captured, ...value } });
+  return gridReducer(state, { type: "SLOT_COMMIT", opId, slotId: "s1", patch });
+}
+
+test("Paste Style: tile ends on the isolated copy even if a stale snapshot lands between save and commit", () => {
+  let state = initGridState(rowsWithPost());
+  const captured = state.slots["s1"].value;
+  assert.equal(captured.coverMediaAssetId, "asset-p1");
+  // Snapshot read before the re-link committed: still the shared original.
+  state = gridReducer(state, { type: "SERVER_ROWS_RECEIVED", rows: rowsWithPost() });
+  const fixed = { coverMediaAssetId: "asset-clone", thumbnailUrl: "preview-1" };
+  state = pasteCommit(state, captured, fixed, fixed);
+  assert.equal(state.slots["s1"].value.coverMediaAssetId, "asset-clone");
+  assert.equal(state.slots["s1"].value.thumbnailUrl, "preview-1");
+  assert.equal(state.slots["s1"].pendingOpId, null);
+});
+
+test("Paste Style: the pre-fix commit shape (id from the captured slot) would have left the stale id -- guards the test above", () => {
+  let state = initGridState(rowsWithPost());
+  const captured = state.slots["s1"].value;
+  state = gridReducer(state, { type: "SERVER_ROWS_RECEIVED", rows: rowsWithPost() });
+  const oldShape = { thumbnailUrl: "preview-1" };
+  state = pasteCommit(state, captured, oldShape, oldShape);
+  assert.equal(state.slots["s1"].value.coverMediaAssetId, "asset-p1");
+});
+
+test("Paste Style: a snapshot arriving while the tile commit is pending can't revert it to the original id", () => {
+  let state = initGridState(rowsWithPost());
+  const captured = state.slots["s1"].value;
+  const opId = newOpId();
+  const fixed = { coverMediaAssetId: "asset-clone", thumbnailUrl: "preview-1" };
+  state = gridReducer(state, { type: "SLOT_BEGIN", opId, slotId: "s1", value: { ...captured, ...fixed } });
+  state = gridReducer(state, { type: "SERVER_ROWS_RECEIVED", rows: rowsWithPost() });
+  assert.equal(state.slots["s1"].value.coverMediaAssetId, "asset-clone", "pending value survives the snapshot");
+  state = gridReducer(state, { type: "SLOT_COMMIT", opId, slotId: "s1", patch: fixed });
+  assert.equal(state.slots["s1"].value.coverMediaAssetId, "asset-clone");
+});
+
+test("Paste Style Undo then Redo keep the copy's id; a later fresh snapshot agrees", () => {
+  let state = initGridState(rowsWithPost());
+  const captured = state.slots["s1"].value;
+  state = pasteCommit(state, captured, { coverMediaAssetId: "asset-clone", thumbnailUrl: "after" }, { coverMediaAssetId: "asset-clone", thumbnailUrl: "after" });
+  state = pasteCommit(state, captured, { coverMediaAssetId: "asset-clone", thumbnailUrl: "before" }, { coverMediaAssetId: "asset-clone", thumbnailUrl: "before" });
+  assert.equal(state.slots["s1"].value.coverMediaAssetId, "asset-clone", "Undo restores the look, not the shared id");
+  assert.equal(state.slots["s1"].value.thumbnailUrl, "before");
+  state = pasteCommit(state, captured, { coverMediaAssetId: "asset-clone", thumbnailUrl: "after" }, { coverMediaAssetId: "asset-clone", thumbnailUrl: "after" });
+  const fresh = rowsWithPost();
+  fresh[0].slots[0] = { ...fresh[0].slots[0], coverMediaAssetId: "asset-clone", thumbnailUrl: "after" };
+  state = gridReducer(state, { type: "SERVER_ROWS_RECEIVED", rows: fresh });
+  assert.equal(state.slots["s1"].value.coverMediaAssetId, "asset-clone");
+  assertInvariants(state, "paste undo/redo");
+});
+
 console.log(`\n${passed} passed`);
