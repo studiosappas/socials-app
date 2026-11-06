@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import {
   uploadPosterIfPresent,
   setMediaAssetPoster,
-  setMediaAssetUploadSource,
+  insertMediaAsset,
   cloneMediaAssetForDivergence,
 } from "@/lib/actions/media";
 import { notifyProjectMembers } from "@/lib/notifications";
@@ -365,26 +365,23 @@ export async function uploadPostAsset(
     thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
   }
 
-  const { data: mediaAsset, error: insertError } = await supabase
-    .from("media_assets")
-    .insert({
+  const { data: mediaAsset, error: insertError } = await insertMediaAsset(
+    supabase,
+    {
       project_id: projectId,
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
       thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
+    },
+    "grid",
+  );
 
   if (insertError || !mediaAsset) {
     return { message: insertError?.message ?? "Failed to save media." };
   }
 
-  await Promise.all([
-    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
-    setMediaAssetUploadSource(supabase, mediaAsset.id, "grid"),
-  ]);
+  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
   const { error: assetError } = await supabase
     .from("post_assets")
@@ -472,23 +469,20 @@ export async function replacePostAsset(
       thumbnailStoragePath = serverThumb.ok ? serverThumb.path : null;
     }
 
-    const { data: mediaAsset, error: insertError } = await supabase
-      .from("media_assets")
-      .insert({
+    const { data: mediaAsset, error: insertError } = await insertMediaAsset(
+      supabase,
+      {
         project_id: projectId,
         storage_path: newStoragePathValue,
         media_type: mediaType,
         uploaded_by: user.id,
         thumbnail_storage_path: thumbnailStoragePath,
-      })
-      .select("id")
-      .single();
+      },
+      "grid",
+    );
     if (insertError || !mediaAsset) return { message: insertError?.message ?? "Failed to save media." };
 
-    await Promise.all([
-      setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
-      setMediaAssetUploadSource(supabase, mediaAsset.id, "grid"),
-    ]);
+    await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
     newMediaAssetId = mediaAsset.id;
   } else {
     return { message: "Choose a file or select from the library." };

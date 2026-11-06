@@ -5,10 +5,11 @@ import { createClient } from "@/lib/supabase/server";
 import {
   uploadPosterIfPresent,
   setMediaAssetPoster,
-  setMediaAssetUploadSource,
+  insertMediaAsset,
+  readMediaAssetUploadSource,
   cloneMediaAssetForDivergence,
 } from "@/lib/actions/media";
-import type { UploadSource } from "@/lib/media-upload-source";
+import { parseUploadSource, type UploadSourceState } from "@/lib/media-upload-source";
 import { logActivity } from "@/lib/activity-log";
 import { logSystemEvent } from "@/lib/system-event-log";
 import { notifyProjectMembers } from "@/lib/notifications";
@@ -180,17 +181,17 @@ export async function uploadMedia(
 
   const posterStoragePath = await uploadPosterIfPresent(supabase, projectId, formData, mediaType);
 
-  const { data: mediaAsset, error: insertError } = await supabase
-    .from("media_assets")
-    .insert({
+  const { data: mediaAsset, error: insertError } = await insertMediaAsset(
+    supabase,
+    {
       project_id: projectId,
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
       thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
+    },
+    "grid",
+  );
 
   if (insertError || !mediaAsset) {
     await logSystemEvent(supabase, {
@@ -203,10 +204,7 @@ export async function uploadMedia(
     return { message: insertError?.message ?? "Failed to save media." };
   }
 
-  await Promise.all([
-    setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
-    setMediaAssetUploadSource(supabase, mediaAsset.id, "grid"),
-  ]);
+  await setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath);
 
   // Independent of each other (activity log vs. member notifications) --
   // run concurrently rather than one after another. Neither blocks the
@@ -260,12 +258,22 @@ export async function uploadMedia(
 // only ever fires for a genuinely unused asset now, where cascading is
 // moot). Only a truly unused asset (zero references anywhere) is still
 // actually deleted, same as before.
-export async function deleteMedia(projectId: string, mediaAssetId: string) {
+//
+// Returns the row's recorded upload_source, read BEFORE the delete (in
+// parallel with the usage counts, so no extra wait): Library Undo of an
+// upload calls this, and its Redo restores with exactly that source -- the
+// database's own value, not whatever the client last managed to load.
+// "unknown" when that read fails (or before the migration).
+export async function deleteMedia(
+  projectId: string,
+  mediaAssetId: string,
+): Promise<{ uploadSource: UploadSourceState }> {
   const supabase = await createClient();
 
-  const [{ count: postUsage }, { count: storyUsage }] = await Promise.all([
+  const [{ count: postUsage }, { count: storyUsage }, uploadSource] = await Promise.all([
     supabase.from("post_assets").select("*", { count: "exact", head: true }).eq("media_asset_id", mediaAssetId),
     supabase.from("story_frames").select("*", { count: "exact", head: true }).eq("media_asset_id", mediaAssetId),
+    readMediaAssetUploadSource(supabase, mediaAssetId),
   ]);
   const inUse = (postUsage ?? 0) > 0 || (storyUsage ?? 0) > 0;
 
@@ -285,6 +293,7 @@ export async function deleteMedia(projectId: string, mediaAssetId: string) {
   // and /stories are genuinely different routes, kept as-is.
   revalidatePath(`/projects/${projectId}/posts`);
   revalidatePath(`/projects/${projectId}/stories`);
+  return { uploadSource };
 }
 
 // Undo of deleteMedia (and redo of an undone upload) -- the deleted row is
@@ -294,7 +303,7 @@ export async function deleteMedia(projectId: string, mediaAssetId: string) {
 // good), which is fine -- visually and functionally identical either way.
 export async function restoreMediaAsset(
   projectId: string,
-  data: { storagePath: string; mediaType: MediaType; posterStoragePath: string | null; uploadSource?: UploadSource | null },
+  data: { storagePath: string; mediaType: MediaType; posterStoragePath: string | null; uploadSource?: UploadSourceState },
 ): Promise<{ id: string } | { message: string }> {
   const supabase = await createClient();
   const {
@@ -316,25 +325,24 @@ export async function restoreMediaAsset(
         )
       : null;
 
-  const { data: mediaAsset, error } = await supabase
-    .from("media_assets")
-    .insert({
+  // A restored asset keeps the source it had. "unknown" (never learned)
+  // restores with no source -- it is never guessed into a known one.
+  const { data: mediaAsset, error } = await insertMediaAsset(
+    supabase,
+    {
       project_id: projectId,
       storage_path: data.storagePath,
       media_type: data.mediaType,
       poster_storage_path: data.posterStoragePath,
       uploaded_by: user.id,
       thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
+    },
+    parseUploadSource(data.uploadSource),
+  );
 
   if (error || !mediaAsset) {
     return { message: error?.message ?? "Failed to restore media." };
   }
-
-  // A restored asset keeps the tab it had (a redo of an undone upload).
-  await setMediaAssetUploadSource(supabase, mediaAsset.id, data.uploadSource ?? null);
 
   // Not revalidating /grid -- both callers (undo of a delete, redo of an
   // undone upload; see media-library.tsx's pushCommand) already call

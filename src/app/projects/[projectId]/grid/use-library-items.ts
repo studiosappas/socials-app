@@ -21,6 +21,7 @@ import {
 import { useToast } from "@/lib/hooks/use-toast";
 import { createInsertSequencer, insertOrderForNewestFirst } from "@/lib/upload-insert-order";
 import type { UndoableCommand } from "@/lib/hooks/use-undo-stack";
+import { preferKnownSource, type UploadSourceState } from "@/lib/media-upload-source";
 import type { MediaLibraryItem } from "./grid-board";
 
 // Same value and reasoning as this hook's own former home
@@ -163,14 +164,17 @@ export function useLibraryItems(
 
     if (!demoMode && realStoragePath) {
       const mediaType = matched.mediaType;
-      const currentRef = { id: realId };
+      // uploadMedia's own source -- then whatever the database itself says
+      // at each Undo (see deleteMedia), unless that read fails.
+      const currentRef: { id: string; uploadSource: UploadSourceState } = { id: realId, uploadSource: "grid" };
       pushCommand({
         label: "Add media",
         undo: async () => {
           beginMutation();
           try {
             suppressAutoTrackRef.current = true;
-            await deleteMedia(projectId, currentRef.id);
+            const removed = await deleteMedia(projectId, currentRef.id);
+            currentRef.uploadSource = preferKnownSource(removed?.uploadSource, currentRef.uploadSource);
             router.refresh();
           } finally {
             endMutation();
@@ -184,7 +188,7 @@ export function useLibraryItems(
               storagePath: realStoragePath,
               mediaType,
               posterStoragePath: realPosterStoragePath,
-              uploadSource: "grid",
+              uploadSource: currentRef.uploadSource,
             });
             if ("message" in restored) throw new Error(restored.message);
             currentRef.id = restored.id;
@@ -342,15 +346,21 @@ export function useLibraryItems(
         if (!item.storagePath) continue;
         const storagePath = item.storagePath;
         const posterStoragePath = item.posterStoragePath ?? null;
-        const uploadSource = item.uploadSource ?? null;
-        const current = { id: item.id };
+        // What the page loaded ("unknown" if its lookup failed) -- replaced
+        // by the database's own value at each Undo whenever that read works,
+        // so a failed page lookup is never restored as if it were known.
+        const current: { id: string; uploadSource: UploadSourceState } = {
+          id: item.id,
+          uploadSource: item.uploadSource ?? "unknown",
+        };
         pushCommand({
           label: "Add media",
           undo: async () => {
             beginMutation();
             try {
               suppressAutoTrackRef.current = true;
-              await deleteMedia(projectId, current.id);
+              const removed = await deleteMedia(projectId, current.id);
+              current.uploadSource = preferKnownSource(removed?.uploadSource, current.uploadSource);
               router.refresh();
             } finally {
               endMutation();
@@ -364,7 +374,7 @@ export function useLibraryItems(
                 storagePath,
                 mediaType: item.mediaType,
                 posterStoragePath,
-                uploadSource,
+                uploadSource: current.uploadSource,
               });
               if ("message" in result) throw new Error(result.message);
               current.id = result.id;

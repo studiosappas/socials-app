@@ -101,7 +101,7 @@ import {
 import { aspectValue } from "@/lib/aspect-ratio";
 import { setPostAspectRatio, updatePostAssetFrameTransform } from "@/lib/actions/posts";
 import { useMediaTiming } from "@/lib/media-diagnostics";
-import { countLibraryTabs, filterLibraryTab, type LibraryTab, type UploadSource } from "@/lib/media-upload-source";
+import { countLibraryTabs, filterLibraryTab, type LibraryTab, type UploadSourceState } from "@/lib/media-upload-source";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -327,8 +327,9 @@ export type MediaLibraryItem = {
   folderId?: string | null;
   // Where the asset was originally uploaded -- drives the Library's
   // Uploaded / From Content tabs (see lib/media-upload-source.ts). Only
-  // Grid's own page.tsx populates it; null/undefined both mean Uploaded.
-  uploadSource?: UploadSource | null;
+  // Grid's own page.tsx populates it; null, "unknown" (lookup failed) and
+  // undefined all show under Uploaded.
+  uploadSource?: UploadSourceState;
   // True only for an optimistic placeholder shown the instant a file is
   // picked, before uploadMedia's insert has actually resolved (see
   // media-library.tsx/grid-board.tsx's MediaPickerDialog, both of which set

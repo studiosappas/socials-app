@@ -16,3 +16,7 @@ begin
       add constraint media_assets_upload_source_check check (upload_source in ('grid', 'content'));
   end if;
 end $$;
+
+-- Make the API see the new column immediately, so uploads start recording
+-- their source right away instead of falling back until the next reload.
+notify pgrst, 'reload schema';

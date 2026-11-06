@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { uploadPosterIfPresent, setMediaAssetPoster, setMediaAssetUploadSource } from "@/lib/actions/media";
+import { uploadPosterIfPresent, setMediaAssetPoster, insertMediaAsset } from "@/lib/actions/media";
 import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
@@ -273,17 +273,17 @@ export async function uploadContentAsset(
   // has to actually exist before stories/story_frames reference it, and
   // each step below can only clean up correctly if it knows exactly which
   // earlier steps already committed.
-  const { data: mediaAsset, error: mediaError } = await supabase
-    .from("media_assets")
-    .insert({
+  const { data: mediaAsset, error: mediaError } = await insertMediaAsset(
+    supabase,
+    {
       project_id: projectId,
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
       thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
+    },
+    "content",
+  );
 
   if (mediaError || !mediaAsset) {
     // Never surfaced to the user -- a raw Postgres constraint/relation name
@@ -309,9 +309,8 @@ export async function uploadContentAsset(
   // Both only need mediaAsset.id/story.id from above -- setMediaAssetPoster
   // writes to the media_assets row it just inserted, the frame insert
   // writes to a different table entirely, neither depends on the other.
-  const [, , { error: frameError }] = await Promise.all([
+  const [, { error: frameError }] = await Promise.all([
     setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
-    setMediaAssetUploadSource(supabase, mediaAsset.id, "content"),
     supabase.from("story_frames").insert({ story_id: story.id, media_asset_id: mediaAsset.id, position: 0 }),
   ]);
 
@@ -532,17 +531,17 @@ export async function uploadStoryFrame(
     await supabase.storage.from("project-media").remove(uploadedPaths);
   }
 
-  const { data: mediaAsset, error: insertError } = await supabase
-    .from("media_assets")
-    .insert({
+  const { data: mediaAsset, error: insertError } = await insertMediaAsset(
+    supabase,
+    {
       project_id: projectId,
       storage_path: storagePath,
       media_type: mediaType,
       uploaded_by: user.id,
       thumbnail_storage_path: thumbnailStoragePath,
-    })
-    .select("id")
-    .single();
+    },
+    "content",
+  );
 
   if (insertError || !mediaAsset) {
     console.error("uploadStoryFrame: media_assets insert failed:", insertError?.message);
@@ -552,9 +551,8 @@ export async function uploadStoryFrame(
 
   // Both only need mediaAsset.id -- same reasoning as uploadContentAsset
   // above.
-  const [, , { error: frameError }] = await Promise.all([
+  const [, { error: frameError }] = await Promise.all([
     setMediaAssetPoster(supabase, mediaAsset.id, posterStoragePath),
-    setMediaAssetUploadSource(supabase, mediaAsset.id, "content"),
     supabase.from("story_frames").insert({ story_id: storyId, media_asset_id: mediaAsset.id, position }),
   ]);
 

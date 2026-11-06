@@ -282,10 +282,6 @@ export interface Database {
           upload_source: string | null;
           created_at: string;
         };
-        // No upload_source here on purpose: it's written by its own
-        // follow-up update (setMediaAssetUploadSource), never folded into
-        // an insert -- a not-yet-migrated database rejects the WHOLE insert
-        // for an unknown column.
         Insert: {
           project_id: string;
           storage_path: string;
@@ -297,6 +293,10 @@ export interface Database {
           annotation_json?: object | null;
           generated_by_ai?: boolean;
           archived?: boolean;
+          // Only ever set through insertMediaAsset (lib/actions/media.ts),
+          // whose fallback keeps an insert working before the column
+          // exists -- a raw insert naming it would fail outright there.
+          upload_source?: "grid" | "content" | null;
         };
         Update: {
           storage_path?: string;
@@ -308,7 +308,6 @@ export interface Database {
           folder_id?: string | null;
           generated_by_ai?: boolean;
           archived?: boolean;
-          upload_source?: string | null;
         };
         Relationships: [];
       };

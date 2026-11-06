@@ -4,10 +4,15 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getCachedSignedUrl } from "@/lib/signed-url-cache";
 import { logSystemEvent } from "@/lib/system-event-log";
-import type { MediaType } from "@/types/database";
+import type { Database, MediaType } from "@/types/database";
 import { sameBaseFraming } from "@/lib/annotation-frame";
 import { isolatePostUsageForEdit } from "@/lib/post-usage-isolation";
-import { parseUploadSource, type UploadSource } from "@/lib/media-upload-source";
+import {
+  insertWithUploadSource,
+  uploadSourceFromLookup,
+  type UploadSource,
+  type UploadSourceState,
+} from "@/lib/media-upload-source";
 
 // TEMPORARY DIAGNOSTIC -- added specifically to trace a real, Supabase-
 // backed Adjustments Paste failure a local/stubbed environment could not
@@ -100,14 +105,21 @@ export async function cloneMediaAssetForDivergence(
   // treats a failed clone as fatal rather than a reason to fall back to
   // writing on the shared row -- this exact silent RLS rejection is what
   // let one post's edit leak onto every other post sharing the same asset.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  //
+  // The clone keeps its source's origin -- read on its own (upload_source
+  // may not exist yet), alongside getUser so it adds no extra wait. A failed
+  // read is "unknown" and the clone is simply inserted without a source.
+  const [
+    {
+      data: { user },
+    },
+    origin,
+  ] = await Promise.all([supabase.auth.getUser(), readMediaAssetUploadSource(supabase, sourceAssetId)]);
   if (!user) return null;
 
-  const { data: clone, error } = await supabase
-    .from("media_assets")
-    .insert({
+  const { data: clone, error } = await insertMediaAsset(
+    supabase,
+    {
       project_id: source.project_id,
       storage_path: source.storage_path,
       media_type: source.media_type,
@@ -125,9 +137,9 @@ export async function cloneMediaAssetForDivergence(
       // functional as an unarchived row for whatever post_assets row
       // already points at it (cover resolution never filters on archived).
       archived: true,
-    })
-    .select("id")
-    .single();
+    },
+    origin === "unknown" ? null : origin,
+  );
 
   mediaMutationLog({
     action: "cloneMediaAssetForDivergence",
@@ -137,19 +149,7 @@ export async function cloneMediaAssetForDivergence(
     extra: error ? { errorMessage: error.message, actingUser: user.id.slice(0, 8) } : { actingUser: user.id.slice(0, 8) },
   });
 
-  if (error || !clone) return null;
-
-  // The clone keeps its source's origin. Its own read, not part of the
-  // select above: upload_source may not exist yet, and a failed lookup
-  // must never fail the clone itself.
-  const { data: sourceOrigin } = await supabase
-    .from("media_assets")
-    .select("upload_source")
-    .eq("id", sourceAssetId)
-    .maybeSingle();
-  await setMediaAssetUploadSource(supabase, clone.id, parseUploadSource(sourceOrigin?.upload_source));
-
-  return clone.id;
+  return error || !clone ? null : clone.id;
 }
 
 // If this asset is the cover (position 0) of any post, that post's saved
@@ -218,19 +218,38 @@ export async function setMediaAssetPoster(
   await supabase.from("media_assets").update({ poster_storage_path: posterStoragePath }).eq("id", mediaAssetId);
 }
 
-// Same isolation as setMediaAssetPoster above, for upload_source (the Grid
-// Media Library's Uploaded / From Content tabs). Before
-// add_media_upload_source.sql runs, this update returns an error and
-// changes nothing -- the asset just shows under Uploaded, the upload itself
-// is unaffected. Never thrown: a missed stamp only means the wrong tab.
-export async function setMediaAssetUploadSource(
+type MediaAssetInsertRow = Omit<Database["public"]["Tables"]["media_assets"]["Insert"], "upload_source">;
+
+// THE way to insert a media_assets row (Brief's generated designs aside,
+// which have no source). upload_source rides in the same INSERT -- not a
+// follow-up update, which RLS can silently match zero rows on (the base
+// policies let any member insert but only owner/admin update) and which a
+// network error/timeout can drop after the row already exists. Before
+// add_media_upload_source.sql runs, insertWithUploadSource's one narrow
+// fallback re-inserts without the column -- see its own comment for why
+// that can never duplicate a row.
+export async function insertMediaAsset(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  row: MediaAssetInsertRow,
+  uploadSource: UploadSource | null,
+) {
+  return insertWithUploadSource(
+    (payload) => supabase.from("media_assets").insert(payload).select("id").single(),
+    row,
+    uploadSource,
+  );
+}
+
+// One asset's recorded source, as a state: "unknown" when the read fails
+// (including before the migration) or the row is gone -- never null by
+// accident.
+export async function readMediaAssetUploadSource(
   supabase: Awaited<ReturnType<typeof createClient>>,
   mediaAssetId: string,
-  uploadSource: UploadSource | null,
-): Promise<void> {
-  if (!uploadSource) return;
-  const { error } = await supabase.from("media_assets").update({ upload_source: uploadSource }).eq("id", mediaAssetId);
-  if (error) console.warn(`[upload-source] not recorded for ${mediaAssetId.slice(0, 8)}: ${error.message}`);
+): Promise<UploadSourceState> {
+  return uploadSourceFromLookup(
+    await supabase.from("media_assets").select("upload_source").eq("id", mediaAssetId).maybeSingle(),
+  );
 }
 
 // Read-only lookup for Grid's Copy Style feature -- Text and Adjustments
