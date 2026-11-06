@@ -17,6 +17,11 @@ export type ViewerSourceAsset = {
   url: string | null;
   posterUrl: string | null;
   mediaType: "image" | "video";
+  // What this item's tile shows (PostEditor's assetDisplayFraming): its
+  // framing and box ratio (w/h; null = the fixed 3:4 post box). When
+  // `transform` is given it replaces the cover-only crop rule below.
+  transform?: GridCoverTransform | null;
+  aspect?: number | null;
 };
 
 // `coverTransform` must be the crop the cover tile is CURRENTLY showing --
@@ -29,6 +34,7 @@ export function buildPostViewerMedia(assets: ViewerSourceAsset[], coverTransform
     // Same rule as Review Content: an item with no resolvable URL is
     // skipped rather than shown as a broken frame.
     if (!asset.url) return;
+    const transform = asset.transform !== undefined ? asset.transform : position === 0 ? coverTransform : null;
     media.push({
       key: asset.postAssetId,
       url: asset.url,
@@ -37,7 +43,8 @@ export function buildPostViewerMedia(assets: ViewerSourceAsset[], coverTransform
       contentType: "post",
       // A copy, not the editor's own object -- the viewer is read-only by
       // construction, never sharing mutable state with the editor.
-      coverTransform: position === 0 && coverTransform ? { ...coverTransform } : null,
+      coverTransform: transform ? { ...transform } : null,
+      aspect: asset.aspect ?? null,
     });
   });
   return media;

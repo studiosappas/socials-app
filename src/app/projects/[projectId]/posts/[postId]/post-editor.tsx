@@ -351,7 +351,15 @@ export function PostEditor({
   }
 
   function openViewer(postAssetId: string) {
-    const media = buildPostViewerMedia(orderedAssets, liveCoverTransformRef.current);
+    // Each item at its tile's own framing and ratio -- without this the
+    // viewer showed every item in a fixed 3:4 box with the Grid's crop, so
+    // "Original" and other ratios came out cropped (and enlarged).
+    const coverTransform = liveCoverTransformRef.current;
+    const sources = orderedAssets.map((asset, index) => {
+      const { transform, aspect } = assetDisplayFraming(asset, index === 0, orderedAssets.length, exportFrameFor(asset, index), coverTransform);
+      return { ...asset, transform, aspect };
+    });
+    const media = buildPostViewerMedia(sources, coverTransform);
     const startIndex = viewerIndexFor(media, postAssetId);
     if (startIndex === null) return;
     setViewer({ media, startIndex });
@@ -1284,6 +1292,25 @@ type ExportFrameProps = {
   needsReview: boolean;
 };
 
+// What a frame's media shows: the framing and box shape its tile renders,
+// shared with the large viewer so both show the same crop at the same ratio.
+// With a stored ratio, images (and a standalone Reel's cover) are framed at
+// it and the box takes its shape; otherwise the cover keeps its Grid crop.
+function assetDisplayFraming(
+  asset: PostAssetItem,
+  isCover: boolean,
+  itemCount: number,
+  exportFrame: ExportFrameProps | null,
+  coverTransform: GridCoverTransform | null,
+): { frameable: boolean; framed: boolean; transform: GridCoverTransform | null; aspect: number | null } {
+  const frameable = asset.mediaType === "image" || (isCover && itemCount === 1);
+  const framed = Boolean(exportFrame && frameable);
+  const transform =
+    framed && exportFrame?.preview != null ? exportFraming(exportFrame.preview, exportFrame.frame) : isCover ? coverTransform : null;
+  const aspect = exportFrame?.preview != null ? exportFrame.editorAspect : null;
+  return { frameable, framed, transform, aspect };
+}
+
 // The post's export aspect ratio. Writes on click (an explicit choice);
 // a Reel cover's 9:16 default shows selected but isn't stored until chosen
 // or applied.
@@ -1495,8 +1522,12 @@ function SortableAsset({
   // never for a video inside a carousel).
   // With the post's aspect ratio: images (and a standalone Reel's cover)
   // are framed at it; a video inside a carousel keeps its file as is.
-  const frameable = asset.mediaType === "image" || (isCover && itemCount === 1);
-  const framed = Boolean(exportFrame && frameable);
+  const {
+    frameable,
+    framed,
+    transform: tilePreviewTransform,
+    aspect: tileAspect,
+  } = assetDisplayFraming(asset, isCover, itemCount, exportFrame ?? null, effectiveTransform);
   // Downloads apply the framing an export does -- see exportCoverFraming.
   const exportTransform = exportCoverFraming(effectiveTransform, isCover && asset.mediaType === "video" && itemCount === 1);
   const videoCoverSource = videoCoverDownloadSource(asset, isCover, exportTransform, itemCount, projectId, postId);
@@ -1564,15 +1595,9 @@ function SortableAsset({
     const { scale, x, y, rotation } = edited;
     onSaveFrame?.(asset.postAssetId, { scale, x, y, rotation: rotation ?? 0 });
   }
-  const tilePreviewTransform =
-    framed && exportFrame?.preview != null
-      ? exportFraming(exportFrame.preview, exportFrame.frame)
-      : isCover
-        ? effectiveTransform
-        : null;
-  // With a ratio stored, the tile itself takes that shape (the Grid stays 3:4);
-  // self-start, or the flex row's stretch overrides aspect-ratio.
-  const tileAspect = exportFrame?.preview != null ? exportFrame.editorAspect : null;
+  // With a ratio stored, the tile itself takes that shape (tileAspect; the
+  // Grid stays 3:4); self-start, or the flex row's stretch overrides
+  // aspect-ratio.
 
   return (
     <div

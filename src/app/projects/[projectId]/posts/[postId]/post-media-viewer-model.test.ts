@@ -18,6 +18,7 @@ import {
   viewerKeyAction,
   type ViewerSourceAsset,
 } from "./post-media-viewer-model.ts";
+import { coverLayoutFrame, exportFraming } from "../../../../../lib/cover-framing.ts";
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -119,6 +120,63 @@ test("read-only: building the viewer list never mutates the editor's assets or c
   media.reverse();
   assert.equal(JSON.stringify({ assets, crop: { ...CROP } }), JSON.stringify(JSON.parse(snapshot)));
   assert.notEqual(crop.scale, 99, "...must not reach the editor's crop object");
+});
+
+// --- Aspect ratio / export framing (the tile's own framing, passed in) -----
+// Before: the viewer ignored both -- a fixed 3:4 box with the Grid crop on
+// the cover and object-cover elsewhere, so "Original" (and any other ratio)
+// was cropped and enlarged.
+
+const ORIGINAL_COVER = exportFraming("original", null);
+const FOUR_FIVE = exportFraming(4 / 5, { scale: 1.2, x: 0.1, y: 0 });
+
+test("each item gets its tile's framing and ratio, replacing the 3:4 Grid crop", () => {
+  const media = buildPostViewerMedia(
+    [
+      { ...mixed[0], transform: ORIGINAL_COVER, aspect: 1.5 },
+      { ...mixed[2], transform: FOUR_FIVE, aspect: 1.5 },
+    ],
+    CROP,
+  );
+  assert.deepEqual(media[0].coverTransform, ORIGINAL_COVER, "cover: Original framing, not the Grid crop");
+  assert.deepEqual(media[1].coverTransform, FOUR_FIVE, "slide: its own frame, not object-cover");
+  assert.deepEqual(media.map((m) => m.aspect), [1.5, 1.5]);
+});
+
+test("an explicit null transform wins over the cover crop (e.g. no framing for this item)", () => {
+  const media = buildPostViewerMedia([{ ...mixed[0], transform: null, aspect: 0.8 }], CROP);
+  assert.equal(media[0].coverTransform, null);
+  assert.equal(media[0].aspect, 0.8);
+});
+
+test("legacy post (nothing passed): unchanged -- 3:4 box (aspect null), Grid crop on the cover only", () => {
+  const media = buildPostViewerMedia(mixed, CROP);
+  assert.ok(media.every((m) => m.aspect === null));
+  assert.deepEqual(media[0].coverTransform, CROP);
+  assert.ok(media.slice(1).every((m) => m.coverTransform === null));
+});
+
+test("carousel video keeps its file and poster; a ratio box with no framing is passed as given", () => {
+  const media = buildPostViewerMedia([mixed[0], { ...mixed[1], transform: null, aspect: 4 / 5 }], null);
+  assert.equal(media[1].url, "https://x/video-2.mp4");
+  assert.equal(media[1].posterUrl, "https://x/poster-2.jpg");
+  assert.equal(media[1].coverTransform, null);
+  assert.equal(media[1].aspect, 4 / 5);
+});
+
+test("passed framing is copied, never shared with the editor", () => {
+  const transform = { ...FOUR_FIVE };
+  const media = buildPostViewerMedia([{ ...mixed[0], transform, aspect: 0.8 }], null);
+  media[0].coverTransform!.scale = 99;
+  assert.equal(transform.scale, FOUR_FIVE.scale);
+});
+
+test("Original in a box of the image's own ratio lays out exactly the box: the whole image, no crop", () => {
+  // The viewer's box takes aspect = the first image's own ratio (1.5 here);
+  // CroppedCoverImage lays an "original" framing out in coverLayoutFrame.
+  const natural = { w: 3000, h: 2000 };
+  const box = { w: 900, h: 600 };
+  assert.deepEqual(coverLayoutFrame(ORIGINAL_COVER, box, natural), box);
 });
 
 console.log(`\n${passed} passed`);
