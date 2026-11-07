@@ -3,7 +3,7 @@
 //   node --experimental-strip-types src/lib/schedule-status.test.ts
 
 import assert from "node:assert/strict";
-import { isAutoPublishable, statusForScheduleChange } from "./schedule-status.ts";
+import { applyScheduleDateEdit, isAutoPublishable, statusForScheduleChange } from "./schedule-status.ts";
 import { isDayAllPublished } from "./calendar-cells.ts";
 
 let passed = 0;
@@ -66,6 +66,36 @@ test("unchanged date keeps an explicit status, incl. a hand-picked draft", () =>
 });
 test("scheduled moved to another date stays scheduled", () => {
   assert.equal(statusForScheduleChange("scheduled", "2026-11-20", "2026-11-21"), "scheduled");
+});
+
+// Post Editor: unsaved date-picker edits update Status immediately
+test("editor: picking a date on a draft shows scheduled", () => {
+  assert.deepEqual(applyScheduleDateEdit({ status: "draft", date: "" }, "2026-11-20"), { status: "scheduled", date: "2026-11-20" });
+});
+test("editor: clearing the date on a scheduled post shows draft", () => {
+  assert.deepEqual(applyScheduleDateEdit({ status: "scheduled", date: "2026-11-20" }, ""), { status: "draft", date: "" });
+});
+test("editor: published / in_review are kept while editing the date", () => {
+  assert.equal(applyScheduleDateEdit({ status: "published", date: "" }, "2026-11-20").status, "published");
+  assert.equal(applyScheduleDateEdit({ status: "in_review", date: "2026-11-20" }, "").status, "in_review");
+});
+test("editor: pick then clear before saving returns to draft", () => {
+  const picked = applyScheduleDateEdit({ status: "draft", date: "" }, "2026-11-20");
+  assert.deepEqual(applyScheduleDateEdit(picked, ""), { status: "draft", date: "" });
+});
+test("editor: re-picking the same date leaves status alone", () => {
+  assert.equal(applyScheduleDateEdit({ status: "draft", date: "2026-11-20" }, "2026-11-20").status, "draft");
+});
+test("editor: an edit returns new state and never mutates the original (discard on close)", () => {
+  const original = { status: "draft" as const, date: "" };
+  applyScheduleDateEdit(original, "2026-11-20");
+  assert.deepEqual(original, { status: "draft", date: "" });
+});
+test("editor + server agree: unsaved edit and save-time rule give the same status", () => {
+  const edited = applyScheduleDateEdit({ status: "draft", date: "" }, "2026-11-20");
+  assert.equal(statusForScheduleChange(edited.status, null, edited.date), edited.status);
+  const cleared = applyScheduleDateEdit({ status: "scheduled", date: "2026-11-20" }, "");
+  assert.equal(statusForScheduleChange(cleared.status, "2026-11-20", cleared.date), cleared.status);
 });
 
 // Calendar behavior: Scheduled -> Published flip and the dark day

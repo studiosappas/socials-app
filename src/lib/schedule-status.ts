@@ -23,6 +23,17 @@ export function statusForScheduleChange<S extends string>(
   return status;
 }
 
+// An editor's unsaved date-picker edit: the same rule, applied against the
+// date currently shown, so the Status dropdown reflects it immediately.
+// Nothing is persisted -- the server re-applies statusForScheduleChange on
+// Save against the stored date as the safety net.
+export function applyScheduleDateEdit<S extends string>(
+  form: { status: S; date: string },
+  nextDate: string,
+): { status: S | "scheduled" | "draft"; date: string } {
+  return { status: statusForScheduleChange(form.status, form.date, nextDate), date: nextDate };
+}
+
 // Mirrors the Calendar page's auto-publish UPDATE filter (status =
 // 'scheduled' AND scheduled_date <= today) -- kept here so the full
 // draft -> scheduled -> published chain is testable without Supabase.

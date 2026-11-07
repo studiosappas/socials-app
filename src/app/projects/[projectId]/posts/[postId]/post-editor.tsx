@@ -44,6 +44,7 @@ import {
 import { useIsTouchDevice } from "@/lib/hooks/use-is-touch-device";
 import { newEditAspect } from "@/lib/media-aspect";
 import { effectivePostType } from "@/lib/post-type";
+import { applyScheduleDateEdit } from "@/lib/schedule-status";
 import {
   GRID_BAND_ASPECT,
   exportCoverFraming,
@@ -2088,6 +2089,15 @@ function PostMainForm({
     setClientReviewStatus(post.review_status);
   }
 
+  // Picking/clearing a date updates the Status dropdown right away (Draft ->
+  // Scheduled, Scheduled -> Draft; other statuses kept). Local only until
+  // Save -- closing without saving discards both, like every other field.
+  function handleScheduledDateChange(nextDate: string) {
+    const next = applyScheduleDateEdit({ status, date: scheduledDate }, nextDate);
+    setStatus(next.status);
+    setScheduledDate(next.date);
+  }
+
   const [addedToTodo, setAddedToTodo] = useState(false);
   const [todoError, setTodoError] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
@@ -2303,7 +2313,7 @@ function PostMainForm({
             <span className={labelClass}>Schedule date</span>
             <ScheduleDateField
               value={scheduledDate}
-              onChange={setScheduledDate}
+              onChange={handleScheduledDateChange}
               disabled={!canManage}
               dateFormat={dateFormat}
               fieldClassName={fieldClass}
