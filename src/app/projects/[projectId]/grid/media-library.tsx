@@ -11,7 +11,7 @@ import type { MediaFolder, MediaLibraryItem } from "./grid-board";
 import { useLibraryItems, type LibraryItemsController } from "./use-library-items";
 import { RecoverableImg } from "@/components/recoverable-img";
 import { isFileDrag } from "@/lib/media-drop";
-import { countLibraryTabs, filterLibraryTab, type LibraryTab } from "@/lib/media-upload-source";
+import { filterLibraryTab, type LibraryTab } from "@/lib/media-upload-source";
 
 export function MediaThumbPreview({
   item,
@@ -86,23 +86,26 @@ export function GridUsageIcon({ className }: { className?: string }) {
 }
 
 // Uploaded / From Content -- shared by the sidebar below and Grid's touch
-// MediaPickerDialog so both read identically. Counts come from the caller's
-// already-loaded items (optimistic uploads/deletes included).
+// MediaPickerDialog so both read identically. Browser-tab style: the active
+// tab paints the surface's own colour (`surface`: the sidebar sits on the
+// page background, the picker on a card) and overlaps the baseline by 1px,
+// so it opens straight into the content below; the inactive tab is tinted
+// and shorter, so it reads as sitting behind.
 export function LibrarySourceTabs({
   tab,
-  counts,
   onChange,
+  surface = "background",
 }: {
   tab: LibraryTab;
-  counts: Record<LibraryTab, number>;
   onChange: (tab: LibraryTab) => void;
+  surface?: "background" | "card";
 }) {
   const tabs: { id: LibraryTab; label: string }[] = [
     { id: "uploaded", label: "Uploaded" },
     { id: "content", label: "From Content" },
   ];
   return (
-    <div role="tablist" aria-label="Media source" className="flex border-b border-border">
+    <div role="tablist" aria-label="Media source" className="flex items-end gap-1 border-b border-border">
       {tabs.map(({ id, label }) => (
         <button
           key={id}
@@ -110,11 +113,13 @@ export function LibrarySourceTabs({
           role="tab"
           aria-selected={tab === id}
           onClick={() => onChange(id)}
-          className={`-mb-px flex-1 border-b-2 px-2 py-2 text-xs tracking-wide uppercase transition-colors duration-150 ${
-            tab === id ? "border-foreground text-foreground" : "border-transparent text-muted hover:text-foreground"
+          className={`flex-1 rounded-t-sm border border-b-0 px-3 text-xs tracking-wide uppercase transition-colors duration-150 ${
+            tab === id
+              ? `relative -mb-px border-border pt-2 pb-[calc(0.5rem+1px)] text-foreground ${surface === "card" ? "bg-card" : "bg-background"}`
+              : "border-border/60 bg-foreground/[.04] py-1.5 text-muted hover:bg-foreground/[.07] hover:text-foreground"
           }`}
         >
-          {label} <span className="text-muted tabular-nums">({counts[id]})</span>
+          {label}
         </button>
       ))}
     </div>
@@ -196,7 +201,6 @@ export function MediaLibrary({
   const showTabs = !demoMode;
   const [tab, setTab] = useState<LibraryTab>("uploaded");
   const onContentTab = showTabs && tab === "content";
-  const tabCounts = countLibraryTabs(effectiveItems);
   const tabItems = showTabs ? filterLibraryTab(effectiveItems, tab) : effectiveItems;
 
   // null = root view (folder tiles + unfoldered assets). Non-null = browsing
@@ -408,7 +412,7 @@ export function MediaLibrary({
         </form>
       )}
 
-      {showTabs && <LibrarySourceTabs tab={tab} counts={tabCounts} onChange={changeTab} />}
+      {showTabs && <LibrarySourceTabs tab={tab} onChange={changeTab} />}
 
       {activeFolder ? (
         <button

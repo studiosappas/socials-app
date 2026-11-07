@@ -33,12 +33,6 @@ export function filterLibraryTab<T extends { uploadSource?: UploadSourceState }>
   return items.filter((item) => libraryTabFor(item.uploadSource) === tab);
 }
 
-export function countLibraryTabs(items: { uploadSource?: UploadSourceState }[]): Record<LibraryTab, number> {
-  const counts: Record<LibraryTab, number> = { uploaded: 0, content: 0 };
-  for (const item of items) counts[libraryTabFor(item.uploadSource)] += 1;
-  return counts;
-}
-
 // The Grid page's isolated `select("id, upload_source")` result -> id ->
 // recorded source (null included). Returns null -- "nothing known" -- when
 // the select errored: on a not-yet-migrated database PostgREST answers with

@@ -101,7 +101,7 @@ import {
 import { aspectValue } from "@/lib/aspect-ratio";
 import { setPostAspectRatio, updatePostAssetFrameTransform } from "@/lib/actions/posts";
 import { useMediaTiming } from "@/lib/media-diagnostics";
-import { countLibraryTabs, filterLibraryTab, type LibraryTab, type UploadSourceState } from "@/lib/media-upload-source";
+import { filterLibraryTab, type LibraryTab, type UploadSourceState } from "@/lib/media-upload-source";
 // Re-exported so every existing external import (post-editor.tsx, grid/
 // page.tsx, lib/data/posts.ts, lib/data/share-preview.ts,
 // components/media-gallery.tsx, lib/landing/demo-create.ts,
@@ -3160,7 +3160,7 @@ function MediaPickerDialog({
           </form>
         )}
 
-        {showTabs && <LibrarySourceTabs tab={tab} counts={countLibraryTabs(effectiveItems)} onChange={setTab} />}
+        {showTabs && <LibrarySourceTabs tab={tab} onChange={setTab} surface="card" />}
 
         {/* Capped to roughly 9 rows (grid-cols-3, ~155px square cells at
             this dialog's max-w-lg width) but also bounded by 70% of the

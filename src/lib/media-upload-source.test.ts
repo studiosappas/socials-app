@@ -21,7 +21,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  countLibraryTabs,
   filterLibraryTab,
   insertWithUploadSource,
   isMissingUploadSourceColumn,
@@ -71,7 +70,7 @@ await test("parseUploadSource never turns 'unknown' (or anything else) into a kn
   for (const bad of ["unknown", null, undefined, "", "Content", "brief", 1, {}]) assert.equal(parseUploadSource(bad), null);
 });
 
-await test("filter + counts partition every item exactly once, keeping order", () => {
+await test("filter partitions every item exactly once, keeping order", () => {
   const items: { id: string; uploadSource?: UploadSourceState }[] = [
     { id: "c1", uploadSource: "content" },
     { id: "g1", uploadSource: "grid" },
@@ -82,7 +81,6 @@ await test("filter + counts partition every item exactly once, keeping order", (
   ];
   assert.deepEqual(filterLibraryTab(items, "uploaded").map((i) => i.id), ["g1", "n1", "u1", "x1"]);
   assert.deepEqual(filterLibraryTab(items, "content").map((i) => i.id), ["c1", "c2"]);
-  assert.deepEqual(countLibraryTabs(items), { uploaded: 4, content: 2 });
 });
 
 await test("migrated read: recorded sources AND recorded nulls are known; missing ids are unknown", () => {
