@@ -31,6 +31,12 @@ export type CalendarItem = {
   status: PostStatus | StoryStatus;
 };
 
+// The Calendar's dark "completed day" state: every item on the day is
+// Published. An empty day, or any not-yet-published item, keeps it light.
+export function isDayAllPublished(items: Pick<CalendarItem, "status">[]): boolean {
+  return items.length > 0 && items.every((item) => item.status === "published");
+}
+
 export type CalendarCell = {
   date: string;
   dayNumber: number;

@@ -7,6 +7,7 @@ import { logActivity } from "@/lib/activity-log";
 import { ensureAutoTaskForPost } from "@/lib/actions/task-automation";
 import { deriveAutoTaskTitle } from "@/lib/task-title";
 import { notifyMentions } from "@/lib/notifications";
+import { statusForScheduleChange } from "@/lib/schedule-status";
 
 export type CalendarItemType = "post" | "story";
 
@@ -19,19 +20,26 @@ export async function scheduleItem(
   const supabase = await createClient();
   const table = itemType === "post" ? "posts" : "stories";
 
-  // Reverse of the lazy auto-publish heuristic in calendar/page.tsx: a
-  // Published item dragged onto a future date is no longer "already
-  // published" and should go back to looking like ordinary scheduled
-  // content (white cell) until that date actually arrives again.
-  const { data: current } = await supabase.from(table).select("status").eq("id", itemId).single();
+  // Draft -> Scheduled on a date, Scheduled -> Draft off one (see
+  // statusForScheduleChange). Plus the reverse of the lazy auto-publish
+  // heuristic in calendar/page.tsx: a Published item dragged onto a future
+  // date is no longer "already published" and should go back to looking
+  // like ordinary scheduled content (white cell) until that date actually
+  // arrives again.
+  const { data: current } = await supabase.from(table).select("status, scheduled_date").eq("id", itemId).single();
   const todayStr = format(new Date(), "yyyy-MM-dd");
   const shouldResetToScheduled = current?.status === "published" && !!date && date > todayStr;
+  const nextStatus = current
+    ? shouldResetToScheduled
+      ? "scheduled"
+      : statusForScheduleChange(current.status, current.scheduled_date, date)
+    : undefined;
 
   const { error } = await supabase
     .from(table)
     .update({
       scheduled_date: date,
-      ...(shouldResetToScheduled ? { status: "scheduled" } : {}),
+      ...(nextStatus && nextStatus !== current?.status ? { status: nextStatus } : {}),
     })
     .eq("id", itemId);
 

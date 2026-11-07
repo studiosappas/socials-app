@@ -2156,6 +2156,8 @@ function PostMainForm({
         setScheduledDate(normalizeScheduleDate(post.scheduled_date));
         setScheduledTime(normalizeScheduleTime(post.scheduled_time));
       } else {
+        // A date change can move Draft <-> Scheduled server-side.
+        if (result?.status) setStatus(result.status);
         setSaved(true);
         setTimeout(() => setSaved(false), 1800);
       }

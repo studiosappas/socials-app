@@ -8,6 +8,7 @@ import { getStoryPageData, type StoryPageData } from "@/lib/data/stories";
 import { notifyProjectMembers } from "@/lib/notifications";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaType, ReviewStatus, StoryStatus } from "@/types/database";
+import { statusForScheduleChange } from "@/lib/schedule-status";
 
 // Same reasoning as fetchPostForModal in lib/actions/posts.ts -- lets the
 // Tasks page open a story in a client-side popup without needing a real
@@ -355,7 +356,8 @@ export async function deleteStoryFromCalendar(projectId: string, storyId: string
   revalidatePath(`/projects/${projectId}/stories`);
 }
 
-export type UpdateStoryState = { message?: string; success?: boolean } | undefined;
+// `status` is the status actually saved (see updatePost's own note).
+export type UpdateStoryState = { message?: string; success?: boolean; status?: StoryStatus } | undefined;
 
 export async function updateStory(
   projectId: string,
@@ -374,12 +376,20 @@ export async function updateStory(
   // main update rather than isolating it into a separate query.
   const reviewStatus = formData.get("review_status");
 
+  // Same date-driven Draft <-> Scheduled rule as updatePost.
+  const { data: before } = await supabase.from("stories").select("scheduled_date").eq("id", storyId).single();
+  const nextStatus = statusForScheduleChange(
+    String(formData.get("status") ?? "draft") as StoryStatus,
+    before?.scheduled_date,
+    scheduledDate,
+  );
+
   const { error } = await supabase
     .from("stories")
     .update({
       name: String(formData.get("name") ?? "Untitled story"),
       scheduled_date: scheduledDate ? scheduledDate : null,
-      status: String(formData.get("status") ?? "draft") as StoryStatus,
+      status: nextStatus,
       ...(reviewStatus ? { review_status: String(reviewStatus) as ReviewStatus } : {}),
       notes: String(formData.get("notes") ?? ""),
     })

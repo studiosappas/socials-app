@@ -19,13 +19,16 @@ import {
   type PostCoreData,
 } from "@/lib/data/posts";
 import { syncPostType } from "@/lib/post-type";
+import { statusForScheduleChange } from "@/lib/schedule-status";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import type { LibraryPage } from "@/lib/media-library-paging";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
 import { parseAspectChoice, type AspectChoice } from "@/lib/aspect-ratio";
 
-export type UpdatePostState = { message?: string } | undefined;
+// `status` is the status actually saved, which can differ from the one
+// submitted when the date change moved it (see statusForScheduleChange).
+export type UpdatePostState = { message?: string; status?: PostStatus } | undefined;
 
 export type PostForModalData = PostCoreData & { mediaLibrary: LibraryPage<MediaLibraryItem> };
 
@@ -88,7 +91,7 @@ export async function updatePost(
 
   const scheduledDate = String(formData.get("scheduled_date") ?? "").trim();
   const scheduledTime = String(formData.get("scheduled_time") ?? "").trim();
-  const nextStatus = String(formData.get("status") ?? "draft") as PostStatus;
+  const submittedStatus = String(formData.get("status") ?? "draft") as PostStatus;
   const caption = String(formData.get("caption") ?? "");
 
   // Independent reads -- neither needs the other's result.
@@ -101,6 +104,10 @@ export async function updatePost(
     supabase.auth.getUser(),
     supabase.from("posts").select("status, post_type, scheduled_date").eq("id", postId).single(),
   ]);
+
+  // Assigning a date to a Draft makes it Scheduled, clearing one from a
+  // Scheduled post makes it a Draft again; any other status is kept as is.
+  const nextStatus = statusForScheduleChange(submittedStatus, before?.scheduled_date, scheduledDate);
 
   // post_type: adding/replacing/removing media auto-suggests the right
   // value (lib/post-type.ts's syncPostType, called from those actions), but
@@ -193,7 +200,7 @@ export async function updatePost(
   // stays unconditional -- unlike /grid, most fields this action touches
   // actually do feed Tasks' own display.
   revalidatePath("/tasks");
-  return undefined;
+  return { status: nextStatus };
 }
 
 // Client's own narrow write path for Approval Status -- reuses the

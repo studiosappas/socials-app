@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useRef, useState, type ComponentType, type ReactNode, type Ref } from "react";
 import Link from "next/link";
-import type { CalendarCell, CalendarItem } from "@/lib/calendar-cells";
+import { isDayAllPublished, type CalendarCell, type CalendarItem } from "@/lib/calendar-cells";
 
 // The Calendar's display layer: month nav, the desktop 7-column grid (with
 // click-to-expand weeks), and the mobile mini calendar + day-strip agenda.
@@ -382,7 +382,7 @@ const DayCell = memo(function DayCell({
   const PREVIEW_ITEMS = isExpanded ? cell.items.length : 3;
   const previewItems = cell.items.slice(0, PREVIEW_ITEMS);
   const hiddenCount = cell.items.length - previewItems.length;
-  const allPublished = cell.items.length > 0 && cell.items.every((item) => item.status === "published");
+  const allPublished = isDayAllPublished(cell.items);
 
   // Same single/double-click disambiguation as Grid's slots (dnd-kit's
   // PointerSensor suppresses native dblclick synthesis, so this is done by
