@@ -19,7 +19,7 @@ import {
   type PostCoreData,
 } from "@/lib/data/posts";
 import { syncPostType } from "@/lib/post-type";
-import { statusForScheduleChange } from "@/lib/schedule-status";
+import { resolveSubmittedStatus } from "@/lib/schedule-status";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import type { LibraryPage } from "@/lib/media-library-paging";
@@ -106,8 +106,14 @@ export async function updatePost(
   ]);
 
   // Assigning a date to a Draft makes it Scheduled, clearing one from a
-  // Scheduled post makes it a Draft again; any other status is kept as is.
-  const nextStatus = statusForScheduleChange(submittedStatus, before?.scheduled_date, scheduledDate);
+  // Scheduled post makes it a Draft again; any other status is kept as is --
+  // unless the user picked this Status by hand (status_explicit), which wins.
+  const nextStatus = resolveSubmittedStatus(
+    submittedStatus,
+    before?.scheduled_date,
+    scheduledDate,
+    formData.get("status_explicit") === "1",
+  );
 
   // post_type: adding/replacing/removing media auto-suggests the right
   // value (lib/post-type.ts's syncPostType, called from those actions), but

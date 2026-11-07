@@ -2069,6 +2069,10 @@ function PostMainForm({
   const [caption, setCaption] = useState(post.caption);
   const [notes, setNotes] = useState(post.notes);
   const [status, setStatus] = useState<PostStatus>(post.status);
+  // Set once the user picks a Status by hand. Save then sends it as
+  // status_explicit, so updatePost keeps that pick instead of re-deriving it
+  // from the date change (the shown value is always what gets saved).
+  const [statusPicked, setStatusPicked] = useState(false);
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>(post.review_status);
   const [scheduledDate, setScheduledDate] = useState(normalizeScheduleDate(post.scheduled_date));
   const [scheduledTime, setScheduledTime] = useState(normalizeScheduleTime(post.scheduled_time));
@@ -2083,6 +2087,7 @@ function PostMainForm({
     setCaption(post.caption);
     setNotes(post.notes);
     setStatus(post.status);
+    setStatusPicked(false);
     setReviewStatus(post.review_status);
     setScheduledDate(normalizeScheduleDate(post.scheduled_date));
     setScheduledTime(normalizeScheduleTime(post.scheduled_time));
@@ -2151,6 +2156,7 @@ function PostMainForm({
     formData.set("caption", caption);
     formData.set("notes", notes);
     formData.set("status", status);
+    if (statusPicked) formData.set("status_explicit", "1");
     formData.set("review_status", reviewStatus);
     formData.set("scheduled_date", scheduledDate);
     formData.set("scheduled_time", scheduledTime);
@@ -2162,6 +2168,7 @@ function PostMainForm({
         setCaption(post.caption);
         setNotes(post.notes);
         setStatus(post.status);
+        setStatusPicked(false);
         setReviewStatus(post.review_status);
         setScheduledDate(normalizeScheduleDate(post.scheduled_date));
         setScheduledTime(normalizeScheduleTime(post.scheduled_time));
@@ -2245,7 +2252,10 @@ function PostMainForm({
             <select
               name="status"
               value={status}
-              onChange={(e) => setStatus(e.target.value as PostStatus)}
+              onChange={(e) => {
+                setStatus(e.target.value as PostStatus);
+                setStatusPicked(true);
+              }}
               disabled={!canManage}
               className={fieldClass}
             >

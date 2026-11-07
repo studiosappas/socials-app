@@ -34,6 +34,19 @@ export function applyScheduleDateEdit<S extends string>(
   return { status: statusForScheduleChange(form.status, form.date, nextDate), date: nextDate };
 }
 
+// Save-time status for an editor form: a Status the user picked by hand is
+// kept exactly as submitted; otherwise the date-change rule above applies as
+// the safety net. Used by updatePost only -- Calendar drag/drop and other
+// paths have no hand-picked Status and keep using statusForScheduleChange.
+export function resolveSubmittedStatus<S extends string>(
+  submitted: S,
+  storedDate: string | null | undefined,
+  nextDate: string | null | undefined,
+  explicit: boolean,
+): S | "scheduled" | "draft" {
+  return explicit ? submitted : statusForScheduleChange(submitted, storedDate, nextDate);
+}
+
 // Mirrors the Calendar page's auto-publish UPDATE filter (status =
 // 'scheduled' AND scheduled_date <= today) -- kept here so the full
 // draft -> scheduled -> published chain is testable without Supabase.

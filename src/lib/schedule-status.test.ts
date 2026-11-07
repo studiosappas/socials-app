@@ -3,7 +3,7 @@
 //   node --experimental-strip-types src/lib/schedule-status.test.ts
 
 import assert from "node:assert/strict";
-import { applyScheduleDateEdit, isAutoPublishable, statusForScheduleChange } from "./schedule-status.ts";
+import { applyScheduleDateEdit, isAutoPublishable, resolveSubmittedStatus, statusForScheduleChange } from "./schedule-status.ts";
 import { isDayAllPublished } from "./calendar-cells.ts";
 
 let passed = 0;
@@ -97,6 +97,57 @@ test("editor + server agree: unsaved edit and save-time rule give the same statu
   const cleared = applyScheduleDateEdit({ status: "scheduled", date: "2026-11-20" }, "");
   assert.equal(statusForScheduleChange(cleared.status, "2026-11-20", cleared.date), cleared.status);
 });
+
+// Post Editor Save: an explicit Status pick wins over the date rule
+test("save: hand-picked draft on a newly dated post stays draft", () => {
+  assert.equal(resolveSubmittedStatus("draft", null, "2026-11-20", true), "draft");
+});
+test("save: hand-picked scheduled with the date cleared stays scheduled", () => {
+  assert.equal(resolveSubmittedStatus("scheduled", "2026-11-20", "", true), "scheduled");
+});
+test("save: without a hand pick the date rule is the safety net", () => {
+  assert.equal(resolveSubmittedStatus("draft", null, "2026-11-20", false), "scheduled");
+  assert.equal(resolveSubmittedStatus("scheduled", "2026-11-20", "", false), "draft");
+  assert.equal(resolveSubmittedStatus("published", null, "2026-11-20", false), "published");
+  assert.equal(resolveSubmittedStatus("in_review", "2026-11-20", "", false), "in_review");
+});
+
+// Simulates PostMainForm: loaded {status,date} -> a sequence of date picks
+// and Status picks -> what Save writes. The shown Status must always be the
+// saved one.
+type Step = { date: string } | { status: string };
+function runEditor(loaded: { status: string; date: string }, steps: Step[]) {
+  let form = { ...loaded };
+  let picked = false;
+  for (const step of steps) {
+    if ("date" in step) form = applyScheduleDateEdit(form, step.date);
+    else {
+      form = { ...form, status: step.status };
+      picked = true;
+    }
+  }
+  const saved = resolveSubmittedStatus(form.status, loaded.date || null, form.date, picked);
+  return { shown: form.status, saved };
+}
+const SEQUENCES: { name: string; loaded: { status: string; date: string }; steps: Step[]; expect: string }[] = [
+  { name: "pick date on draft", loaded: { status: "draft", date: "" }, steps: [{ date: "2026-11-20" }], expect: "scheduled" },
+  { name: "pick date, then hand-pick draft", loaded: { status: "draft", date: "" }, steps: [{ date: "2026-11-20" }, { status: "draft" }], expect: "draft" },
+  { name: "clear date on scheduled", loaded: { status: "scheduled", date: "2026-11-20" }, steps: [{ date: "" }], expect: "draft" },
+  { name: "clear date, then hand-pick scheduled", loaded: { status: "scheduled", date: "2026-11-20" }, steps: [{ date: "" }, { status: "scheduled" }], expect: "scheduled" },
+  { name: "hand-pick draft, then pick date (latest action wins)", loaded: { status: "scheduled", date: "" }, steps: [{ status: "draft" }, { date: "2026-11-20" }], expect: "scheduled" },
+  { name: "hand-pick published, then pick date", loaded: { status: "draft", date: "" }, steps: [{ status: "published" }, { date: "2026-11-20" }], expect: "published" },
+  { name: "pick, clear, re-pick", loaded: { status: "draft", date: "" }, steps: [{ date: "2026-11-20" }, { date: "" }, { date: "2026-11-21" }], expect: "scheduled" },
+  { name: "clear then restore the same date", loaded: { status: "scheduled", date: "2026-11-20" }, steps: [{ date: "" }, { date: "2026-11-20" }], expect: "scheduled" },
+  { name: "in_review keeps status through date edits", loaded: { status: "in_review", date: "" }, steps: [{ date: "2026-11-20" }, { date: "" }], expect: "in_review" },
+  { name: "no edits", loaded: { status: "draft", date: "2026-11-20" }, steps: [], expect: "draft" },
+];
+for (const seq of SEQUENCES) {
+  test(`editor->save: ${seq.name}`, () => {
+    const { shown, saved } = runEditor(seq.loaded, seq.steps);
+    assert.equal(shown, seq.expect);
+    assert.equal(saved, shown, "saved status must equal the status shown at Save");
+  });
+}
 
 // Calendar behavior: Scheduled -> Published flip and the dark day
 test("auto-publish: scheduled on or before today only", () => {
