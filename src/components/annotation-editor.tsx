@@ -270,6 +270,12 @@ export function AnnotationEditor({
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
   const restoringRef = useRef(false);
+  // Two edits the history stack can't see yet (see hasCanvasEdits): an
+  // Adjust value applied but never committed (keyboard arrows on a slider
+  // fire no mouseup/touchend), and the text an IText had when typing
+  // started -- Fabric only records a text change when editing exits.
+  const adjustmentsUncommittedRef = useRef(false);
+  const textBeforeEditRef = useRef<string | null>(null);
   // Fabric v7's canvas.dispose() is asynchronous (tears down its own DOM
   // wrapper/upper-canvas over a promise, not synchronously) -- the main
   // load effect's construction awaits whatever this is holding before
@@ -563,11 +569,23 @@ export function AnnotationEditor({
   // unsaved changes (anything since load, or an applied re-frame) are only
   // discarded after asking. Read at click time, never during render.
   const reframeUndoRef = useRef(false);
-  const guardAspectChange = useCallback((proceed: () => void) => {
-    const unsaved = historyIndexRef.current > 0 || reframeUndoRef.current;
-    if (unsaved && !confirm("Change the post's aspect ratio? This discards your unsaved changes to this image.")) return;
-    proceed();
+  // The Unsaved changes dialog (see requestClose).
+  const [confirmClose, setConfirmClose] = useState(false);
+  // Anything on the canvas a rebuild or close would lose: history since
+  // load, an applied re-frame, an uncommitted Adjust value, or text typed
+  // into a still-editing IText. Refs only, so it's safe from callbacks.
+  const hasCanvasEdits = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return false;
+    if (historyIndexRef.current > 0 || reframeUndoRef.current || adjustmentsUncommittedRef.current) return true;
+    return canvas
+      .getObjects()
+      .some((obj) => obj instanceof fabric.IText && obj.isEditing && obj.text !== textBeforeEditRef.current);
   }, []);
+  const guardAspectChange = useCallback((proceed: () => void) => {
+    if (hasCanvasEdits() && !confirm("Change the post's aspect ratio? This discards your unsaved changes to this image.")) return;
+    proceed();
+  }, [hasCanvasEdits]);
   const aspectKey = targetAspect ? (targetAspect.w / targetAspect.h).toFixed(4) : "";
   const [sessionAspectKey, setSessionAspectKey] = useState(aspectKey);
   const [session, setSession] = useState<{ active: boolean; attachmentId: string | null }>({
@@ -577,6 +595,7 @@ export function AnnotationEditor({
   if (open && (!session.active || session.attachmentId !== attachmentId)) {
     setSession({ active: true, attachmentId });
     setSessionAspectKey(aspectKey);
+    setConfirmClose(false);
     setPickedFrameUrl(null);
     setForcePicker(isVideo && !initialAnnotationJson);
     setIsRestoringSaved(false);
@@ -664,6 +683,12 @@ export function AnnotationEditor({
         selection: true,
       });
       fabricRef.current = canvas;
+      // A previous session's history must never count as this one's
+      // unsaved changes while the new canvas is still loading.
+      historyRef.current = [];
+      historyIndexRef.current = -1;
+      adjustmentsUncommittedRef.current = false;
+      textBeforeEditRef.current = null;
       setReady(false);
       setTool("select");
       setCropping(false);
@@ -958,8 +983,14 @@ export function AnnotationEditor({
     // editing was entered via the "Edit Text" button, a real double-click/
     // double-tap, or activateTool's "Add Text" branch, so all three paths
     // stay in sync with the same two-state toolbar.
-    canvas.on("text:editing:entered", () => setTextEditing(true));
-    canvas.on("text:editing:exited", () => setTextEditing(false));
+    canvas.on("text:editing:entered", (opt) => {
+      textBeforeEditRef.current = opt.target.text;
+      setTextEditing(true);
+    });
+    canvas.on("text:editing:exited", () => {
+      textBeforeEditRef.current = null;
+      setTextEditing(false);
+    });
     // Fabric fires this on every caret move/selection change while editing
     // (IText._fireSelectionChanged) -- the one place selectionStart/
     // selectionEnd for the ACTIVE range are read, since a toolbar control's
@@ -1841,9 +1872,56 @@ export function AnnotationEditor({
   // Editor's Modal closes itself on a document-level Escape, which used to
   // fire on the same key press and close both. The handler reads the
   // current state through a ref (the listener itself is attached once).
+  // Close ✕ and Escape both come through requestClose: an unchanged editor
+  // closes at once, otherwise the Unsaved changes dialog asks first. A
+  // freshly picked video cover frame counts too -- it isn't stored until
+  // Save. Ignored while saving: Save itself closes on success, and on
+  // failure the edits and the error must still be there.
+  function hasUnsavedChanges() {
+    if (isVideo && forcePicker) return false;
+    if (hasCanvasEdits()) return true;
+    return isVideo && pickedFrameUrl !== null && !isRestoringSaved;
+  }
+  function requestClose() {
+    if (saving) return;
+    if (hasUnsavedChanges()) setConfirmClose(true);
+    else onClose();
+  }
+  function handleSaveFromConfirm() {
+    setConfirmClose(false);
+    void handleSave();
+  }
+  function handleDiscardFromConfirm() {
+    setConfirmClose(false);
+    onClose();
+  }
+
+  // Reload / tab close only (not in-app navigation): the browser's own
+  // "Leave site?" prompt while anything is unsaved.
+  const hasUnsavedRef = useRef(hasUnsavedChanges);
+  useEffect(() => {
+    hasUnsavedRef.current = hasUnsavedChanges;
+  });
+  useEffect(() => {
+    if (!open) return;
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      if (!hasUnsavedRef.current()) return;
+      e.preventDefault();
+      e.returnValue = "";
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [open]);
+
   const escapeRef = useRef<() => void>(() => {});
   useEffect(() => {
     escapeRef.current = () => {
+      // The Unsaved changes dialog sits over everything else while shown,
+      // so it's the topmost layer: Escape = Continue Editing.
+      if (confirmClose) {
+        setConfirmClose(false);
+        return;
+      }
       if (reframe) {
         // Same as its Cancel button, which is disabled while applying.
         if (!reframeBusy) {
@@ -1857,7 +1935,13 @@ export function AnnotationEditor({
         if (!applyingCrop) activateTool("select");
         return;
       }
-      onClose();
+      // Typing: Escape only stops typing and keeps the text, like "Done".
+      const active = fabricRef.current?.getActiveObject();
+      if (active instanceof fabric.IText && active.isEditing) {
+        handleFinishTextEditing();
+        return;
+      }
+      requestClose();
     };
   });
   useEffect(() => {
@@ -2328,6 +2412,7 @@ export function AnnotationEditor({
   // slider/number label track the finger exactly; only the expensive
   // canvas-side work is throttled.
   function handleAdjustmentInput(key: keyof AdjustmentValues, value: number) {
+    adjustmentsUncommittedRef.current = true;
     setAdjustments((prev) => {
       const next = { ...prev, [key]: value };
       pendingAdjustmentsRef.current = next;
@@ -2350,6 +2435,7 @@ export function AnnotationEditor({
       adjustmentRafRef.current = null;
     }
     flushPendingAdjustments();
+    adjustmentsUncommittedRef.current = false;
     withCanvas((canvas) => {
       const basePhoto = findBasePhoto(canvas);
       if (basePhoto) canvas.fire("object:modified", { target: basePhoto });
@@ -2557,7 +2643,7 @@ export function AnnotationEditor({
         </div>
         <button
           type="button"
-          onClick={onClose}
+          onClick={requestClose}
           className="flex items-center gap-2 text-xs font-semibold tracking-wide uppercase transition-colors duration-150 hover:text-muted"
         >
           Close <span aria-hidden>✕</span>
@@ -2587,6 +2673,15 @@ export function AnnotationEditor({
             setReframe(null);
             setReframeError(undefined);
           }}
+        />
+      )}
+
+      {confirmClose && (
+        <UnsavedChangesDialog
+          canSave={ready && Boolean(attachmentId)}
+          onSave={handleSaveFromConfirm}
+          onDiscard={handleDiscardFromConfirm}
+          onContinue={() => setConfirmClose(false)}
         />
       )}
 
@@ -3339,6 +3434,48 @@ const reframeBlockerText = (b: ReframeBlocker, from: string, to: string): string
       "The photo itself was rotated, flipped or had its background removed. Re-framing starts from your original photo, which would undo that.",
     unreadable: `This edit's saved framing couldn't be read, so a ${to} framing can't be proposed safely.`,
   })[b];
+
+// Close ✕ / Escape with unsaved changes. Same layer as ReframeDialog; its
+// Escape is handled by the editor's capture-phase listener (= Continue).
+function UnsavedChangesDialog({
+  canSave,
+  onSave,
+  onDiscard,
+  onContinue,
+}: {
+  canSave: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  onContinue: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="unsaved-changes-title"
+      data-unsaved-changes-dialog=""
+      className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-background/95 p-4"
+    >
+      <div className="flex w-full max-w-sm flex-col items-center gap-4 text-center">
+        <h2 id="unsaved-changes-title" className="text-sm font-semibold tracking-wide uppercase">
+          Unsaved changes
+        </h2>
+        <p className="text-sm text-muted">Save your changes to this image before closing?</p>
+        <div className="flex w-full flex-col gap-2 sm:flex-row sm:justify-center">
+          <Button type="button" variant="primary" radius="full" onClick={onSave} disabled={!canSave}>
+            Save
+          </Button>
+          <Button type="button" variant="secondary" radius="full" onClick={onDiscard}>
+            Discard
+          </Button>
+          <Button type="button" variant="secondary" radius="full" onClick={onContinue} autoFocus>
+            Continue Editing
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Re-frame to 4:5's confirmation: the proposed framing over the ORIGINAL
 // photo, adjustable before anything changes -- or, when re-framing would
