@@ -262,11 +262,12 @@ export function BriefBoard({
     });
   }
 
+  // Updates only -- the editor stays open after Save Changes and closes
+  // itself (onClose) after the Unsaved changes dialog's Save.
   function handleAnnotationSaved(previewUrl: string) {
     const target = editingImage;
     if (target?.source === "attachment") {
       setPreviewOverrides((current) => ({ ...current, [target.attachmentId]: previewUrl }));
-      setEditingImage(null);
       return;
     }
     // "Generate Design" (source: "asset") edits a freshly-created media_asset
@@ -274,8 +275,7 @@ export function BriefBoard({
     // reasoning above, nothing on THIS page ever displays this asset (it
     // only surfaces later on Grid, which saveMediaAssetAnnotation already
     // revalidates independently), so refreshing Brief's own route here
-    // achieved nothing and was pure waste.
-    setEditingImage(null);
+    // achieved nothing and was pure waste -- nothing to update.
   }
 
   return (

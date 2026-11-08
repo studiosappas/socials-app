@@ -117,6 +117,10 @@ export type PostAssetItem = {
 export type PostLinkItem = { id: string; url: string; label: string };
 
 type EditingImage = {
+  // The carousel row being edited -- unlike mediaAssetId, it stays the same
+  // when a Save copies shared media, so repeated saves in one open editor
+  // keep finding their row (see handleAnnotationSaved).
+  postAssetId: string;
   mediaAssetId: string;
   imageUrl: string;
   annotationJson: object | null;
@@ -487,7 +491,7 @@ export function PostEditor({
     const target = editingImage;
     setOrderedAssets((current) =>
       current.map((asset) =>
-        asset.mediaAssetId === target?.mediaAssetId
+        asset.postAssetId === target?.postAssetId
           ? {
               ...asset,
               ...(target.mediaType === "video" ? { posterUrl: previewUrl, coverEdited: true } : { url: previewUrl }),
@@ -518,7 +522,10 @@ export function PostEditor({
         setOverrideCoverTransform(null);
       }
     }
-    setEditingImage(null);
+    // The editor stays open after Save Changes, and closes itself (onClose)
+    // after the Unsaved changes dialog's Save. editingImage is left as it
+    // opened: changing its mediaAssetId or annotationJson would remount or
+    // reload the canvas -- the editor tracks both for itself.
   }
 
   if (assets !== prevAssets) {
@@ -748,6 +755,7 @@ export function PostEditor({
                     asset.mediaAssetId &&
                     asset.originalUrl &&
                     setEditingImage({
+                      postAssetId: asset.postAssetId,
                       mediaAssetId: asset.mediaAssetId,
                       imageUrl: asset.originalUrl,
                       annotationJson: asset.annotationJson,

@@ -54,6 +54,8 @@ import {
 
 const INK = "#171412"; // matches --foreground
 const CROP_MAX_ZOOM = 4;
+// savedIndexRef's "no history position matches the saved state".
+const NEVER_SAVED = -2;
 // The crop overlay is now always mounted (see its own render-site comment)
 // even before cropSourceUrl exists -- a real, valid src is still required,
 // and an empty string one triggers a React/browser warning about
@@ -276,6 +278,11 @@ export function AnnotationEditor({
   // started -- Fabric only records a text change when editing exits.
   const adjustmentsUncommittedRef = useRef(false);
   const textBeforeEditRef = useRef<string | null>(null);
+  // The history position that matches what's saved: the loaded state (0),
+  // then wherever the last successful Save snapshotted. -1 while a canvas
+  // is loading (history is -1 too); NEVER_SAVED once that entry has been
+  // cut from the history (Undo past it, then a new edit).
+  const savedIndexRef = useRef(-1);
   // Fabric v7's canvas.dispose() is asynchronous (tears down its own DOM
   // wrapper/upper-canvas over a promise, not synchronously) -- the main
   // load effect's construction awaits whatever this is holding before
@@ -314,6 +321,14 @@ export function AnnotationEditor({
   const [tool, setTool] = useState<Tool>("select");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>();
+  // The brief "Saved" line under Save Changes after a save that stays open.
+  const [savedNotice, setSavedNotice] = useState(false);
+  const savedNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (savedNoticeTimerRef.current) clearTimeout(savedNoticeTimerRef.current);
+    };
+  }, []);
   const { showUploadError } = useToast();
   const [ready, setReady] = useState(false);
   const [brushColor, setBrushColor] = useState(INK);
@@ -447,7 +462,7 @@ export function AnnotationEditor({
     | { blockers: ReframeBlocker[]; sourceUrl: string; zoom: number; offset: { x: number; y: number } }
     | null
   >(null);
-  const [reframeUndo, setReframeUndo] = useState<{ json: string; width: number; height: number; exportScale: number } | null>(null);
+  const [reframeUndo, setReframeUndo] = useState<{ json: string; width: number; height: number; exportScale: number; wasSaved: boolean } | null>(null);
   useEffect(() => {
     reframeUndoRef.current = reframeUndo !== null;
   }, [reframeUndo]);
@@ -577,7 +592,7 @@ export function AnnotationEditor({
   const hasCanvasEdits = useCallback(() => {
     const canvas = fabricRef.current;
     if (!canvas) return false;
-    if (historyIndexRef.current > 0 || reframeUndoRef.current || adjustmentsUncommittedRef.current) return true;
+    if (historyIndexRef.current !== savedIndexRef.current || reframeUndoRef.current || adjustmentsUncommittedRef.current) return true;
     return canvas
       .getObjects()
       .some((obj) => obj instanceof fabric.IText && obj.isEditing && obj.text !== textBeforeEditRef.current);
@@ -588,14 +603,37 @@ export function AnnotationEditor({
   }, [hasCanvasEdits]);
   const aspectKey = targetAspect ? (targetAspect.w / targetAspect.h).toFixed(4) : "";
   const [sessionAspectKey, setSessionAspectKey] = useState(aspectKey);
-  const [session, setSession] = useState<{ active: boolean; attachmentId: string | null }>({
+  // saveTargetId: where Save writes -- attachmentId, until a Save returns
+  // the id of a copy it made (shared media), which every later Save in this
+  // session must target instead. savedAnnotation: this session's last Save,
+  // restored by a rebuild (ratio change) instead of initialAnnotationJson,
+  // which is still what the editor opened with. Kept here, not in the
+  // parent's props, so neither one remounts or reloads the canvas.
+  const [session, setSession] = useState<{
+    active: boolean;
+    attachmentId: string | null;
+    saveTargetId: string | null;
+    savedAnnotation: object | null;
+  }>({
     active: false,
     attachmentId: null,
+    saveTargetId: null,
+    savedAnnotation: null,
   });
+  // Read by the load effect without being one of its dependencies (a Save
+  // must never reload the canvas). A layout effect, so it's current before
+  // that (passive) effect runs in the same commit.
+  const savedAnnotationRef = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    savedAnnotationRef.current = session.savedAnnotation;
+  }, [session.savedAnnotation]);
+  // A picked video cover frame that no Save has stored yet.
+  const [framePickUnsaved, setFramePickUnsaved] = useState(false);
   if (open && (!session.active || session.attachmentId !== attachmentId)) {
-    setSession({ active: true, attachmentId });
+    setSession({ active: true, attachmentId, saveTargetId: attachmentId, savedAnnotation: null });
     setSessionAspectKey(aspectKey);
     setConfirmClose(false);
+    setFramePickUnsaved(false);
     setPickedFrameUrl(null);
     setForcePicker(isVideo && !initialAnnotationJson);
     setIsRestoringSaved(false);
@@ -610,7 +648,7 @@ export function AnnotationEditor({
     // Bookkeeping only (no picker/canvas resets) -- marks the session as
     // over so a later reopen of the SAME attachmentId is still detected as
     // a fresh session (attachmentId alone wouldn't have changed).
-    setSession({ active: false, attachmentId: null });
+    setSession({ active: false, attachmentId: null, saveTargetId: null, savedAnnotation: null });
   }
 
   // Reopening a video that already has a saved annotation skips the picker
@@ -661,7 +699,9 @@ export function AnnotationEditor({
     // the initialAnnotationJson PROP is still truthy) means "treat this as
     // a fresh edit," which is exactly the case right after re-picking a
     // frame via "Choose a Different Frame."
-    const restoreAnnotation = shouldRestoreAnnotation ? initialAnnotationJson : null;
+    // A Save earlier in this session wins: a ratio rebuild must restore what
+    // was just saved, not the state the editor opened with.
+    const restoreAnnotation = savedAnnotationRef.current ?? (shouldRestoreAnnotation ? initialAnnotationJson : null);
 
     let disposed = false;
     let canvas: fabric.Canvas | null = null;
@@ -687,6 +727,7 @@ export function AnnotationEditor({
       // unsaved changes while the new canvas is still loading.
       historyRef.current = [];
       historyIndexRef.current = -1;
+      savedIndexRef.current = -1;
       adjustmentsUncommittedRef.current = false;
       textBeforeEditRef.current = null;
       setReady(false);
@@ -781,6 +822,7 @@ export function AnnotationEditor({
         canvas.requestRenderAll();
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
+        savedIndexRef.current = 0;
         setAdjustments(basePhoto ? readAdjustments(basePhoto.filters) : NEUTRAL_ADJUSTMENTS);
         setReady(true);
       }
@@ -881,6 +923,8 @@ export function AnnotationEditor({
     function pushHistory() {
       if (restoringRef.current) return;
       const json = JSON.stringify(canvas.toJSON());
+      // Undo went back past the saved state and this edit cuts it off.
+      if (savedIndexRef.current > historyIndexRef.current) savedIndexRef.current = NEVER_SAVED;
       historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
       historyRef.current.push(json);
       historyIndexRef.current = historyRef.current.length - 1;
@@ -1481,6 +1525,8 @@ export function AnnotationEditor({
         width: canvas.getWidth(),
         height: canvas.getHeight(),
         exportScale: exportScaleRef.current,
+        // Whether "Undo re-frame" lands back on the saved state.
+        wasSaved: historyIndexRef.current === savedIndexRef.current,
       };
       try {
         const el = basePhoto.getElement() as HTMLImageElement;
@@ -1522,6 +1568,8 @@ export function AnnotationEditor({
         // re-frame" is the way back.
         historyRef.current = [JSON.stringify(canvas.toJSON())];
         historyIndexRef.current = 0;
+        // Unsaved via reframeUndo until a Save clears it (see handleSave).
+        savedIndexRef.current = NEVER_SAVED;
         setReframeUndo(before);
         setReframe(null);
         remeasureCanvasBox(canvas);
@@ -1558,6 +1606,7 @@ export function AnnotationEditor({
         canvas.requestRenderAll();
         historyRef.current = [snapshot.json];
         historyIndexRef.current = 0;
+        savedIndexRef.current = snapshot.wasSaved ? 0 : NEVER_SAVED;
         setReframeUndo(null);
         remeasureCanvasBox(canvas);
       } finally {
@@ -1880,16 +1929,17 @@ export function AnnotationEditor({
   function hasUnsavedChanges() {
     if (isVideo && forcePicker) return false;
     if (hasCanvasEdits()) return true;
-    return isVideo && pickedFrameUrl !== null && !isRestoringSaved;
+    return isVideo && framePickUnsaved;
   }
   function requestClose() {
     if (saving) return;
     if (hasUnsavedChanges()) setConfirmClose(true);
     else onClose();
   }
+  // The dialog's Save closes once saved; the main Save Changes stays open.
   function handleSaveFromConfirm() {
     setConfirmClose(false);
-    void handleSave();
+    void handleSave({ close: true });
   }
   function handleDiscardFromConfirm() {
     setConfirmClose(false);
@@ -2459,7 +2509,10 @@ export function AnnotationEditor({
     commitAdjustments();
   }
 
-  async function handleSave() {
+  // Saves and stays open (Save Changes), or saves and closes (the Unsaved
+  // changes dialog's Save) -- either way only on success; a failed save
+  // keeps the editor, the edits and the error.
+  async function handleSave({ close = false }: { close?: boolean } = {}) {
     const canvas = fabricRef.current;
     if (!canvas || !attachmentId) return;
     // The user should not have to manually tap "Done editing" before
@@ -2484,6 +2537,7 @@ export function AnnotationEditor({
     }
     setSaving(true);
     setSaveError(undefined);
+    setSavedNotice(false);
     try {
       // Establishes "the editor is idle" before snapshotting -- see
       // pendingEditRef's own declaration. An Adjust slider release already
@@ -2499,11 +2553,17 @@ export function AnnotationEditor({
       // pendingEditRef -- if either is still in flight, awaiting it here
       // means Save always snapshots the SETTLED result of the user's most
       // recent edit, never a canvas mid-mutation.
-      if (adjustmentRafRef.current !== null) {
-        cancelAnimationFrame(adjustmentRafRef.current);
-        adjustmentRafRef.current = null;
+      // An uncommitted Adjust value is committed (not just applied), so it's
+      // in the history the saved baseline below points at.
+      if (adjustmentsUncommittedRef.current) {
+        commitAdjustments();
+      } else {
+        if (adjustmentRafRef.current !== null) {
+          cancelAnimationFrame(adjustmentRafRef.current);
+          adjustmentRafRef.current = null;
+        }
+        flushPendingAdjustments();
       }
-      flushPendingAdjustments();
       await pendingEditRef.current;
       // The wait above can take a while on a slow rotate/crop. If the
       // editor closed (or reopened into a fresh instance) during that
@@ -2511,6 +2571,14 @@ export function AnnotationEditor({
       // no dialog left for a save result to mean anything to, so stop
       // rather than snapshot/export a canvas that's no longer live.
       if (fabricRef.current !== canvas) return;
+      // What this Save snapshots (exportAndSaveAnnotation serializes the
+      // canvas synchronously, before its first await). The canvas stays
+      // editable while the save is in flight, so the baseline is this
+      // position -- never wherever history happens to be when it finishes.
+      const snapshotIndex = historyIndexRef.current;
+      const snapshotEntry = historyRef.current[snapshotIndex];
+      const snapshotReframed = reframeUndoRef.current;
+      const snapshotFramePick = framePickUnsaved;
       // The actual export+persist tail is shared verbatim with Grid's
       // headless Paste Style engine -- see annotation-engine.ts's own
       // comment on why this is "the minimum reusable non-UI logic" rather
@@ -2519,12 +2587,34 @@ export function AnnotationEditor({
         canvas,
         exportScale: exportScaleRef.current,
         projectId,
-        attachmentId,
+        attachmentId: session.saveTargetId ?? attachmentId,
         postId,
         saveAction,
       });
       if ("previewUrl" in result) {
+        if (fabricRef.current === canvas) {
+          // Still there unless Undo-then-edit cut it off mid-save.
+          savedIndexRef.current = historyRef.current[snapshotIndex] === snapshotEntry ? snapshotIndex : NEVER_SAVED;
+          if (snapshotReframed) {
+            setReframeUndo(null);
+            setLegacyFrame(false);
+          }
+          if (snapshotFramePick) setFramePickUnsaved(false);
+        }
+        const savedTo = result.mediaAssetId;
+        setSession((s) => ({
+          ...s,
+          saveTargetId: savedTo ?? s.saveTargetId,
+          savedAnnotation: result.annotationJson,
+        }));
         onSaved(result.previewUrl, result.mediaAssetId, { annotationJson: result.annotationJson, coverFramingKept: result.coverFramingKept });
+        if (close) {
+          onClose();
+        } else {
+          setSavedNotice(true);
+          if (savedNoticeTimerRef.current) clearTimeout(savedNoticeTimerRef.current);
+          savedNoticeTimerRef.current = setTimeout(() => setSavedNotice(false), 2500);
+        }
       } else {
         // Previously silent -- a failed save (e.g. a pending migration
         // meaning the target column doesn't exist yet) looked identical to
@@ -2696,6 +2786,9 @@ export function AnnotationEditor({
               // after "Choose a Different Frame" on a video that already had
               // a saved annotation (isRestoringSaved's own comment).
               setIsRestoringSaved(false);
+              // ...including over an edit saved earlier this session.
+              setSession((s) => ({ ...s, savedAnnotation: null }));
+              setFramePickUnsaved(true);
               setCanvasNonce((n) => n + 1);
             });
           }}
@@ -3238,13 +3331,16 @@ export function AnnotationEditor({
           type="button"
           variant="primary"
           radius="full"
-          onClick={handleSave}
+          onClick={() => void handleSave()}
           disabled={saving || !ready || !attachmentId}
           className="w-64"
         >
           {saving ? "Saving…" : "Save Changes"}
         </Button>
         {saveError && <p className="text-xs text-error">{saveError}</p>}
+        <p role="status" className="min-h-4 text-xs text-muted" data-saved-notice="">
+          {savedNotice && !saveError ? "Saved" : ""}
+        </p>
       </div>
         </>
       )}
