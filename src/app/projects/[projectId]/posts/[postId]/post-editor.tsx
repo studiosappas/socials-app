@@ -91,6 +91,7 @@ import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/da
 import { canSubmitClientReview } from "@/lib/role-permissions";
 import { submitClientPostReview } from "@/lib/actions/posts";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
+import { settleLibraryPick } from "@/lib/library-pick";
 
 export type PostAssetItem = {
   postAssetId: string;
@@ -113,6 +114,11 @@ export type PostAssetItem = {
   // the save callback doesn't return the new annotation_json. Download
   // Media uses it to include that cover (see videoCoverDownloadSource).
   coverEdited?: boolean;
+  // Local-only: an Add/Replace from Library is still in flight, so
+  // mediaAssetId is the picked id, not yet the one the row ends up on (a
+  // clone when the pick was already edited). Edit Image stays closed until
+  // it settles -- see settleLibraryPick.
+  mediaPending?: boolean;
 };
 export type PostLinkItem = { id: string; url: string; label: string };
 
@@ -394,13 +400,14 @@ export function PostEditor({
       annotationJson: null,
       mediaType: item.mediaType as "image" | "video",
       posterUrl: null,
+      mediaPending: true,
     };
     setOrderedAssets((current) => [...current, optimisticAsset]);
     startTransition(async () => {
       const result = await addPostAsset(projectId, post.id, item.id);
       if (result.success) {
         setOrderedAssets((current) =>
-          current.map((a) => (a.postAssetId === tempId ? { ...a, postAssetId: result.postAssetId } : a)),
+          settleLibraryPick(current, tempId, { postAssetId: result.postAssetId, mediaAssetId: result.mediaAssetId }),
         );
       } else {
         setOrderedAssets((current) => current.filter((a) => a.postAssetId !== tempId));
@@ -445,6 +452,7 @@ export function PostEditor({
               mediaType: item.mediaType as "image" | "video",
               posterUrl: null,
               coverEdited: undefined,
+              mediaPending: true,
             }
           : a,
       ),
@@ -459,6 +467,10 @@ export function PostEditor({
         if (isCover) setOverrideCoverTransform(undefined);
         showError(result.message);
         router.refresh();
+      } else {
+        setOrderedAssets((current) =>
+          settleLibraryPick(current, postAssetId, { mediaAssetId: result?.mediaAssetId ?? item.id }),
+        );
       }
     });
   }
@@ -752,6 +764,7 @@ export function PostEditor({
                   onPreview={enableMediaViewer ? () => openViewer(asset.postAssetId) : undefined}
                   reportCoverTransform={index === 0 ? reportCoverTransform : undefined}
                   onEditImage={() =>
+                    !asset.mediaPending &&
                     asset.mediaAssetId &&
                     asset.originalUrl &&
                     setEditingImage({
@@ -1668,11 +1681,12 @@ function SortableAsset({
             >
               <button
                 type="button"
+                disabled={asset.mediaPending}
                 onClick={() => {
                   setMenuOpen(false);
                   onEditImage();
                 }}
-                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05]"
+                className="w-full rounded px-2 py-1 text-left text-xs transition-colors duration-150 hover:bg-black/[.05] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
               >
                 {asset.mediaType === "video" ? "Edit Cover" : "Edit Image"}
               </button>

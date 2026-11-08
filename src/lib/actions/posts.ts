@@ -21,6 +21,7 @@ import {
 import { syncPostType } from "@/lib/post-type";
 import { resolveSubmittedStatus } from "@/lib/schedule-status";
 import { generateServerThumbnail } from "@/lib/server-thumbnail";
+import { resolveCleanAssetId } from "@/lib/library-pick";
 import type { MediaLibraryItem } from "@/app/projects/[projectId]/grid/grid-board";
 import type { LibraryPage } from "@/lib/media-library-paging";
 import type { MediaType, PostStatus, PostType, ReviewStatus } from "@/types/database";
@@ -261,41 +262,23 @@ export async function submitClientPostReview(
   return { success: true };
 }
 
-// LIBRARY ASSET = clean reusable source; POST/GRID USAGE = independently
-// editable instance -- see cloneMediaAssetForDivergence's own comment in
-// media.ts. Shared by addPostAsset and replacePostAsset's library-pick
-// branch below: picking an already-edited Library asset into a post always
-// gives that post a clean instance, never silently inherits whatever
-// Text/Adjustments some OTHER post already saved onto that exact row. A
-// never-edited asset (the overwhelming common case) has no annotation_json
-// yet, so this is a single cheap read and no clone.
-// FAIL CLOSED, not open -- see cloneMediaAssetForDivergence's own comment
-// in media.ts for the confirmed root cause (an RLS rejection whenever the
-// acting user differs from the asset's original uploader) that a silent
-// "clone failed, fall back to the dirty/shared asset id" used to mask.
-async function resolveCleanAssetId(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  mediaAssetId: string,
-): Promise<{ assetId: string } | { error: string }> {
-  const { data: asset } = await supabase
-    .from("media_assets")
-    .select("annotation_json")
-    .eq("id", mediaAssetId)
-    .maybeSingle();
-  if (!asset?.annotation_json) return { assetId: mediaAssetId };
-  const cloneId = await cloneMediaAssetForDivergence(supabase, mediaAssetId);
-  if (!cloneId) return { error: "Couldn't add this asset independently. Please try again." };
-  return { assetId: cloneId };
+// Shared by addPostAsset and replacePostAsset's library-pick branch below --
+// see resolveCleanAssetId's own comment (lib/library-pick.ts). Both return
+// the id the post_assets row ends up on (mediaAssetId): a clone whenever
+// the picked asset was already edited, which the Post Editor must use for
+// Edit Image instead of the id it picked.
+function cleanAssetIdFor(supabase: Awaited<ReturnType<typeof createClient>>, mediaAssetId: string) {
+  return resolveCleanAssetId(supabase, mediaAssetId, (id) => cloneMediaAssetForDivergence(supabase, id));
 }
 
 export async function addPostAsset(
   projectId: string,
   postId: string,
   mediaAssetId: string,
-): Promise<{ success: true; postAssetId: string } | { success: false; message: string }> {
+): Promise<{ success: true; postAssetId: string; mediaAssetId: string } | { success: false; message: string }> {
   const supabase = await createClient();
 
-  const resolved = await resolveCleanAssetId(supabase, mediaAssetId);
+  const resolved = await cleanAssetIdFor(supabase, mediaAssetId);
   if ("error" in resolved) {
     return { success: false, message: resolved.error };
   }
@@ -325,7 +308,7 @@ export async function addPostAsset(
   // real postAssetId returned here. /grid is a genuinely different route,
   // kept as-is (a new asset can change the post's cover/thumbnail there).
   revalidatePath(`/projects/${projectId}/grid`);
-  return { success: true, postAssetId: data.id };
+  return { success: true, postAssetId: data.id, mediaAssetId: assetIdToUse };
 }
 
 export type UploadPostAssetState = { message?: string; success?: boolean } | undefined;
@@ -431,7 +414,7 @@ export async function removePostAsset(
   return { success: true };
 }
 
-export type ReplacePostAssetState = { message?: string; success?: boolean } | undefined;
+export type ReplacePostAssetState = { message?: string; success?: boolean; mediaAssetId?: string } | undefined;
 
 // Swaps an existing post_asset's media in place -- unlike delete-then-add,
 // `position` (carousel order) never changes. `formData` carries either a
@@ -459,7 +442,7 @@ export async function replacePostAsset(
   let newMediaAssetId: string;
 
   if (existingMediaAssetId) {
-    const resolved = await resolveCleanAssetId(supabase, existingMediaAssetId);
+    const resolved = await cleanAssetIdFor(supabase, existingMediaAssetId);
     if ("error" in resolved) return { message: resolved.error };
     newMediaAssetId = resolved.assetId;
   } else if (typeof newStoragePathValue === "string" && newStoragePathValue) {
@@ -529,7 +512,7 @@ export async function replacePostAsset(
   // router.refresh() itself right after this resolves. /grid is a
   // genuinely different route, kept as-is.
   revalidatePath(`/projects/${projectId}/grid`);
-  return { success: true };
+  return { success: true, mediaAssetId: newMediaAssetId };
 }
 
 export async function reorderPostAssets(
