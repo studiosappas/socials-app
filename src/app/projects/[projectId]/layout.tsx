@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
@@ -87,7 +88,12 @@ export default async function ProjectLayout({
         </div>
       </header>
       <div className="mx-auto w-full max-w-6xl flex-1 p-4 sm:p-6">{children}</div>
-      {modal}
+      {/* Closing the Post/Story popup after a Save (router.back()) refetches
+          this slot's empty state -- the Save's revalidation cleared Next's
+          back/forward cache. Without a boundary here that wait bubbles up to
+          projects/loading.tsx and hides the whole page; with it, the popup
+          just disappears and the Grid stays visible. */}
+      <Suspense fallback={null}>{modal}</Suspense>
     </div>
   );
 }
