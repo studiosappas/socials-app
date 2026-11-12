@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { pickerTiles, rememberShown, usedLibraryIds, type PickerTile } from "./library-picker-tiles.ts";
-import { settleLibraryPick } from "./library-pick.ts";
+import { mergeServerSlides, settleLibraryPick } from "./library-pick.ts";
 
 type Item = { id: string; mediaType: "image" | "video" };
 type Slide = { postAssetId: string; mediaAssetId: string; mediaType: "image" | "video"; mediaPending?: boolean; libraryItemId?: string };
@@ -41,9 +41,12 @@ const EDITED = new Set(["0cab4173"]);
 // `legacy` renders with the OLD rule (drop every used item) as a control.
 function editor(slides: Slide[], library: Item[], legacy = false) {
   let assets = slides.map((s) => ({ ...s }));
+  // what the database holds (post_assets rows), separately from the editor
+  let serverRows: Slide[] = slides.map(({ postAssetId, mediaAssetId, mediaType }) => ({ postAssetId, mediaAssetId, mediaType }));
   let items = [...library];
   let shownHere = new Set<string>();
-  const pending: { tempId: string; item: Item; fail: boolean }[] = [];
+  const pending: { tempId: string; item: Item; fail: boolean; committed: boolean }[] = [];
+  const savedIdOf = (item: Item) => (EDITED.has(item.id) ? `${item.id}-copy` : item.id); // addPostAsset's copy-on-write
   let n = 0;
 
   function render(): PickerTile<Item>[] {
@@ -73,25 +76,41 @@ function editor(slides: Slide[], library: Item[], legacy = false) {
       const tempId = `temp-${item.id}-${++n}`;
       // handleAddFromLibrary's optimistic slide
       assets = [...assets, { postAssetId: tempId, mediaAssetId: item.id, mediaType: item.mediaType, mediaPending: true, libraryItemId: item.id }];
-      pending.push({ tempId, item, fail: Boolean(opts.fail) });
+      pending.push({ tempId, item, fail: Boolean(opts.fail), committed: false });
       return item;
+    },
+    // The OLDEST queued action has written its row, but its response
+    // hasn't reached the client yet (a refresh can land in this gap).
+    commitNext() {
+      const p = pending.find((x) => !x.committed && !x.fail);
+      if (!p) return;
+      p.committed = true;
+      serverRows = [...serverRows, { postAssetId: `pa-${p.item.id}`, mediaAssetId: savedIdOf(p.item), mediaType: p.item.mediaType }];
     },
     // The OLDEST queued server action resolves (they run one at a time).
     settleNext() {
       const p = pending.shift();
       if (!p) return;
       if (p.fail) {
-        assets = assets.filter((a) => a.postAssetId !== p.tempId);
+        assets = assets.filter((a) => a.postAssetId !== p.tempId); // handleAddFromLibrary's failure path
         return;
       }
-      const savedId = EDITED.has(p.item.id) ? `${p.item.id}-copy` : p.item.id; // addPostAsset's copy-on-write
-      assets = settleLibraryPick(assets, p.tempId, { postAssetId: `pa-${p.item.id}`, mediaAssetId: savedId });
+      if (!p.committed) serverRows = [...serverRows, { postAssetId: `pa-${p.item.id}`, mediaAssetId: savedIdOf(p.item), mediaType: p.item.mediaType }];
+      assets = settleLibraryPick(assets, p.tempId, { postAssetId: `pa-${p.item.id}`, mediaAssetId: savedIdOf(p.item) });
     },
     removeSlide(mediaAssetId: string) {
       assets = assets.filter((a) => a.mediaAssetId !== mediaAssetId);
+      serverRows = serverRows.filter((a) => a.mediaAssetId !== mediaAssetId);
     },
     replaceSlide(postAssetId: string, item: Item) {
       assets = assets.map((a) => (a.postAssetId === postAssetId ? { ...a, mediaAssetId: item.id, mediaType: item.mediaType, mediaPending: true, libraryItemId: item.id } : a));
+    },
+    // The server's slides arrive (refresh / revalidation): the database rows
+    // as stored, no libraryItemId -- merged like the Post Editor does
+    // (mergeServerSlides), or replaced wholesale (`carry: false`, the old way).
+    serverRefresh(opts: { carry?: boolean } = {}) {
+      const incoming = serverRows.map((r) => ({ ...r }));
+      assets = opts.carry === false ? incoming : mergeServerSlides(assets, incoming);
     },
     appendPage(page: Item[]) {
       items = [...items, ...page.filter((p) => !items.some((i) => i.id === p.id))];
@@ -225,6 +244,89 @@ const SLIDE1: Slide = { postAssetId: "pa-slide1", mediaAssetId: "30e70e2e", medi
   ed.removeSlide("852675b1");
   assert.equal(ed.render()[replCell].item.id, "852675b1");
   assert.equal(ed.render()[replCell].added, false);
+}
+
+// 9. Server refresh after the reproduced sequence (seen in Preview QA): the
+//    edited image's original must stay "Added" in its cell, nothing moves,
+//    and it can't be added a second time. Control: the old wholesale
+//    replacement made it clickable again (no shift, but a duplicate copy).
+{
+  for (const carry of [false, true]) {
+    const ed = editor([SLIDE1], LIBRARY);
+    for (const id of ["0cab4173", "53a972fd", "f5ef5b5e", "edf23926"]) ed.clickCell(ed.cellOf(id));
+    while (ed.assets.some((a) => a.mediaPending)) ed.settleNext();
+    const before = ed.render().map((t) => [t.item.id, t.added]);
+    const cell = ed.cellOf("0cab4173");
+    ed.serverRefresh({ carry });
+    const after = ed.render();
+    assert.deepEqual(after.map((t) => t.item.id), before.map(([id]) => id), "no tile moved on refresh");
+    if (!carry) {
+      assert.equal(after[cell].added, false, "control: old refresh made the original clickable again");
+      continue;
+    }
+    assert.deepEqual(after.map((t) => [t.item.id, t.added]), before, "every tile keeps its Added state");
+    assert.equal(after[cell].added, true, "original still Added after refresh");
+    assert.equal(ed.clickCell(cell), null, "and can't be added twice");
+    assert.equal(ed.assets.length, 5);
+    // ...and a slide removed afterwards still frees its tile, in place
+    ed.removeSlide("0cab4173-copy");
+    ed.serverRefresh();
+    assert.equal(ed.render()[cell].item.id, "0cab4173");
+    assert.equal(ed.render()[cell].added, false);
+  }
+}
+
+// 10. A server refresh arriving MID-QUEUE. The edited image has settled onto
+//     its copy; the video after it is saved in the database but its
+//     response hasn't arrived; two more picks (plus one that will fail) are
+//     still queued. Every pick must end up exactly once, with its own type,
+//     no slide id duplicated, no tile moved, and nothing pending clickable.
+//     Control: the old wholesale replacement drops the pending picks and
+//     frees their tiles.
+{
+  const order = ["0cab4173", "53a972fd", "f5ef5b5e", "edf23926"];
+  for (const carry of [false, true]) {
+    const ed = editor([SLIDE1], LIBRARY);
+    for (const id of order) ed.clickCell(ed.cellOf(id));
+    const failCell = ed.cellOf("2e45fdf2");
+    ed.clickCell(failCell, { fail: true });
+    ed.settleNext(); // 0cab4173 -> copy, settled
+    ed.commitNext(); // 53a972fd saved, response still in flight
+    const before = ed.render().map((t) => [t.item.id, t.added]);
+    ed.serverRefresh({ carry });
+    const after = ed.render();
+    assert.deepEqual(after.map((t) => t.item.id), before.map(([id]) => id), "no tile moved on the mid-queue refresh");
+
+    if (!carry) {
+      // control: pending picks gone from the strip, their tiles clickable again
+      assert.ok(!ed.assets.some((a) => a.libraryItemId === "f5ef5b5e"), "control: pending Add dropped");
+      assert.equal(after[ed.cellOf("edf23926")].added, false, "control: pending pick's tile freed");
+      continue;
+    }
+
+    assert.deepEqual(after.map((t) => [t.item.id, t.added]), before, "every tile keeps its Added state");
+    for (const id of [...order, "2e45fdf2"]) assert.equal(after[ed.cellOf(id)].added, true, `${id} still not clickable`);
+    for (const id of [...order, "2e45fdf2"]) assert.equal(ed.clickCell(ed.cellOf(id)), null, `${id} can't be added again`);
+    const ids = ed.assets.map((a) => a.postAssetId);
+    assert.equal(new Set(ids).size, ids.length, "no duplicate slide ids after the refresh");
+
+    // the rest of the queue lands: 53a972fd (already listed by the refresh),
+    // f5ef5b5e, edf23926, then the failure
+    while (ed.assets.some((a) => a.mediaPending)) ed.settleNext();
+    const finalIds = ed.assets.map((a) => a.postAssetId);
+    assert.equal(new Set(finalIds).size, finalIds.length, "no duplicate slide ids after settling");
+    assert.deepEqual(
+      ed.assets.map((a) => [a.mediaAssetId, a.mediaType]),
+      [["30e70e2e", "video"], ["0cab4173-copy", "image"], ["53a972fd", "video"], ["f5ef5b5e", "image"], ["edf23926", "video"]],
+      "every pick exactly once, in click order, with its own type; the failed pick removed",
+    );
+    assert.equal(ed.render()[failCell].item.id, "2e45fdf2");
+    assert.equal(ed.render()[failCell].added, false, "the failed pick's tile is clickable again, in place");
+    // a final refresh changes nothing
+    ed.serverRefresh();
+    assert.deepEqual(ed.render().map((t) => [t.item.id, t.added]), before.map(([id, added]) => [id, id === "2e45fdf2" ? false : added]));
+    assert.equal(ed.assets.find((a) => a.mediaAssetId === "0cab4173-copy")?.libraryItemId, "0cab4173");
+  }
 }
 
 // 8. rememberShown returns the SAME set when nothing is new (the component

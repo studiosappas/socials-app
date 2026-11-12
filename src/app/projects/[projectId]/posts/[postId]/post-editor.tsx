@@ -91,7 +91,7 @@ import type { PostStatus, PostType, ProjectRole, ReviewStatus } from "@/types/da
 import { canSubmitClientReview } from "@/lib/role-permissions";
 import { submitClientPostReview } from "@/lib/actions/posts";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
-import { settleLibraryPick } from "@/lib/library-pick";
+import { mergeServerSlides, settleLibraryPick } from "@/lib/library-pick";
 import { pickerTiles, rememberShown, usedLibraryIds } from "@/lib/library-picker-tiles";
 
 export type PostAssetItem = {
@@ -550,7 +550,10 @@ export function PostEditor({
 
   if (assets !== prevAssets) {
     setPrevAssets(assets);
-    setOrderedAssets(assets);
+    // Functional update: merged into the LATEST list, so picks still in
+    // flight (and any queued in the same tick) survive the refresh, and each
+    // unchanged slide keeps its Library origin -- see mergeServerSlides.
+    setOrderedAssets((current) => mergeServerSlides(current, assets));
   }
 
   // Touch devices: reordering starts locked so a horizontal swipe scrolls

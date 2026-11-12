@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { resolveCleanAssetId, settleLibraryPick } from "./library-pick.ts";
+import { carryLibraryItemIds, mergeServerSlides, resolveCleanAssetId, settleLibraryPick } from "./library-pick.ts";
 import { isolatePostUsageForEdit } from "./post-usage-isolation.ts";
 
 type Usage = { id: string; post_id: string; media_asset_id: string; position: number };
@@ -210,6 +210,125 @@ await test("wiring: both actions return the resolved id, and the Post Editor set
   assert.equal(editor.match(/mediaPending: true,/g)?.length, 2, "both optimistic picks start pending");
   assert.match(editor, /onEditImage=\{\(\) =>\s+!asset\.mediaPending &&/);
   assert.match(editor, /disabled=\{asset\.mediaPending\}/);
+});
+
+// carryLibraryItemIds -- a server refresh must not drop a settled slide's
+// Library origin (otherwise a copy-on-write original turns clickable again).
+type Slide = { postAssetId: string; mediaAssetId: string; mediaPending?: boolean; libraryItemId?: string; url?: string };
+// What the server sends: the rows as stored, never a libraryItemId.
+const fromServer = (rows: [string, string][]): Slide[] =>
+  rows.map(([postAssetId, mediaAssetId]) => ({ postAssetId, mediaAssetId, url: `signed-${mediaAssetId}` }));
+
+await test("refresh keeps an edited-image copy's Library origin", () => {
+  const current: Slide[] = [
+    { postAssetId: "pa1", mediaAssetId: "slide1" },
+    { postAssetId: "pa2", mediaAssetId: "0cab-copy", libraryItemId: "0cab", mediaPending: false },
+  ];
+  const next = carryLibraryItemIds(current, fromServer([["pa1", "slide1"], ["pa2", "0cab-copy"]]));
+  assert.equal(next[1].libraryItemId, "0cab", "origin carried onto the fresh row");
+  assert.equal(next[1].url, "signed-0cab-copy", "everything else comes from the server");
+  assert.equal(next[0].libraryItemId, undefined);
+});
+
+await test("refresh does not carry the origin of a removed slide", () => {
+  const current: Slide[] = [{ postAssetId: "pa2", mediaAssetId: "0cab-copy", libraryItemId: "0cab" }];
+  const incoming = fromServer([["pa1", "slide1"]]);
+  const next = carryLibraryItemIds(current, incoming);
+  assert.equal(next, incoming, "nothing carried, same array back");
+  assert.ok(next.every((a) => !a.libraryItemId));
+});
+
+await test("refresh does not carry the origin of a replaced slide", () => {
+  // the same row now points at different media
+  const current: Slide[] = [{ postAssetId: "pa2", mediaAssetId: "0cab-copy", libraryItemId: "0cab" }];
+  const next = carryLibraryItemIds(current, fromServer([["pa2", "other-media"]]));
+  assert.equal(next[0].libraryItemId, undefined);
+});
+
+await test("refresh does not carry the origin of a still-pending pick", () => {
+  const current: Slide[] = [{ postAssetId: "pa2", mediaAssetId: "0cab", libraryItemId: "0cab", mediaPending: true }];
+  const next = carryLibraryItemIds(current, fromServer([["pa2", "0cab"]]));
+  assert.equal(next[0].libraryItemId, undefined, "only settled slides carry it");
+});
+
+await test("unchanged slides keep their identity, and an incoming origin is never overwritten", () => {
+  const current: Slide[] = [
+    { postAssetId: "pa1", mediaAssetId: "slide1" },
+    { postAssetId: "pa3", mediaAssetId: "vid", libraryItemId: "vid" },
+  ];
+  const incoming = fromServer([["pa1", "slide1"], ["pa3", "vid"]]);
+  const next = carryLibraryItemIds(current, incoming);
+  assert.equal(next[0], incoming[0], "a slide with nothing to carry keeps its identity");
+  assert.equal(next[1].libraryItemId, "vid");
+  const own: Slide[] = [{ postAssetId: "pa3", mediaAssetId: "vid", libraryItemId: "already" }];
+  assert.equal(carryLibraryItemIds(current, own)[0].libraryItemId, "already");
+  const none = fromServer([["pa1", "slide1"]]);
+  assert.equal(carryLibraryItemIds([], none), none, "no origins at all: same array back");
+});
+
+// mergeServerSlides -- a refresh can land while picks are still in flight.
+const pendingAdd = (item: string, n = 1): Slide => ({ postAssetId: `temp-${item}-${n}`, mediaAssetId: item, libraryItemId: item, mediaPending: true });
+
+await test("refresh keeps a pending Add the server doesn't list yet, at the end", () => {
+  const current: Slide[] = [{ postAssetId: "pa1", mediaAssetId: "slide1" }, pendingAdd("vid")];
+  const next = mergeServerSlides(current, fromServer([["pa1", "slide1"]]));
+  assert.deepEqual(next.map((a) => a.postAssetId), ["pa1", "temp-vid-1"]);
+  assert.equal(next[1], current[1], "the optimistic slide itself, untouched");
+});
+
+await test("refresh keeps a pending Replace's optimistic media over the server's old row", () => {
+  const current: Slide[] = [{ postAssetId: "pa2", mediaAssetId: "new-pick", libraryItemId: "new-pick", mediaPending: true, url: "optimistic" }];
+  const next = mergeServerSlides(current, fromServer([["pa2", "old-media"]]));
+  assert.equal(next[0], current[0]);
+  // ...and its own settle then completes it in place
+  const settled = settleLibraryPick(next, "pa2", { mediaAssetId: "new-pick" });
+  assert.deepEqual(settled, [{ postAssetId: "pa2", mediaAssetId: "new-pick", libraryItemId: "new-pick", mediaPending: false, url: "optimistic" }]);
+});
+
+await test("refresh that already lists the saved row, then the add settles: exactly one slide, no duplicate ids", () => {
+  const current: Slide[] = [{ postAssetId: "pa1", mediaAssetId: "slide1" }, pendingAdd("0cab")];
+  // the server saved the pick as a COPY before the client heard back
+  const refreshed = mergeServerSlides(current, fromServer([["pa1", "slide1"], ["pa-0cab", "0cab-copy"]]));
+  assert.deepEqual(refreshed.map((a) => a.postAssetId), ["pa1", "pa-0cab", "temp-0cab-1"], "temp kept until its response");
+  const settled = settleLibraryPick(refreshed, "temp-0cab-1", { postAssetId: "pa-0cab", mediaAssetId: "0cab-copy" });
+  assert.deepEqual(settled.map((a) => a.postAssetId), ["pa1", "pa-0cab"]);
+  assert.equal(new Set(settled.map((a) => a.postAssetId)).size, settled.length, "no duplicate postAssetIds");
+  assert.equal(settled[1].libraryItemId, "0cab", "the saved row takes over the Library origin");
+  assert.equal(settled[1].url, "signed-0cab-copy", "and keeps the server's data");
+});
+
+await test("a failed pick after a refresh still removes its temp slide", () => {
+  const current: Slide[] = [{ postAssetId: "pa1", mediaAssetId: "slide1" }, pendingAdd("vid")];
+  const refreshed = mergeServerSlides(current, fromServer([["pa1", "slide1"]]));
+  const failed = refreshed.filter((a) => a.postAssetId !== "temp-vid-1"); // handleAddFromLibrary's failure path
+  assert.deepEqual(failed.map((a) => a.postAssetId), ["pa1"]);
+});
+
+await test("merge: settled slides follow carryLibraryItemIds (kept / removed / replaced)", () => {
+  const current: Slide[] = [
+    { postAssetId: "keep", mediaAssetId: "k-copy", libraryItemId: "k" },
+    { postAssetId: "gone", mediaAssetId: "g", libraryItemId: "g" },
+    { postAssetId: "swap", mediaAssetId: "s", libraryItemId: "s" },
+  ];
+  const next = mergeServerSlides(current, fromServer([["keep", "k-copy"], ["swap", "other"]]));
+  assert.deepEqual(next.map((a) => [a.postAssetId, a.mediaAssetId, a.libraryItemId]), [
+    ["keep", "k-copy", "k"],
+    ["swap", "other", undefined],
+  ]);
+});
+
+await test("settleLibraryPick without a refresh in between is unchanged (rename in place)", () => {
+  const current: Slide[] = [{ postAssetId: "pa1", mediaAssetId: "slide1" }, pendingAdd("vid")];
+  const next = settleLibraryPick(current, "temp-vid-1", { postAssetId: "pa-vid", mediaAssetId: "vid" });
+  assert.deepEqual(next[1], { postAssetId: "pa-vid", mediaAssetId: "vid", libraryItemId: "vid", mediaPending: false });
+  assert.equal(next[0], current[0]);
+});
+
+await test("wiring: the Post Editor merges server slides with a functional update", () => {
+  const editor = fs.readFileSync(new URL("../app/projects/[projectId]/posts/[postId]/post-editor.tsx", import.meta.url), "utf8");
+  assert.match(editor, /if \(assets !== prevAssets\) \{\s+setPrevAssets\(assets\);[\s\S]{0,400}?setOrderedAssets\(\(current\) => mergeServerSlides\(current, assets\)\);/);
+  assert.doesNotMatch(editor, /setOrderedAssets\(assets\);/, "no bare replacement left");
+  assert.doesNotMatch(editor, /carryLibraryItemIds\(orderedAssets/, "no snapshot-based merge left");
 });
 
 console.log(`\n${passed} passed`);
