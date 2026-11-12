@@ -44,6 +44,7 @@
     "src/lib/post-export-plan.test.ts",
     "src/lib/project-list-filter.test.ts",
     "src/lib/media-library-paging.test.ts",
+    "src/lib/library-picker-tiles.test.ts",
     "src/lib/post-usage-isolation.test.ts",
     "src/lib/post-type.test.ts",
     "src/lib/annotation-frame.test.ts",

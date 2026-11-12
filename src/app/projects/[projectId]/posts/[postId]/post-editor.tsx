@@ -92,6 +92,7 @@ import { canSubmitClientReview } from "@/lib/role-permissions";
 import { submitClientPostReview } from "@/lib/actions/posts";
 import type { ProjectMemberOption } from "@/lib/data/post-comments";
 import { settleLibraryPick } from "@/lib/library-pick";
+import { pickerTiles, rememberShown, usedLibraryIds } from "@/lib/library-picker-tiles";
 
 export type PostAssetItem = {
   postAssetId: string;
@@ -119,6 +120,11 @@ export type PostAssetItem = {
   // clone when the pick was already edited). Edit Image stays closed until
   // it settles -- see settleLibraryPick.
   mediaPending?: boolean;
+  // Local-only: the Library item this slide was picked from in this
+  // session. Differs from mediaAssetId once a copy-on-write pick settles
+  // onto its copy -- the picker still counts the original as used, so it
+  // can't be picked twice (see usedLibraryIds).
+  libraryItemId?: string;
 };
 export type PostLinkItem = { id: string; url: string; label: string };
 
@@ -401,6 +407,7 @@ export function PostEditor({
       mediaType: item.mediaType as "image" | "video",
       posterUrl: null,
       mediaPending: true,
+      libraryItemId: item.id,
     };
     setOrderedAssets((current) => [...current, optimisticAsset]);
     startTransition(async () => {
@@ -453,6 +460,7 @@ export function PostEditor({
               posterUrl: null,
               coverEdited: undefined,
               mediaPending: true,
+              libraryItemId: item.id,
             }
           : a,
       ),
@@ -593,7 +601,7 @@ export function PostEditor({
 
   const activeAsset = orderedAssets.find((a) => a.postAssetId === activeAssetId) ?? null;
 
-  const usedMediaIds = new Set(orderedAssets.map((a) => a.mediaAssetId));
+  const usedMediaIds = usedLibraryIds(orderedAssets);
 
   // Which whole-post download is in flight, if any -- one at a time.
   const [downloading, setDownloading] = useState<"edited" | null>(null);
@@ -986,7 +994,15 @@ function AddFromLibrarySection({
   const [loadFailed, setLoadFailed] = useState(false);
   const mediaLibrary = library.entries.map((e) => e.item);
   const hasMoreMedia = library.hasMore;
-  const availableMedia = mediaLibrary.filter((m) => !usedMediaIds.has(m.id));
+  // Tiles keep their place once shown -- a used tile stays put as "Added"
+  // instead of dropping out, so an async settle (a copy-on-write pick
+  // switching ids, a failed pick reverting) can never shift the grid under
+  // the pointer. See lib/library-picker-tiles.ts.
+  const [shownHere, setShownHere] = useState<Set<string>>(() => new Set());
+  const tiles = pickerTiles(mediaLibrary, usedMediaIds, shownHere);
+  const nextShown = rememberShown(shownHere, tiles);
+  if (nextShown !== shownHere) setShownHere(nextShown);
+  const availableCount = tiles.filter((t) => !t.added).length;
 
   // Read by loadMore (called from an IntersectionObserver callback, which
   // would otherwise close over a stale page state) -- synced after every
@@ -1148,7 +1164,7 @@ function AddFromLibrarySection({
   // Only hides when there's truly nothing left to ever show -- this page's
   // own items all being already-used (rare, but possible with a small
   // first page) must NOT also hide the one button that could load more.
-  if (availableMedia.length === 0 && !hasMoreMedia) return null;
+  if (availableCount === 0 && !hasMoreMedia) return null;
 
   return (
     <section
@@ -1189,15 +1205,20 @@ function AddFromLibrarySection({
         }`}
         style={desktopTileRowH !== null ? { ["--tile-row-h" as string]: `${desktopTileRowH}px` } : undefined}
       >
-        {availableMedia.map((item, index) => (
+        {tiles.map(({ item, added }, index) => (
           <button
             key={item.id}
             // The last tile is the infinite-scroll trigger (see the
             // IntersectionObserver effect above).
-            ref={index === availableMedia.length - 1 ? setLastTile : undefined}
+            ref={index === tiles.length - 1 ? setLastTile : undefined}
             type="button"
-            onClick={() => onAdd(item)}
-            className="relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 active:opacity-70"
+            // An "Added" tile holds its place but can't be picked again.
+            disabled={added}
+            aria-label={added ? "Added" : undefined}
+            onClick={added ? undefined : () => onAdd(item)}
+            className={`relative min-w-0 overflow-hidden rounded-none border border-border transition-opacity duration-150 ${
+              added ? "cursor-default opacity-40" : "active:opacity-70"
+            }`}
           >
             {/* Lazy + async decode: only the tiles actually scrolled into
                 this container's view are fetched/decoded, so a mobile
@@ -1245,6 +1266,11 @@ function AddFromLibrarySection({
                 className="pointer-events-none absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white"
               >
                 <CarouselUsageIcon className="h-2.5 w-2.5" />
+              </span>
+            )}
+            {added && (
+              <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/70 py-0.5 text-center text-[10px] font-medium text-white">
+                Added
               </span>
             )}
           </button>
