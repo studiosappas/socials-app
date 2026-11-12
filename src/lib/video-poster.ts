@@ -15,6 +15,7 @@ import {
   type UploadFailure,
   type UploadProblem,
 } from "@/lib/upload-validation";
+import { captureBestFrame, classifyFrame, posterSeekTimes, type FrameSource } from "@/lib/video-frame-capture";
 
 // What the browser made of a video:
 //   "decoded"      -- a frame was captured (the poster).
@@ -112,7 +113,27 @@ export function captureVideoFrameAsDataUrl(url: string, seekTime: number): Promi
 // MediaError codes that are a verdict on the file itself, not on loading it.
 const MEDIA_ERR_DECODE = 3;
 const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+// HTMLMediaElement.readyState: the current frame is decoded and drawable.
+const HAVE_CURRENT_DATA = 2;
+// Some real files never fire "seeked" -- carry on after this anyway.
+const SEEK_GRACE_MS = 1200;
+// How long to wait for a decoded frame after a seek, and for one during the
+// muted-play fallback. Bounded by the overall timeout either way.
+const FRAME_WAIT_MS = 600;
+const PLAY_WAIT_MS = 1500;
+// The captured frame is classified from a downscaled copy this size.
+const SAMPLE_SIZE = 32;
 
+type FrameCallbackVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (callback: () => void) => number;
+};
+
+// Decodes `src` off-screen and captures a poster frame. A frame is only
+// drawn once it is actually decoded (requestVideoFrameCallback where
+// supported, otherwise readyState), and a canvas that comes out empty or
+// uniformly black is never returned as a poster -- other moments are tried
+// first, and if none yields a real picture the result is "undetermined"
+// (no poster; the video itself still uploads). See video-frame-capture.ts.
 function decodeVideoSrc(
   src: string,
   cleanupSrc: () => void,
@@ -120,7 +141,7 @@ function decodeVideoSrc(
 ): Promise<VideoDecodeResult> {
   const { seekTime, timeoutMs = 8000 } = options;
   return new Promise((resolve) => {
-    const video = document.createElement("video");
+    const video: FrameCallbackVideo = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
@@ -128,7 +149,7 @@ function decodeVideoSrc(
     video.src = src;
 
     let settled = false;
-    let captureStarted = false;
+    let started = false;
     function cleanup() {
       video.removeAttribute("src");
       video.load();
@@ -141,72 +162,155 @@ function decodeVideoSrc(
       cleanup();
       resolve(result);
     }
-    function finish(blob: Blob | null) {
-      settle(blob ? { status: "decoded", poster: blob } : { status: "undetermined" });
-    }
-    // Guarded separately from `settled` -- "seeked" and the grace timer
-    // below can both fire in quick succession (e.g. a fast seek right
-    // before the timer elapses), and without this a single successful
-    // capture could still be attempted twice.
-    function capture() {
-      if (captureStarted || settled) return;
-      captureStarted = true;
-      // Metadata loaded but no picture at all: the browser read the
-      // container and can't decode its video (or there is none).
-      if (video.videoWidth === 0 && video.videoHeight === 0) {
-        settle({ status: "unsupported" });
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 640;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        finish(null);
-        return;
-      }
-      try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob((blob) => finish(blob), "image/jpeg", 0.85);
-      } catch {
-        // A tainted canvas (crossOrigin rejected by the storage host) throws
-        // on drawImage/toBlob rather than erroring earlier -- fail closed.
-        finish(null);
-      }
-    }
 
     // Absolute fail-closed ceiling for files whose metadata never loads at
-    // all (the "error" listener below never fires for these either) --
-    // hangs the upload/regenerate no longer than this rather than forever.
-    // A timeout is "undetermined", never "unsupported".
-    const hardTimeout = setTimeout(() => finish(null), timeoutMs);
+    // all (the "error" listener below never fires for these either), and
+    // for the whole capture below -- hangs the upload/regenerate no longer
+    // than this rather than forever. A timeout is "undetermined", never
+    // "unsupported".
+    const hardTimeout = setTimeout(() => settle({ status: "undetermined" }), timeoutMs);
 
     video.addEventListener("error", () => {
       const code = video.error?.code;
-      if (code === MEDIA_ERR_DECODE || code === MEDIA_ERR_SRC_NOT_SUPPORTED) settle({ status: "unsupported" });
-      else finish(null);
+      settle(code === MEDIA_ERR_DECODE || code === MEDIA_ERR_SRC_NOT_SUPPORTED ? { status: "unsupported" } : { status: "undetermined" });
     });
+
+    // Set by requestVideoFrameCallback when a frame has been presented
+    // since the latest seek / play (registered BEFORE seeking, so a paused
+    // video's single post-seek frame isn't missed).
+    const hasFrameCallback = typeof video.requestVideoFrameCallback === "function";
+    let frameArrived = false;
+    // Each seek's callback carries its own generation, so a late callback
+    // from an EARLIER seek can't mark this one's frame as ready.
+    let frameGeneration = 0;
+    function listenForFrame() {
+      frameArrived = false;
+      const generation = ++frameGeneration;
+      video.requestVideoFrameCallback?.(() => {
+        if (generation === frameGeneration) frameArrived = true;
+      });
+    }
+
+    let canvas: HTMLCanvasElement | null = null;
+    let ctx: CanvasRenderingContext2D | null = null;
+    let sampleCtx: CanvasRenderingContext2D | null = null;
+    let seeks = 0;
+
+    const source: FrameSource = {
+      cancelled: () => settled,
+      seek: (time) =>
+        new Promise((done) => {
+          listenForFrame();
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(grace);
+            video.removeEventListener("seeked", finish);
+            // Metadata loaded but no picture at all: the browser read the
+            // container and can't decode its video (or there is none).
+            if (seeks++ === 0 && video.videoWidth === 0 && video.videoHeight === 0) settle({ status: "unsupported" });
+            done();
+          };
+          video.addEventListener("seeked", finish);
+          const grace = setTimeout(finish, SEEK_GRACE_MS);
+          try {
+            video.currentTime = time;
+          } catch {
+            // Some browsers throw if seeking isn't ready yet -- the grace
+            // timer still moves on.
+          }
+        }),
+      waitForFrame: (ms) =>
+        new Promise((done) => {
+          const start = Date.now();
+          const tick = () => {
+            if (settled) return done(false);
+            if (frameArrived) return done(true);
+            // Without frame callbacks, readyState is the only signal.
+            if (!hasFrameCallback && video.readyState >= HAVE_CURRENT_DATA) return done(true);
+            // With them, a callback can still never come for an off-screen
+            // paused video -- fall back to readyState once the wait is over.
+            if (Date.now() - start >= ms) return done(video.readyState >= HAVE_CURRENT_DATA);
+            setTimeout(tick, 50);
+          };
+          tick();
+        }),
+      nudgePlay: (ms) =>
+        new Promise((done) => {
+          let finished = false;
+          const finish = (ok: boolean) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            video.removeEventListener("timeupdate", onTime);
+            try {
+              video.pause();
+            } catch {
+              // nothing to undo
+            }
+            done(ok && !settled);
+          };
+          const onTime = () => {
+            if (!hasFrameCallback && video.readyState >= HAVE_CURRENT_DATA) finish(true);
+          };
+          video.requestVideoFrameCallback?.(() => finish(video.readyState >= HAVE_CURRENT_DATA));
+          video.addEventListener("timeupdate", onTime);
+          const timer = setTimeout(() => finish(false), ms);
+          try {
+            // Muted, so autoplay rules allow it without a user gesture.
+            void video.play()?.catch(() => finish(false));
+          } catch {
+            finish(false);
+          }
+        }),
+      draw: () => {
+        if (!canvas || !ctx || !sampleCtx) return null;
+        try {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          sampleCtx.clearRect(0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+          sampleCtx.drawImage(canvas, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+          return classifyFrame(sampleCtx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data);
+        } catch {
+          // A tainted canvas (crossOrigin rejected by the storage host)
+          // throws here rather than erroring earlier -- fail closed.
+          return null;
+        }
+      },
+    };
 
     video.addEventListener("loadedmetadata", () => {
-      // A hair past 0 -- frame 0 of many encodes is a solid black/blank
-      // frame before the real first keyframe. Best-effort only: a handful
-      // of real-world files (some phone-recorded .mov/.webm) never fire
-      // "seeked" at all no matter how long you wait, which used to mean the
-      // whole capture silently failed 8s later even though the video had
-      // loaded fine. The grace timer below is the actual fix -- if the seek
-      // hasn't resolved shortly after metadata loads, it captures whatever
-      // frame is already on screen instead of holding out for a cosmetic
-      // frame-0 fix that may never come.
-      try {
-        video.currentTime = seekTime ?? Math.min(0.1, (video.duration || 1) / 2);
-      } catch {
-        // Some browsers throw synchronously if seeking isn't ready yet --
-        // the grace timer below still captures a frame regardless.
-      }
-      setTimeout(capture, 1200);
-    });
+      if (started || settled) return;
+      started = true;
+      canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 640;
+      ctx = canvas.getContext("2d");
+      const sample = document.createElement("canvas");
+      sample.width = SAMPLE_SIZE;
+      sample.height = SAMPLE_SIZE;
+      sampleCtx = sample.getContext("2d", { willReadFrequently: true });
 
-    video.addEventListener("seeked", capture);
+      const times = posterSeekTimes(video.duration, seekTime);
+      void captureBestFrame(source, times, {
+        frameWaitMs: FRAME_WAIT_MS,
+        playWaitMs: PLAY_WAIT_MS,
+        // Only a moment the caller chose keeps a black frame.
+        acceptBlack: seekTime !== undefined,
+      }).then((outcome) => {
+        if (settled) return;
+        if ((outcome.result !== "ok" && outcome.result !== "black-accepted") || !canvas) {
+          settle({ status: "undetermined" });
+          return;
+        }
+        try {
+          canvas.toBlob((blob) => settle(blob ? { status: "decoded", poster: blob } : { status: "undetermined" }), "image/jpeg", 0.85);
+        } catch {
+          settle({ status: "undetermined" });
+        }
+      });
+    });
   });
 }
 

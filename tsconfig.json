@@ -48,6 +48,7 @@
     "src/lib/post-usage-isolation.test.ts",
     "src/lib/post-type.test.ts",
     "src/lib/annotation-frame.test.ts",
+    "src/lib/video-frame-capture.test.ts",
     "src/lib/media-aspect.test.ts",
     "src/lib/cover-framing.test.ts",
     "src/lib/client-pdf-layout.test.ts",
